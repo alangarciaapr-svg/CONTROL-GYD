@@ -1,10 +1,11 @@
-# Gestión de Faenas – MVP (Streamlit) v3
+# Gestión de Faenas – MVP (sin checklist)
 
-Incluye:
-- Subir contrato (por mandante/contrato)
-- Subir anexo (por faena)
-- Agregar trabajadores por faena (multi-selección)
-- Checklist y documentos (faena/trabajador)
-- Export ZIP con contrato+anexo+documentos
+Versión simplificada:
+- Mandantes
+- Contratos (subir archivo contrato)
+- Faenas (subir anexo por faena)
+- Trabajadores + asignación masiva por faena
+- Documentos libres por categoría (FAENA/TRABAJADOR)
+- Export ZIP por faena (incluye contrato/anexo/docs)
 
 Main file: `streamlit_app.py`
