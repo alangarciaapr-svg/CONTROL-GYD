@@ -16,11 +16,11 @@ st.set_page_config(page_title="Gestión de Faenas – MVP", layout="wide")
 
 APP_NAME = "Gestión de Faenas – MVP"
 DB_PATH = "app.db"
-UPLOAD_ROOT = "uploads"  # AVISO: el filesystem en Streamlit Cloud no es storage duradero a largo plazo.
+UPLOAD_ROOT = "uploads"  # AVISO: Streamlit Cloud FS no es storage duradero a largo plazo.
 
 ESTADOS_FAENA = ["PLANIFICADA", "ACTIVA", "TERMINADA"]
 ESTADOS_DOC = ["PENDIENTE", "SUBIDO", "APROBADO", "RECHAZADO", "VENCIDO"]
-SCOPES = ["FAENA", "TRABAJADOR"]
+SCOPES = ["FAENA", "TRABAJADOR"]  # motor de checklist / docs requeridos
 
 # ----------------------------
 # Helpers
@@ -44,6 +44,8 @@ def conn():
 def init_db():
     with conn() as c:
         c.execute("PRAGMA foreign_keys = ON;")
+
+        # Core
         c.execute('''
         CREATE TABLE IF NOT EXISTS mandantes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +82,7 @@ def init_db():
             FOREIGN KEY(doc_type_id) REFERENCES doc_types(id) ON DELETE RESTRICT
         );
         ''')
+
         c.execute('''
         CREATE TABLE IF NOT EXISTS contratos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +107,7 @@ def init_db():
             FOREIGN KEY(contrato_id) REFERENCES contratos(id) ON DELETE RESTRICT
         );
         ''')
+
         c.execute('''
         CREATE TABLE IF NOT EXISTS trabajadores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +131,8 @@ def init_db():
             FOREIGN KEY(trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
         );
         ''')
+
+        # Motor de documentos (para checklist)
         c.execute('''
         CREATE TABLE IF NOT EXISTS documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,17 +149,46 @@ def init_db():
             FOREIGN KEY(doc_type_id) REFERENCES doc_types(id) ON DELETE RESTRICT
         );
         ''')
+
+        # Archivos contractuales (NO dependen del motor de checklist)
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS contrato_archivos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(contrato_id) REFERENCES contratos(id) ON DELETE CASCADE
+        );
+        ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS faena_archivos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faena_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
+        );
+        ''')
+
         c.commit()
 
 def fetch_df(q: str, params=()):
-    # pd.read_sql_query preserves column names even when there are 0 rows,
-    # which avoids KeyError when filtering empty DataFrames.
+    # Mantiene columnas aunque devuelva 0 filas (evita KeyError)
     with conn() as c:
         return pd.read_sql_query(q, c, params=params)
 
 def execute(q: str, params=()):
     with conn() as c:
         c.execute(q, params)
+        c.commit()
+
+def executemany(q: str, seq_params):
+    with conn() as c:
+        c.executemany(q, seq_params)
         c.commit()
 
 def parse_date(s):
@@ -178,7 +213,7 @@ def is_doc_ok(row) -> bool:
 
 def get_checklist_items_for_faena(faena_id: int):
     faena = fetch_df('''
-        SELECT f.*, c.checklist_id
+        SELECT f.id, c.checklist_id
         FROM faenas f
         JOIN contratos c ON c.id = f.contrato_id
         WHERE f.id = ?
@@ -186,7 +221,7 @@ def get_checklist_items_for_faena(faena_id: int):
     if faena.empty:
         return pd.DataFrame()
     checklist_id = faena.iloc[0]["checklist_id"]
-    if not checklist_id:
+    if pd.isna(checklist_id) or checklist_id is None:
         return pd.DataFrame()
     return fetch_df('''
         SELECT ci.*, dt.nombre AS doc_nombre, dt.scope AS doc_scope
@@ -194,7 +229,7 @@ def get_checklist_items_for_faena(faena_id: int):
         JOIN doc_types dt ON dt.id = ci.doc_type_id
         WHERE ci.checklist_id = ?
         ORDER BY dt.scope, dt.nombre
-    ''', (checklist_id,))
+    ''', (int(checklist_id),))
 
 def compute_pendientes(faena_id: int):
     items = get_checklist_items_for_faena(faena_id)
@@ -255,9 +290,9 @@ def compute_pendientes(faena_id: int):
 
     return pendientes
 
-def save_uploaded_file(scope: str, owner_id: int, doc_type_id: int, file_name: str, file_bytes: bytes):
+def save_file(folder_parts, file_name: str, file_bytes: bytes):
     ensure_dirs()
-    folder = os.path.join(UPLOAD_ROOT, scope.lower(), str(owner_id), str(doc_type_id))
+    folder = os.path.join(UPLOAD_ROOT, *[str(x) for x in folder_parts])
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, file_name)
     with open(path, "wb") as f:
@@ -266,7 +301,7 @@ def save_uploaded_file(scope: str, owner_id: int, doc_type_id: int, file_name: s
 
 def export_zip_for_faena(faena_id: int):
     faena = fetch_df('''
-        SELECT f.*, c.nombre AS contrato_nombre, m.nombre AS mandante_nombre
+        SELECT f.*, c.nombre AS contrato_nombre, c.id AS contrato_id, m.nombre AS mandante_nombre
         FROM faenas f
         JOIN contratos c ON c.id = f.contrato_id
         JOIN mandantes m ON m.id = c.mandante_id
@@ -275,6 +310,7 @@ def export_zip_for_faena(faena_id: int):
     if faena.empty:
         raise ValueError("Faena no encontrada.")
     f = faena.iloc[0]
+    contrato_id = int(f["contrato_id"])
 
     pend = compute_pendientes(faena_id)
 
@@ -303,13 +339,32 @@ def export_zip_for_faena(faena_id: int):
     z = zipfile.ZipFile(buff, "w", zipfile.ZIP_DEFLATED)
     z.writestr("99_Index_Checklist.txt", "\n".join(idx_lines))
 
+    # 00_Contrato_y_Anexos
+    cfiles = fetch_df("SELECT * FROM contrato_archivos WHERE contrato_id=? ORDER BY id", (contrato_id,))
+    for _, r in cfiles.iterrows():
+        src = r["file_path"]
+        if src and os.path.exists(src):
+            fname = os.path.basename(src)
+            arc = f"00_Contrato_y_Anexos/Contrato/{fname}"
+            with open(src, "rb") as fsrc:
+                z.writestr(arc, fsrc.read())
+
+    afiles = fetch_df("SELECT * FROM faena_archivos WHERE faena_id=? ORDER BY id", (faena_id,))
+    for _, r in afiles.iterrows():
+        src = r["file_path"]
+        if src and os.path.exists(src):
+            fname = os.path.basename(src)
+            arc = f"00_Contrato_y_Anexos/Anexo_Faena/{fname}"
+            with open(src, "rb") as fsrc:
+                z.writestr(arc, fsrc.read())
+
+    # 01_Documentos_Faena (checklist scope FAENA)
     docs_faena = fetch_df('''
         SELECT d.*, dt.nombre AS doc_nombre
         FROM documentos d
         JOIN doc_types dt ON dt.id = d.doc_type_id
         WHERE d.scope='FAENA' AND d.owner_id=?
     ''', (faena_id,))
-
     for _, d in docs_faena.iterrows():
         if not d.get("file_path"):
             continue
@@ -322,6 +377,7 @@ def export_zip_for_faena(faena_id: int):
         with open(src, "rb") as fsrc:
             z.writestr(arc, fsrc.read())
 
+    # 02_Trabajadores
     asign = fetch_df('''
         SELECT a.*, t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
         FROM asignaciones a
@@ -329,7 +385,6 @@ def export_zip_for_faena(faena_id: int):
         WHERE a.faena_id=?
         ORDER BY t.apellidos, t.nombres
     ''', (faena_id,))
-
     for _, a in asign.iterrows():
         t_id = int(a["trabajador_id"])
         t_folder = f"{safe_name(a['apellidos'])}_{safe_name(a['nombres'])}_{safe_name(a['rut'])}"
@@ -373,7 +428,7 @@ with st.sidebar:
         ["Dashboard", "Mandantes", "Checklists", "Tipos de documento", "Contratos", "Faenas", "Trabajadores", "Asignaciones", "Documentos", "Export (ZIP)"],
         index=0,
     )
-    st.caption("MVP: faena → trabajadores → documentos → pendientes → ZIP.")
+    st.caption("MVP: contrato/anexo → faena → trabajadores → documentos → pendientes → ZIP.")
 
 # ----------------------------
 # Pages
@@ -468,6 +523,7 @@ def page_checklists():
         ORDER BY m.nombre, c.nombre
     ''')
     dt = fetch_df("SELECT * FROM doc_types ORDER BY scope, nombre")
+
     if chk.empty:
         st.info("Crea un checklist.")
         return
@@ -511,7 +567,7 @@ def page_checklists():
     st.dataframe(items, use_container_width=True)
 
 def page_doc_types():
-    st.subheader("Tipos de documento")
+    st.subheader("Tipos de documento (motor de checklist)")
     with st.expander("Crear tipo de documento", expanded=True):
         nombre = st.text_input("Nombre", placeholder="Inducción mandante")
         scope = st.selectbox("Scope", SCOPES)
@@ -527,7 +583,7 @@ def page_doc_types():
     st.dataframe(df, use_container_width=True)
 
 def page_contratos():
-    st.subheader("Contratos")
+    st.subheader("Contratos (por mandante) + subir contrato")
     mand = fetch_df("SELECT * FROM mandantes ORDER BY nombre")
     chk = fetch_df('''
         SELECT c.id, c.nombre, m.nombre AS mandante
@@ -547,29 +603,18 @@ def page_contratos():
         nombre = st.text_input("Nombre contrato", placeholder="Contrato marco 2026")
 
         mandante_nombre = mand[mand["id"]==mandante_id].iloc[0]["nombre"]
-        chk_mandante = chk[chk["mandante"] == mandante_nombre] if (not chk.empty and "mandante" in chk.columns) else chk
-
-        checklist_opts = [None] + (
-            chk_mandante["id"].tolist()
-            if (chk_mandante is not None and (not chk_mandante.empty) and "id" in chk_mandante.columns)
-            else []
-        )
+        chk_mandante = chk[chk["mandante"] == mandante_nombre] if not chk.empty else chk
+        checklist_opts = [None] + (chk_mandante["id"].tolist() if not chk_mandante.empty else [])
 
         def _fmt_checklist(x):
             if x is None:
                 return "(sin checklist)"
-            if chk is None or chk.empty or "id" not in chk.columns:
-                return str(x)
-            row = chk[chk["id"] == x]
+            row = chk[chk["id"] == x] if not chk.empty else pd.DataFrame()
             if row.empty:
                 return str(x)
             return f"{int(x)} - {row.iloc[0]['nombre']}"
 
-        checklist_id = st.selectbox(
-            "Checklist (opcional)",
-            checklist_opts,
-            format_func=_fmt_checklist,
-        )
+        checklist_id = st.selectbox("Checklist (opcional)", checklist_opts, format_func=_fmt_checklist)
         fi = st.date_input("Fecha inicio (opcional)", value=None)
         ft = st.date_input("Fecha término (opcional)", value=None)
 
@@ -591,8 +636,43 @@ def page_contratos():
     ''')
     st.dataframe(df, use_container_width=True)
 
+    st.divider()
+    st.subheader("Subir archivo de contrato (PDF/Word/etc.)")
+    if df.empty:
+        st.info("Crea un contrato primero.")
+        return
+
+    contrato_id = st.selectbox(
+        "Contrato",
+        df["id"].tolist(),
+        format_func=lambda x: f"{x} - {df[df['id']==x].iloc[0]['mandante']} / {df[df['id']==x].iloc[0]['nombre']}",
+    )
+    archivo = st.file_uploader("Archivo contrato", key="up_contrato")
+
+    if st.button("Guardar archivo de contrato", disabled=archivo is None):
+        file_bytes = archivo.getvalue()
+        file_name = archivo.name
+        file_path = save_file(["contratos", contrato_id], file_name, file_bytes)
+        h = sha256_bytes(file_bytes)
+        execute(
+            "INSERT INTO contrato_archivos(contrato_id, nombre, file_path, sha256, created_at) VALUES(?,?,?,?,?)",
+            (int(contrato_id), file_name, file_path, h, datetime.utcnow().isoformat(timespec="seconds")),
+        )
+        st.success("Archivo de contrato guardado.")
+        st.rerun()
+
+    st.caption("Archivos cargados para este contrato")
+    cfiles = fetch_df(
+        "SELECT id, nombre, created_at, file_path FROM contrato_archivos WHERE contrato_id=? ORDER BY id DESC",
+        (int(contrato_id),),
+    )
+    if cfiles.empty:
+        st.write("(sin archivos)")
+    else:
+        st.dataframe(cfiles[["id", "nombre", "created_at"]], use_container_width=True)
+
 def page_faenas():
-    st.subheader("Faenas")
+    st.subheader("Faenas (por contrato) + anexo + agregar trabajadores")
     contratos = fetch_df('''
         SELECT c.id, c.nombre, m.nombre AS mandante
         FROM contratos c JOIN mandantes m ON m.id=c.mandante_id
@@ -632,13 +712,80 @@ def page_faenas():
     st.divider()
     df = fetch_df('''
         SELECT f.id, f.nombre, f.estado, f.fecha_inicio, f.fecha_termino, f.ubicacion,
-               c.nombre AS contrato, m.nombre AS mandante
+               c.nombre AS contrato, m.nombre AS mandante, f.contrato_id
         FROM faenas f
         JOIN contratos c ON c.id=f.contrato_id
         JOIN mandantes m ON m.id=c.mandante_id
         ORDER BY f.id DESC
     ''')
     st.dataframe(df, use_container_width=True)
+
+    if df.empty:
+        return
+
+    st.divider()
+    st.subheader("Subir anexo de faena (contrato/anexo por faena)")
+    faena_id = st.selectbox(
+        "Faena",
+        df["id"].tolist(),
+        format_func=lambda x: f"{x} - {df[df['id']==x].iloc[0]['mandante']} / {df[df['id']==x].iloc[0]['nombre']}",
+    )
+    aup = st.file_uploader("Archivo anexo faena", key="up_anexo")
+    if st.button("Guardar anexo de faena", disabled=aup is None):
+        file_bytes = aup.getvalue()
+        file_name = aup.name
+        file_path = save_file(["faenas", faena_id], file_name, file_bytes)
+        h = sha256_bytes(file_bytes)
+        execute(
+            "INSERT INTO faena_archivos(faena_id, nombre, file_path, sha256, created_at) VALUES(?,?,?,?,?)",
+            (int(faena_id), file_name, file_path, h, datetime.utcnow().isoformat(timespec="seconds")),
+        )
+        st.success("Anexo guardado.")
+        st.rerun()
+
+    st.caption("Anexos cargados para esta faena")
+    afiles = fetch_df("SELECT id, nombre, created_at FROM faena_archivos WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
+    if afiles.empty:
+        st.write("(sin anexos)")
+    else:
+        st.dataframe(afiles, use_container_width=True)
+
+    st.divider()
+    st.subheader("Agregar trabajadores a esta faena (rápido)")
+    trabajadores = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+    if trabajadores.empty:
+        st.info("Primero crea trabajadores.")
+        return
+
+    asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=?", (int(faena_id),))
+    asignados_ids = set(asignados["trabajador_id"].tolist()) if not asignados.empty else set()
+
+    disponibles = trabajadores[~trabajadores["id"].isin(asignados_ids)].copy()
+    if disponibles.empty:
+        st.success("Todos los trabajadores ya están asignados a esta faena.")
+        return
+
+    def _fmt_trab(x):
+        r = trabajadores[trabajadores["id"]==x].iloc[0]
+        return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
+
+    seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
+    fecha_ingreso = st.date_input("Fecha ingreso", value=date.today(), key="bulk_ingreso")
+    cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)", key="bulk_cargo")
+
+    if st.button("Asignar seleccionados", type="primary", disabled=len(seleccion)==0):
+        params = []
+        for tid in seleccion:
+            params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
+        try:
+            executemany(
+                "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
+                params,
+            )
+            st.success("Trabajadores asignados.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"No se pudo asignar: {e}")
 
 def page_trabajadores():
     st.subheader("Trabajadores")
@@ -649,7 +796,10 @@ def page_trabajadores():
         cargo = st.text_input("Cargo", placeholder="Operador Harvester")
         if st.button("Guardar trabajador", type="primary", disabled=not (rut.strip() and nombres.strip() and apellidos.strip())):
             try:
-                execute("INSERT INTO trabajadores(rut, nombres, apellidos, cargo) VALUES(?,?,?,?)", (rut.strip(), nombres.strip(), apellidos.strip(), cargo.strip()))
+                execute(
+                    "INSERT INTO trabajadores(rut, nombres, apellidos, cargo) VALUES(?,?,?,?)",
+                    (rut.strip(), nombres.strip(), apellidos.strip(), cargo.strip()),
+                )
                 st.success("Trabajador creado.")
                 st.rerun()
             except Exception as e:
@@ -659,14 +809,14 @@ def page_trabajadores():
     st.dataframe(df, use_container_width=True)
 
 def page_asignaciones():
-    st.subheader("Asignaciones (Trabajador ↔ Faena)")
+    st.subheader("Asignaciones (detalle)")
     faenas = fetch_df("SELECT id, nombre, estado, fecha_inicio, fecha_termino FROM faenas ORDER BY id DESC")
     trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
     if faenas.empty or trab.empty:
         st.info("Crea faenas y trabajadores primero.")
         return
 
-    with st.expander("Asignar trabajador a faena", expanded=True):
+    with st.expander("Asignar trabajador a faena (manual)", expanded=False):
         faena_id = st.selectbox("Faena", faenas["id"].tolist(), format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['nombre']}")
         trabajador_id = st.selectbox("Trabajador", trab["id"].tolist(), format_func=lambda x: f"{trab[trab['id']==x].iloc[0]['apellidos']} {trab[trab['id']==x].iloc[0]['nombres']} ({trab[trab['id']==x].iloc[0]['rut']})")
         cargo_faena = st.text_input("Cargo en faena (opcional)", placeholder="Si difiere del cargo general")
@@ -714,7 +864,7 @@ def page_asignaciones():
     st.dataframe(df, use_container_width=True)
 
 def page_documentos():
-    st.subheader("Documentos (subida por FAENA o TRABAJADOR)")
+    st.subheader("Documentos (motor de checklist)")
     dt = fetch_df("SELECT * FROM doc_types ORDER BY scope, nombre")
     if dt.empty:
         st.info("Primero crea tipos de documento.")
@@ -733,9 +883,11 @@ def page_documentos():
         if scope == "FAENA":
             owners = fetch_df("SELECT id, nombre FROM faenas ORDER BY id DESC")
             owner_label = lambda x: f"{x} - {owners[owners['id']==x].iloc[0]['nombre']}"
+            folder_parts = lambda oid, dtid: ["docs", "faena", oid, dtid]
         else:
             owners = fetch_df("SELECT id, apellidos || ' ' || nombres AS nombre FROM trabajadores ORDER BY apellidos, nombres")
             owner_label = lambda x: f"{x} - {owners[owners['id']==x].iloc[0]['nombre']}"
+            folder_parts = lambda oid, dtid: ["docs", "trabajador", oid, dtid]
 
         if owners.empty:
             st.info(f"No hay dueños disponibles para {scope}.")
@@ -752,11 +904,11 @@ def page_documentos():
         for e in errors:
             st.error(e)
 
-        up = st.file_uploader("Archivo")
+        up = st.file_uploader("Archivo", key="up_doc_checklist")
         if st.button("Guardar documento", type="primary", disabled=bool(errors) or up is None):
             file_bytes = up.getvalue()
             file_name = up.name
-            file_path = save_uploaded_file(scope, int(owner_id), int(doc_type_id), file_name, file_bytes)
+            file_path = save_file(folder_parts(int(owner_id), int(doc_type_id)), file_name, file_bytes)
             h = sha256_bytes(file_bytes)
 
             execute(
@@ -776,7 +928,7 @@ def page_documentos():
         st.dataframe(docs, use_container_width=True)
 
 def page_export_zip():
-    st.subheader("Export (ZIP) – Carpeta de Faena")
+    st.subheader("Export (ZIP) – Carpeta de Faena (incluye contrato/anexo)")
     faenas = fetch_df("SELECT id, nombre FROM faenas ORDER BY id DESC")
     if faenas.empty:
         st.info("Crea una faena primero.")
