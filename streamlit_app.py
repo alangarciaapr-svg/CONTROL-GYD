@@ -146,10 +146,10 @@ def init_db():
         c.commit()
 
 def fetch_df(q: str, params=()):
+    # pd.read_sql_query preserves column names even when there are 0 rows,
+    # which avoids KeyError when filtering empty DataFrames.
     with conn() as c:
-        c.row_factory = sqlite3.Row
-        rows = c.execute(q, params).fetchall()
-    return pd.DataFrame([dict(r) for r in rows])
+        return pd.read_sql_query(q, c, params=params)
 
 def execute(q: str, params=()):
     with conn() as c:
@@ -547,14 +547,25 @@ def page_contratos():
         nombre = st.text_input("Nombre contrato", placeholder="Contrato marco 2026")
 
         mandante_nombre = mand[mand["id"]==mandante_id].iloc[0]["nombre"]
-        chk_mandante = chk[chk["mandante"] == mandante_nombre]
-        checklist_opts = [None] + chk_mandante["id"].tolist()
+chk_mandante = chk[chk["mandante"] == mandante_nombre] if not chk.empty else chk
 
-        checklist_id = st.selectbox(
-            "Checklist (opcional)",
-            checklist_opts,
-            format_func=lambda x: "(sin checklist)" if x is None else f"{int(x)} - {chk[chk['id']==x].iloc[0]['nombre']}",
-        )
+checklist_opts = [None] + (chk_mandante["id"].tolist() if (not chk_mandante.empty and "id" in chk_mandante.columns) else [])
+
+def _fmt_checklist(x):
+    if x is None:
+        return "(sin checklist)"
+    if chk.empty or "id" not in chk.columns:
+        return str(x)
+    row = chk[chk["id"] == x]
+    if row.empty:
+        return str(x)
+    return f"{int(x)} - {row.iloc[0]['nombre']}"
+
+checklist_id = st.selectbox(
+    "Checklist (opcional)",
+    checklist_opts,
+    format_func=_fmt_checklist,
+)
         fi = st.date_input("Fecha inicio (opcional)", value=None)
         ft = st.date_input("Fecha término (opcional)", value=None)
 
