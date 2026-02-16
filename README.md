@@ -1,13 +1,18 @@
-# Control Documental de Faenas (v5)
+# Control Documental de Faenas (v6) – Import Excel de Trabajadores
 
-Flujo:
-1. Mandantes
-2. Contratos de Faena (por mandante) + archivo contrato
-3. Faenas (por mandante, contrato opcional) + anexos por faena
-4. Trabajadores
-5. Asignar trabajadores a faena
-6. Documentos por trabajador (obligatorios: EPP, RIOHS, IRL, Contrato, Anexo) + OTROS
-7. Documentos extra por faena (opcional)
-8. Export ZIP por faena (incluye contrato, anexos, docs extra, docs trabajadores + índice de pendientes)
+✅ Nueva función: Importar trabajadores desde Excel (como tu plantilla).
+
+Plantilla soportada (columnas):
+- RUT (obligatoria)
+- NOMBRE (obligatoria)
+- CARGO (opcional)
+- CENTRO_COSTO (opcional)
+- EMAIL (opcional)
+- FECHA DE CONTRATO (opcional)
+- VIGENCIA_EXAMEN (opcional)
+
+El sistema separa NOMBRE en:
+- Nombres: tokens iniciales
+- Apellidos: por defecto últimos 2 tokens (si hay 4+ palabras)
 
 Main file: `streamlit_app.py`

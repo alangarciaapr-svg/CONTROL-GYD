@@ -35,6 +35,36 @@ def safe_name(s: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
 
+def norm_col(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ñ","n")
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+def clean_rut(rut: str) -> str:
+    rut = (rut or "").strip().upper()
+    rut = rut.replace(" ", "")
+    return rut
+
+def split_nombre_completo(nombre: str):
+    nombre = (nombre or "").strip()
+    if not nombre:
+        return "", ""
+    toks = [t for t in re.split(r"\s+", nombre) if t]
+    if len(toks) >= 4:
+        apellidos = " ".join(toks[-2:])
+        nombres = " ".join(toks[:-2])
+    elif len(toks) == 3:
+        apellidos = toks[-1]
+        nombres = " ".join(toks[:-1])
+    elif len(toks) == 2:
+        apellidos = toks[-1]
+        nombres = toks[0]
+    else:
+        apellidos = ""
+        nombres = toks[0]
+    return nombres.strip(), apellidos.strip()
+
 def sha256_bytes(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
@@ -45,6 +75,13 @@ def ensure_dirs():
 
 def conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
+    info = c.execute(f"PRAGMA table_info({table});").fetchall()
+    existing = {row[1] for row in info}
+    for col, coltype in cols_sql.items():
+        if col not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
 
 def init_db():
     with conn() as c:
@@ -57,7 +94,6 @@ def init_db():
         );
         ''')
 
-        # Contrato de faena (por mandante) — acá cuelgan las faenas
         c.execute('''
         CREATE TABLE IF NOT EXISTS contratos_faena (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +145,14 @@ def init_db():
         );
         ''')
 
+        # Migración para soportar tu Excel
+        migrate_add_columns_if_missing(c, "trabajadores", {
+            "centro_costo": "TEXT",
+            "email": "TEXT",
+            "fecha_contrato": "TEXT",
+            "vigencia_examen": "TEXT",
+        })
+
         c.execute('''
         CREATE TABLE IF NOT EXISTS asignaciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,7 +168,6 @@ def init_db():
         );
         ''')
 
-        # Documentos por trabajador (con tipo fijo + extras)
         c.execute('''
         CREATE TABLE IF NOT EXISTS trabajador_documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +181,6 @@ def init_db():
         );
         ''')
 
-        # Documentos extra por faena (si mandante pide cosas adicionales generales)
         c.execute('''
         CREATE TABLE IF NOT EXISTS faena_documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,7 +231,6 @@ def validate_faena_dates(inicio: date, termino, estado: str):
     return errors
 
 def pendientes_obligatorios(faena_id: int):
-    # Para esta faena: trabajadores asignados y si cada uno tiene docs obligatorios
     asign = fetch_df('''
         SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
         FROM asignaciones a
@@ -225,7 +266,6 @@ def export_zip_for_faena(faena_id: int):
     buff = io.BytesIO()
     z = zipfile.ZipFile(buff, "w", zipfile.ZIP_DEFLATED)
 
-    # Index + pendientes obligatorios
     pend = pendientes_obligatorios(faena_id)
     idx = []
     idx.append(f"MANDANTE: {f['mandante_nombre']}")
@@ -510,23 +550,158 @@ def page_faenas():
 
 def page_trabajadores():
     st.subheader("Trabajadores")
-    with st.expander("Crear trabajador", expanded=True):
+
+    # --- Importar Excel ---
+    with st.expander("Importar trabajadores desde Excel (como tu plantilla)", expanded=True):
+        st.write("Columnas soportadas (recomendado): **RUT, NOMBRE, CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN**.")
+        up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trabajadores")
+
+        if up is not None:
+            try:
+                xls = pd.ExcelFile(up)
+                sheet = st.selectbox("Hoja", xls.sheet_names, index=0)
+                raw = pd.read_excel(xls, sheet_name=sheet)
+
+                # Normalizar columnas
+                colmap = {c: norm_col(str(c)) for c in raw.columns}
+                df = raw.rename(columns=colmap).copy()
+
+                st.caption("Vista previa (primeras 10 filas)")
+                st.dataframe(df.head(10), use_container_width=True)
+
+                if "rut" not in df.columns or "nombre" not in df.columns:
+                    st.error("El Excel debe tener columnas 'RUT' y 'NOMBRE'.")
+                else:
+                    overwrite = st.checkbox("Sobrescribir si el RUT ya existe", value=True)
+
+                    if st.button("Importar Excel ahora", type="primary"):
+                        # RUTs existentes para conteo insert/update real
+                        existing = fetch_df("SELECT rut FROM trabajadores")["rut"].astype(str).tolist()
+                        existing_set = set(existing)
+
+                        rows = 0
+                        inserted = 0
+                        updated = 0
+                        skipped = 0
+
+                        # columnas opcionales
+                        has_cargo = "cargo" in df.columns
+                        has_cc = "centro_costo" in df.columns
+                        has_email = "email" in df.columns
+                        fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
+                        has_ve = "vigencia_examen" in df.columns
+
+                        def _to_text_date(v):
+                            if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+                                return None
+                            if isinstance(v, datetime):
+                                return str(v.date())
+                            if isinstance(v, date):
+                                return str(v)
+                            return str(v)
+
+                        with conn() as c:
+                            c.execute("PRAGMA foreign_keys = ON;")
+                            for _, r in df.iterrows():
+                                rows += 1
+                                rut = clean_rut(str(r.get("rut", "") or ""))
+                                nombre = str(r.get("nombre", "") or "").strip()
+
+                                if not rut or rut.lower() in ("nan", "none"):
+                                    skipped += 1
+                                    continue
+                                if not nombre or nombre.lower() in ("nan", "none"):
+                                    skipped += 1
+                                    continue
+
+                                nombres, apellidos = split_nombre_completo(nombre)
+                                cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
+                                centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
+                                email = str(r.get("email", "") or "").strip() if has_email else ""
+                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
+                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
+
+                                if overwrite:
+                                    c.execute(
+                                        '''
+                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                        VALUES(?,?,?,?,?,?,?,?)
+                                        ON CONFLICT(rut) DO UPDATE SET
+                                            nombres=excluded.nombres,
+                                            apellidos=excluded.apellidos,
+                                            cargo=excluded.cargo,
+                                            centro_costo=excluded.centro_costo,
+                                            email=excluded.email,
+                                            fecha_contrato=excluded.fecha_contrato,
+                                            vigencia_examen=excluded.vigencia_examen
+                                        ''',
+                                        (rut, nombres or "-", apellidos or "-", cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                    )
+                                    if rut in existing_set:
+                                        updated += 1
+                                    else:
+                                        inserted += 1
+                                        existing_set.add(rut)
+                                else:
+                                    c.execute(
+                                        '''
+                                        INSERT OR IGNORE INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                        VALUES(?,?,?,?,?,?,?,?)
+                                        ''',
+                                        (rut, nombres or "-", apellidos or "-", cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                    )
+                                    # rowcount: 1 insert, 0 ignore
+                                    if c.total_changes:
+                                        # total_changes es acumulado; para exactitud preferimos comparar set
+                                        if rut not in existing_set:
+                                            inserted += 1
+                                            existing_set.add(rut)
+
+                            c.commit()
+
+                        st.success(f"Importación lista. Filas leídas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped}")
+                        st.rerun()
+
+            except Exception as e:
+                st.error(f"No se pudo leer el Excel: {e}")
+
+    # --- Crear manual ---
+    with st.expander("Crear / editar trabajador manual", expanded=False):
         rut = st.text_input("RUT", placeholder="12.345.678-9")
         nombres = st.text_input("Nombres", placeholder="Juan")
         apellidos = st.text_input("Apellidos", placeholder="Pérez")
         cargo = st.text_input("Cargo", placeholder="Operador Harvester")
+        centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA")
+        email = st.text_input("Email (opcional)")
+        fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
+        vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
+
         if st.button("Guardar trabajador", type="primary", disabled=not (rut.strip() and nombres.strip() and apellidos.strip())):
             try:
                 execute(
-                    "INSERT INTO trabajadores(rut, nombres, apellidos, cargo) VALUES(?,?,?,?)",
-                    (rut.strip(), nombres.strip(), apellidos.strip(), cargo.strip()),
+                    '''
+                    INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(rut) DO UPDATE SET
+                        nombres=excluded.nombres,
+                        apellidos=excluded.apellidos,
+                        cargo=excluded.cargo,
+                        centro_costo=excluded.centro_costo,
+                        email=excluded.email,
+                        fecha_contrato=excluded.fecha_contrato,
+                        vigencia_examen=excluded.vigencia_examen
+                    ''',
+                    (clean_rut(rut), nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
+                     str(fecha_contrato) if fecha_contrato else None,
+                     str(vigencia_examen) if vigencia_examen else None),
                 )
-                st.success("Trabajador creado.")
+                st.success("Trabajador guardado.")
                 st.rerun()
             except Exception as e:
-                st.error(f"No se pudo crear: {e}")
+                st.error(f"No se pudo guardar: {e}")
 
-    df = fetch_df("SELECT * FROM trabajadores ORDER BY id DESC")
+    st.divider()
+    df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY id DESC")
     st.dataframe(df, use_container_width=True)
 
 def page_asignar_trabajadores():
@@ -683,7 +858,9 @@ def page_export_zip():
         except Exception as e:
             st.error(f"No se pudo generar ZIP: {e}")
 
+# ----------------------------
 # Route
+# ----------------------------
 if page == "Dashboard":
     page_dashboard()
 elif page == "Mandantes":
