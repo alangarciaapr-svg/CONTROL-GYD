@@ -547,25 +547,29 @@ def page_contratos():
         nombre = st.text_input("Nombre contrato", placeholder="Contrato marco 2026")
 
         mandante_nombre = mand[mand["id"]==mandante_id].iloc[0]["nombre"]
-chk_mandante = chk[chk["mandante"] == mandante_nombre] if not chk.empty else chk
+        chk_mandante = chk[chk["mandante"] == mandante_nombre] if (not chk.empty and "mandante" in chk.columns) else chk
 
-checklist_opts = [None] + (chk_mandante["id"].tolist() if (not chk_mandante.empty and "id" in chk_mandante.columns) else [])
+        checklist_opts = [None] + (
+            chk_mandante["id"].tolist()
+            if (chk_mandante is not None and (not chk_mandante.empty) and "id" in chk_mandante.columns)
+            else []
+        )
 
-def _fmt_checklist(x):
-    if x is None:
-        return "(sin checklist)"
-    if chk.empty or "id" not in chk.columns:
-        return str(x)
-    row = chk[chk["id"] == x]
-    if row.empty:
-        return str(x)
-    return f"{int(x)} - {row.iloc[0]['nombre']}"
+        def _fmt_checklist(x):
+            if x is None:
+                return "(sin checklist)"
+            if chk is None or chk.empty or "id" not in chk.columns:
+                return str(x)
+            row = chk[chk["id"] == x]
+            if row.empty:
+                return str(x)
+            return f"{int(x)} - {row.iloc[0]['nombre']}"
 
-checklist_id = st.selectbox(
-    "Checklist (opcional)",
-    checklist_opts,
-    format_func=_fmt_checklist,
-)
+        checklist_id = st.selectbox(
+            "Checklist (opcional)",
+            checklist_opts,
+            format_func=_fmt_checklist,
+        )
         fi = st.date_input("Fecha inicio (opcional)", value=None)
         ft = st.date_input("Fecha término (opcional)", value=None)
 
