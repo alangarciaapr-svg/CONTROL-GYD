@@ -588,6 +588,107 @@ PAGES = [
     "Backup / Restore",
 ]
 
+# ----------------------------
+# Flujo guiado (definido temprano para evitar NameError en sidebar)
+# ----------------------------
+FLOW_STEPS = [
+    ("1) Mandante", "Mandantes", "Crea al menos 1 mandante."),
+    ("2) Contrato", "Contratos de Faena", "Crea al menos 1 contrato de faena."),
+    ("3) Faena", "Faenas", "Crea al menos 1 faena con fechas y estado."),
+    ("4) Trabajadores", "Trabajadores", "Carga trabajadores (manual o Excel)."),
+    ("5) Asignar", "Asignar Trabajadores", "Asigna trabajadores a una faena."),
+    ("6) Docs", "Documentos Trabajador", "Carga documentos (EPP, RIOHS, IRL, Contrato, Anexo)."),
+    ("7) Export", "Export (ZIP)", "Genera y descarga la carpeta ZIP de una faena."),
+]
+
+def get_flow_status():
+    # Devuelve lista de dicts: label, page, done, hint
+    counts = {}
+    try:
+        counts["mandantes"] = int(fetch_df("SELECT COUNT(*) n FROM mandantes")["n"].iloc[0])
+    except Exception:
+        counts["mandantes"] = 0
+    try:
+        counts["contratos"] = int(fetch_df("SELECT COUNT(*) n FROM contratos_faena")["n"].iloc[0])
+    except Exception:
+        counts["contratos"] = 0
+    try:
+        counts["faenas"] = int(fetch_df("SELECT COUNT(*) n FROM faenas")["n"].iloc[0])
+    except Exception:
+        counts["faenas"] = 0
+    try:
+        counts["trabajadores"] = int(fetch_df("SELECT COUNT(*) n FROM trabajadores")["n"].iloc[0])
+    except Exception:
+        counts["trabajadores"] = 0
+    try:
+        counts["asignaciones"] = int(fetch_df("SELECT COUNT(*) n FROM asignaciones")["n"].iloc[0])
+    except Exception:
+        counts["asignaciones"] = 0
+    try:
+        counts["docs"] = int(fetch_df("SELECT COUNT(*) n FROM trabajador_documentos")["n"].iloc[0])
+    except Exception:
+        counts["docs"] = 0
+    try:
+        counts["exports"] = int(fetch_df("SELECT COUNT(*) n FROM export_historial")["n"].iloc[0])
+    except Exception:
+        counts["exports"] = 0
+
+    done_map = {
+        "Mandantes": counts["mandantes"] > 0,
+        "Contratos de Faena": counts["contratos"] > 0,
+        "Faenas": counts["faenas"] > 0,
+        "Trabajadores": counts["trabajadores"] > 0,
+        "Asignar Trabajadores": counts["asignaciones"] > 0,
+        "Documentos Trabajador": counts["docs"] > 0,
+        "Export (ZIP)": counts["exports"] > 0,
+    }
+
+    out = []
+    for label, page, hint in FLOW_STEPS:
+        out.append({"label": label, "page": page, "done": bool(done_map.get(page)), "hint": hint})
+    return out
+
+def render_flow_widget(compact: bool = False):
+    steps = get_flow_status()
+    done_n = sum(1 for s in steps if s["done"])
+    total = len(steps)
+
+    if compact:
+        st.caption(f"Progreso: {done_n}/{total}")
+    else:
+        st.progress(done_n / total if total else 0)
+
+    for s in steps:
+        icon = "✅" if s["done"] else "⬜"
+        st.write(f"{icon} **{s['label']}** — {s['page']}")
+
+    st.caption("Tip: usa **Siguiente paso** para avanzar automáticamente.")
+    first_incomplete = next((s for s in steps if not s["done"]), None)
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        go_page = st.selectbox(
+            "Ir a",
+            [s["page"] for s in steps],
+            index=0,
+            key=f"flow_go_{'c' if compact else 'f'}",
+        )
+    with col_b:
+        if st.button("Ir", use_container_width=True, key=f"flow_go_btn_{'c' if compact else 'f'}"):
+            st.session_state["nav_page"] = go_page
+            st.rerun()
+
+    if first_incomplete is not None:
+        if st.button(
+            "Siguiente paso",
+            type="primary",
+            use_container_width=True,
+            key=f"flow_next_{'c' if compact else 'f'}",
+        ):
+            st.session_state["nav_page"] = first_incomplete["page"]
+            st.rerun()
+
+
 # Normaliza nav_page por si quedó un valor antiguo en session_state
 if st.session_state.get("nav_page") not in PAGES:
     st.session_state["nav_page"] = "Dashboard"
