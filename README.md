@@ -1,4 +1,4 @@
-# Control Documental de Faenas (v8 - Supabase)
+# Control Documental de Faenas (v7.2)
 
 Cambios principales:
 - ✅ Dashboard mejorado: KPIs, filtros, avance documental por faena, pendientes por trabajador y alertas por vigencia_examen.
@@ -11,12 +11,6 @@ Nota:
 - En Streamlit Community Cloud no se garantiza persistencia del filesystem local entre reboots/redeploy.
   Usa Backup/Restore o migra a DB + storage externo.
 
-- ➕ Nuevo en v7.1: Descargar/Restaurar **solo app.db** desde 'Backup / Restore'.
-## Supabase (Postgres) en Streamlit Community Cloud
+- ➕ Nuevo en v7.2: Descargar/Restaurar **solo app.db** desde 'Backup / Restore'.
 
-En **Community Cloud** los archivos locales pueden borrarse en reinicios. Si defines `DB_URL` en Secrets, la app usará Supabase Postgres.
-
-Ejemplo Secrets:
-
-DB_URL = "postgres://..."  # Copia desde Supabase → Connect → Pooler session mode (puerto 5432)
-
+- ➕ Nuevo en v7.2: **Auto-backup al guardar** (genera automáticamente app.db y deja botón de descarga en el sidebar).

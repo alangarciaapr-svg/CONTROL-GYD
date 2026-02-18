@@ -4,12 +4,6 @@ import io
 import zipfile
 import hashlib
 import sqlite3
-
-# Postgres (Supabase)
-try:
-    import psycopg
-except Exception:
-    psycopg = None
 import shutil
 from datetime import date, datetime, timedelta
 
@@ -23,10 +17,7 @@ st.set_page_config(page_title="Control Documental Faenas", layout="wide")
 
 APP_NAME = "Control Documental de Faenas"
 DB_PATH = "app.db"
-UPLOAD_ROOT = "uploads"
-
-# Si defines DB_URL en st.secrets, la app usará Postgres (Supabase) en vez de SQLite local.
-DB_URL = st.secrets.get("DB_URL", None)  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
+UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
 
 ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
 DOC_OBLIGATORIOS = [
@@ -84,275 +75,154 @@ def sha256_bytes(data: bytes) -> str:
 def ensure_dirs():
     os.makedirs(UPLOAD_ROOT, exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
-
-def db_backend() -> str:
-    # En Community Cloud, si configuras DB_URL (Supabase Postgres) en st.secrets,
-    # se usará Postgres y los datos NO se perderán en reinicios.
-    return "postgres" if DB_URL else "sqlite"
+    os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
 def conn():
-    if db_backend() == "sqlite":
-        return sqlite3.connect(DB_PATH, check_same_thread=False)
-    if psycopg is None:
-        raise RuntimeError('Falta instalar psycopg. Revisa requirements.txt (psycopg[binary]).')
-    return psycopg.connect(DB_URL)
-
-def _adapt_sql(q: str) -> str:
-    # Convert placeholders SQLite (?) -> Postgres (%s)
-    if db_backend() == "postgres":
-        return q.replace("?", "%s")
-    return q
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
-    if db_backend() == "sqlite":
-        info = c.execute(f"PRAGMA table_info({table});").fetchall()
-        existing = {row[1] for row in info}
-        for col, coltype in cols_sql.items():
-            if col not in existing:
-                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
-    else:
-        for col, coltype in cols_sql.items():
-            exists = c.execute(
-                _adapt_sql(
-                    "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?"
-                ),
-                (table, col),
-            ).fetchone()
-            if not exists:
-                c.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {coltype};')
+    info = c.execute(f"PRAGMA table_info({table});").fetchall()
+    existing = {row[1] for row in info}
+    for col, coltype in cols_sql.items():
+        if col not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
 
 def init_db():
     with conn() as c:
-        if db_backend() == "sqlite":
-            c.execute("PRAGMA foreign_keys = ON;")
+        c.execute("PRAGMA foreign_keys = ON;")
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS mandantes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre TEXT NOT NULL UNIQUE
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS mandantes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL UNIQUE
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS contratos_faena (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                mandante_id INTEGER NOT NULL,
-                nombre TEXT NOT NULL,
-                fecha_inicio TEXT,
-                fecha_termino TEXT,
-                file_path TEXT,
-                sha256 TEXT,
-                created_at TEXT,
-                FOREIGN KEY(mandante_id) REFERENCES mandantes(id) ON DELETE RESTRICT
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS contratos_faena (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mandante_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            fecha_inicio TEXT,
+            fecha_termino TEXT,
+            file_path TEXT,
+            sha256 TEXT,
+            created_at TEXT,
+            FOREIGN KEY(mandante_id) REFERENCES mandantes(id) ON DELETE RESTRICT
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS faenas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                mandante_id INTEGER NOT NULL,
-                contrato_faena_id INTEGER,
-                nombre TEXT NOT NULL,
-                ubicacion TEXT DEFAULT '',
-                fecha_inicio TEXT NOT NULL,
-                fecha_termino TEXT,
-                estado TEXT NOT NULL CHECK(estado IN ('ACTIVA','TERMINADA')),
-                FOREIGN KEY(mandante_id) REFERENCES mandantes(id) ON DELETE RESTRICT,
-                FOREIGN KEY(contrato_faena_id) REFERENCES contratos_faena(id) ON DELETE SET NULL
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS faenas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mandante_id INTEGER NOT NULL,
+            contrato_faena_id INTEGER,
+            nombre TEXT NOT NULL,
+            ubicacion TEXT DEFAULT '',
+            fecha_inicio TEXT NOT NULL,
+            fecha_termino TEXT,
+            estado TEXT NOT NULL CHECK(estado IN ('ACTIVA','TERMINADA')),
+            FOREIGN KEY(mandante_id) REFERENCES mandantes(id) ON DELETE RESTRICT,
+            FOREIGN KEY(contrato_faena_id) REFERENCES contratos_faena(id) ON DELETE SET NULL
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS faena_anexos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                faena_id INTEGER NOT NULL,
-                nombre TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS faena_anexos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faena_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS trabajadores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rut TEXT NOT NULL UNIQUE,
-                nombres TEXT NOT NULL,
-                apellidos TEXT NOT NULL,
-                cargo TEXT DEFAULT ''
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS trabajadores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rut TEXT NOT NULL UNIQUE,
+            nombres TEXT NOT NULL,
+            apellidos TEXT NOT NULL,
+            cargo TEXT DEFAULT ''
+        );
+        ''')
 
-            migrate_add_columns_if_missing(c, "trabajadores", {
-                "centro_costo": "TEXT",
-                "email": "TEXT",
-                "fecha_contrato": "TEXT",
-                "vigencia_examen": "TEXT",
-            })
+        migrate_add_columns_if_missing(c, "trabajadores", {
+            "centro_costo": "TEXT",
+            "email": "TEXT",
+            "fecha_contrato": "TEXT",
+            "vigencia_examen": "TEXT",
+        })
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS asignaciones (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                faena_id INTEGER NOT NULL,
-                trabajador_id INTEGER NOT NULL,
-                cargo_faena TEXT DEFAULT '',
-                fecha_ingreso TEXT NOT NULL,
-                fecha_egreso TEXT,
-                estado TEXT NOT NULL DEFAULT 'ACTIVA' CHECK(estado IN ('ACTIVA','CERRADA')),
-                UNIQUE(faena_id, trabajador_id),
-                FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE,
-                FOREIGN KEY(trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS asignaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faena_id INTEGER NOT NULL,
+            trabajador_id INTEGER NOT NULL,
+            cargo_faena TEXT DEFAULT '',
+            fecha_ingreso TEXT NOT NULL,
+            fecha_egreso TEXT,
+            estado TEXT NOT NULL DEFAULT 'ACTIVA' CHECK(estado IN ('ACTIVA','CERRADA')),
+            UNIQUE(faena_id, trabajador_id),
+            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE,
+            FOREIGN KEY(trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS trabajador_documentos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trabajador_id INTEGER NOT NULL,
-                doc_tipo TEXT NOT NULL,
-                nombre_archivo TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS trabajador_documentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER NOT NULL,
+            doc_tipo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
+        );
+        ''')
 
-            c.execute('''
-            CREATE TABLE IF NOT EXISTS export_historial (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                faena_id INTEGER NOT NULL,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
-            );
-            ''')
-            c.commit()
+        # Eliminado: "Documentos extra faena" (no tabla ni UI en esta versión)
 
-        else:
-            # Postgres (Supabase)
-            cur = c.cursor()
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS mandantes (
-                id BIGSERIAL PRIMARY KEY,
-                nombre TEXT NOT NULL UNIQUE
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS export_historial (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faena_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
+        );
+        ''')
 
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS contratos_faena (
-                id BIGSERIAL PRIMARY KEY,
-                mandante_id BIGINT NOT NULL REFERENCES mandantes(id) ON DELETE RESTRICT,
-                nombre TEXT NOT NULL,
-                fecha_inicio DATE,
-                fecha_termino DATE,
-                file_path TEXT,
-                sha256 TEXT,
-                created_at TIMESTAMPTZ
-            );
-            ''')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS auto_backup_historial (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag TEXT,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        ''')
 
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS faenas (
-                id BIGSERIAL PRIMARY KEY,
-                mandante_id BIGINT NOT NULL REFERENCES mandantes(id) ON DELETE RESTRICT,
-                contrato_faena_id BIGINT REFERENCES contratos_faena(id) ON DELETE SET NULL,
-                nombre TEXT NOT NULL,
-                ubicacion TEXT DEFAULT '',
-                fecha_inicio DATE NOT NULL,
-                fecha_termino DATE,
-                estado TEXT NOT NULL CHECK(estado IN ('ACTIVA','TERMINADA'))
-            );
-            ''')
-
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS faena_anexos (
-                id BIGSERIAL PRIMARY KEY,
-                faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
-                nombre TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            );
-            ''')
-
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS trabajadores (
-                id BIGSERIAL PRIMARY KEY,
-                rut TEXT NOT NULL UNIQUE,
-                nombres TEXT NOT NULL,
-                apellidos TEXT NOT NULL,
-                cargo TEXT DEFAULT '',
-                centro_costo TEXT,
-                email TEXT,
-                fecha_contrato DATE,
-                vigencia_examen DATE
-            );
-            ''')
-
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS asignaciones (
-                id BIGSERIAL PRIMARY KEY,
-                faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
-                trabajador_id BIGINT NOT NULL REFERENCES trabajadores(id) ON DELETE CASCADE,
-                cargo_faena TEXT DEFAULT '',
-                fecha_ingreso DATE NOT NULL,
-                fecha_egreso DATE,
-                estado TEXT NOT NULL DEFAULT 'ACTIVA' CHECK(estado IN ('ACTIVA','CERRADA')),
-                UNIQUE(faena_id, trabajador_id)
-            );
-            ''')
-
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS trabajador_documentos (
-                id BIGSERIAL PRIMARY KEY,
-                trabajador_id BIGINT NOT NULL REFERENCES trabajadores(id) ON DELETE CASCADE,
-                doc_tipo TEXT NOT NULL,
-                nombre_archivo TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            );
-            ''')
-
-            cur.execute('''
-            CREATE TABLE IF NOT EXISTS export_historial (
-                id BIGSERIAL PRIMARY KEY,
-                faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
-                file_path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                size_bytes BIGINT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            );
-            ''')
-            c.commit()
+        c.commit()
 
 def fetch_df(q: str, params=()):
-    q = _adapt_sql(q)
     with conn() as c:
-        cur = c.cursor()
-        cur.execute(q, params)
-        if cur.description is None:
-            return pd.DataFrame()
-        cols = [getattr(d, 'name', d[0]) for d in cur.description]
-        rows = cur.fetchall()
-        return pd.DataFrame(rows, columns=cols)
+        return pd.read_sql_query(q, c, params=params)
 
 def execute(q: str, params=()):
-    q = _adapt_sql(q)
     with conn() as c:
-        cur = c.cursor()
-        cur.execute(q, params)
+        c.execute(q, params)
         c.commit()
 
 def executemany(q: str, seq_params):
-    q = _adapt_sql(q)
     with conn() as c:
-        cur = c.cursor()
-        cur.executemany(q, seq_params)
+        c.executemany(q, seq_params)
         c.commit()
 
 def save_file(folder_parts, file_name: str, file_bytes: bytes):
@@ -602,6 +472,58 @@ def restore_from_backup_zip(uploaded_bytes: bytes):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+
+def make_db_only_bytes():
+    if not os.path.exists(DB_PATH):
+        init_db()
+    with open(DB_PATH, "rb") as f:
+        return f.read()
+
+def cleanup_old_auto_backups(keep_last: int = 20):
+    try:
+        hist = fetch_df("SELECT id, file_path FROM auto_backup_historial ORDER BY id DESC")
+        if hist.empty:
+            return
+        to_delete = hist.iloc[keep_last:]
+        for _, r in to_delete.iterrows():
+            p = r["file_path"]
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        if not to_delete.empty:
+            ids = tuple(int(x) for x in to_delete["id"].tolist())
+            with conn() as c:
+                c.execute("DELETE FROM auto_backup_historial WHERE id IN (%s)" % ",".join(["?"]*len(ids)), ids)
+                c.commit()
+    except Exception:
+        pass
+
+def auto_backup_db(tag: str = "auto"):
+    """Backup automático SOLO de la base (app.db). El manual sigue siendo ZIP completo."""
+    try:
+        if not st.session_state.get("auto_backup_enabled", True):
+            return
+
+        db_bytes = make_db_only_bytes()
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        fname = f"auto_db_{ts}_{safe_name(tag)}.db"
+        path = save_file(["auto_backups"], fname, db_bytes)
+
+        sha = sha256_bytes(db_bytes)
+        size = len(db_bytes)
+
+        execute(
+            "INSERT INTO auto_backup_historial(tag, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+            (tag, path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        )
+        cleanup_old_auto_backups(keep_last=20)
+
+        st.session_state["last_auto_backup"] = {"name": fname, "bytes": db_bytes, "created_at": datetime.utcnow().isoformat(timespec="seconds")}
+    except Exception:
+        pass
+
 # ----------------------------
 # Init
 # ----------------------------
@@ -628,12 +550,31 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.header("Navegación")
-    st.caption(f"DB: **{db_backend()}**")
     st.radio("Ir a", PAGES, key="page")
     st.caption("Flujo: Mandante → Contrato Faena → Faena → Trabajadores → Documentos → Export.")
+
     st.divider()
-    st.caption("⚠️ En Streamlit Community Cloud, DB/archivos locales pueden perderse en reboots.")
-    st.caption("Usa **Backup / Restore** como “guardar” rápido.")
+    st.subheader("Respaldo automático")
+    if "auto_backup_enabled" not in st.session_state:
+        st.session_state["auto_backup_enabled"] = True
+    st.checkbox("Auto-backup al guardar (solo app.db)", key="auto_backup_enabled")
+
+    last = st.session_state.get("last_auto_backup")
+    if last and last.get("bytes"):
+        st.success("Backup automático listo")
+        st.download_button(
+            "Descargar último auto-backup (app.db)",
+            data=last["bytes"],
+            file_name=last["name"],
+            mime="application/octet-stream",
+        )
+        if st.button("Limpiar aviso"):
+            st.session_state.pop("last_auto_backup", None)
+            st.rerun()
+
+    st.divider()
+    st.caption("⚠️ En Streamlit Community Cloud, DB/archivos locales pueden perderse en reboots/redeploy.")
+    st.caption("Usa **Backup / Restore** para backup completo (DB + documentos).")
 
 st.title(APP_NAME)
 
@@ -745,6 +686,7 @@ def page_mandantes():
             try:
                 execute("INSERT INTO mandantes(nombre) VALUES(?)", (nombre.strip(),))
                 st.success("Mandante creado.")
+                auto_backup_db("mandante")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo crear: {e}")
@@ -781,6 +723,7 @@ def page_contratos_faena():
                     (int(mandante_id), nombre.strip(), str(fi) if fi else None, str(ft) if ft else None, file_path, sha, created_at),
                 )
                 st.success("Contrato de faena creado.")
+                auto_backup_db("contrato_faena")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo crear: {e}")
@@ -810,6 +753,7 @@ def page_contratos_faena():
             (file_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
         )
         st.success("Archivo actualizado.")
+        auto_backup_db("contrato_archivo")
         st.rerun()
 
 def page_faenas():
@@ -857,6 +801,7 @@ def page_faenas():
                     (int(mandante_id), int(contrato_id) if contrato_id else None, nombre.strip(), ubicacion.strip(), str(fi), str(ft) if ft else None, estado),
                 )
                 st.success("Faena creada.")
+                auto_backup_db("faena")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo crear: {e}")
@@ -887,6 +832,7 @@ def page_faenas():
             (int(faena_id), up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
         )
         st.success("Anexo guardado.")
+        auto_backup_db("anexo_faena")
         st.rerun()
 
     anexos = fetch_df("SELECT id, nombre, created_at FROM faena_anexos WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
@@ -985,9 +931,8 @@ def page_trabajadores():
                                 else:
                                     c.execute(
                                         '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                        INSERT OR IGNORE INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                                         VALUES(?,?,?,?,?,?,?,?)
-                                        ON CONFLICT(rut) DO NOTHING
                                         ''',
                                         (rut, nombres or "-", apellidos or "-", cargo, centro_costo, email, fecha_contrato, vigencia_examen),
                                     )
@@ -997,6 +942,7 @@ def page_trabajadores():
                             c.commit()
 
                         st.success(f"Importación lista. Filas leídas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped}")
+                        auto_backup_db("import_excel")
                         st.rerun()
 
             except Exception as e:
@@ -1032,6 +978,7 @@ def page_trabajadores():
                      str(vigencia_examen) if vigencia_examen else None),
                 )
                 st.success("Trabajador guardado.")
+                auto_backup_db("trabajador")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo guardar: {e}")
@@ -1076,10 +1023,11 @@ def page_asignar_trabajadores():
             for tid in seleccion:
                 params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
             executemany(
-                "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
+                "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
                 params,
             )
             st.success("Trabajadores asignados.")
+            auto_backup_db("asignacion")
             st.rerun()
 
     st.divider()
@@ -1122,6 +1070,7 @@ def page_documentos_trabajador():
             (int(tid), doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
         )
         st.success("Documento guardado.")
+        auto_backup_db("doc_trabajador")
         st.rerun()
 
     st.divider()
@@ -1171,6 +1120,7 @@ def page_export_zip():
                 zip_bytes, name = export_zip_for_faena(int(faena_id))
                 path = persist_export(int(faena_id), zip_bytes, name)
                 st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
+                auto_backup_db("export_zip")
                 st.download_button("Descargar ZIP (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip")
             except Exception as e:
                 st.error(f"No se pudo generar ZIP: {e}")
@@ -1206,38 +1156,59 @@ def page_backup_restore():
         "Este módulo te permite descargar un **Backup ZIP** con la base y documentos, y luego restaurarlo."
     )
 
-    
-    st.divider()
-    st.subheader("0) Base de datos")
+st.divider()
+st.subheader("Auto-backups (generados al guardar)")
+hist = fetch_df("SELECT id, tag, file_path, size_bytes, created_at FROM auto_backup_historial ORDER BY id DESC")
+if hist.empty:
+    st.info("(aún no hay auto-backups)")
+else:
+    view = hist.copy()
+    view["archivo"] = view["file_path"].apply(lambda p: os.path.basename(p))
+    view["size_kb"] = (view["size_bytes"] / 1024).round(1)
+    st.dataframe(view[["id","tag","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
 
-    if db_backend() == "postgres":
-        st.info("La base de datos está en Supabase (Postgres). No necesitas descargar/restaurar app.db aquí.")
+    sel = st.selectbox(
+        "Elegir auto-backup para descargar",
+        view["id"].tolist(),
+        format_func=lambda x: f"{int(x)} - {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['tag']})"
+    )
+    row = view[view["id"]==sel].iloc[0]
+    p = row["file_path"]
+    if os.path.exists(p):
+        with open(p, "rb") as f:
+            b = f.read()
+        st.download_button("Descargar auto-backup (app.db)", data=b, file_name=os.path.basename(p), mime="application/octet-stream")
     else:
-        st.caption("Modo SQLite local: aquí sí aplica descargar/restaurar app.db.")
+        st.warning("El archivo no está en disco (posible reboot/redeploy).")
 
-        coldb1, coldb2 = st.columns([1, 1])
-        with coldb1:
-            if st.button("Descargar app.db"):
-                if os.path.exists(DB_PATH):
-                    with open(DB_PATH, "rb") as f:
-                        db_bytes = f.read()
-                    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    st.download_button("Bajar app.db", data=db_bytes, file_name=f"app_{ts}.db", mime="application/octet-stream")
-                    st.success("app.db lista para descargar.")
-                else:
-                    st.error("No existe app.db todavía (no hay datos o no se ha inicializado).")
 
-        with coldb2:
-            up_db = st.file_uploader("Restaurar app.db (sube un archivo .db)", type=["db", "sqlite", "sqlite3"], key="up_db_only")
-            if st.button("Restaurar app.db", disabled=up_db is None):
-                try:
-                    with open(DB_PATH, "wb") as f:
-                        f.write(up_db.getvalue())
-                    init_db()
-                    st.success("Base restaurada. La app se reiniciará.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo restaurar app.db: {e}")
+    
+st.divider()
+st.subheader("0) Base de datos (solo app.db)")
+
+coldb1, coldb2 = st.columns([1, 1])
+with coldb1:
+    if st.button("Descargar app.db"):
+        if os.path.exists(DB_PATH):
+            with open(DB_PATH, "rb") as f:
+                db_bytes = f.read()
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            st.download_button("Bajar app.db", data=db_bytes, file_name=f"app_{ts}.db", mime="application/octet-stream")
+            st.success("app.db lista para descargar.")
+        else:
+            st.error("No existe app.db todavía (no hay datos o no se ha inicializado).")
+
+with coldb2:
+    up_db = st.file_uploader("Restaurar app.db (sube un archivo .db)", type=["db", "sqlite", "sqlite3"], key="up_db_only")
+    if st.button("Restaurar app.db", disabled=up_db is None):
+        try:
+            with open(DB_PATH, "wb") as f:
+                f.write(up_db.getvalue())
+            init_db()
+            st.success("Base restaurada. La app se reiniciará.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"No se pudo restaurar app.db: {e}")
 
     st.divider()
     st.subheader("1) Descargar Backup")
