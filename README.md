@@ -17,4 +17,6 @@ Nota:
 
 - 🛠️ v7.3.1: correcciones de robustez (foreign_keys ON por conexión, normalización de navegación).
 
-- ➕ Nuevo en v7.3.2: opción para **ocultar/mostrar el título** en la página (no afecta datos ni navegación).
+- ➕ Nuevo en v7.3.3: opción para **ocultar/mostrar el título** en la página (no afecta datos ni navegación).
+
+- ✨ Nuevo en v7.4: reorganización completa de UI (tabs, sidebar con atajos, estilo más profesional) sin perder funcionalidad.
