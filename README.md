@@ -1,18 +1,22 @@
-# Control Documental de Faenas (v6) – Import Excel de Trabajadores
+# Control Documental de Faenas (v8 - Supabase)
 
-✅ Nueva función: Importar trabajadores desde Excel (como tu plantilla).
+Cambios principales:
+- ✅ Dashboard mejorado: KPIs, filtros, avance documental por faena, pendientes por trabajador y alertas por vigencia_examen.
+- ✅ Guardar lo generado:
+  - Historial de exportaciones ZIP (se guardan en uploads/exports + tabla export_historial)
+  - Backup/Restore: descarga un ZIP con app.db + uploads/ y restaura desde ese ZIP.
+- ✅ Eliminado: apartado/pantalla "Documentos Extra Faena" (y no se incluye en export).
 
-Plantilla soportada (columnas):
-- RUT (obligatoria)
-- NOMBRE (obligatoria)
-- CARGO (opcional)
-- CENTRO_COSTO (opcional)
-- EMAIL (opcional)
-- FECHA DE CONTRATO (opcional)
-- VIGENCIA_EXAMEN (opcional)
+Nota:
+- En Streamlit Community Cloud no se garantiza persistencia del filesystem local entre reboots/redeploy.
+  Usa Backup/Restore o migra a DB + storage externo.
 
-El sistema separa NOMBRE en:
-- Nombres: tokens iniciales
-- Apellidos: por defecto últimos 2 tokens (si hay 4+ palabras)
+- ➕ Nuevo en v7.1: Descargar/Restaurar **solo app.db** desde 'Backup / Restore'.
+## Supabase (Postgres) en Streamlit Community Cloud
 
-Main file: `streamlit_app.py`
+En **Community Cloud** los archivos locales pueden borrarse en reinicios. Si defines `DB_URL` en Secrets, la app usará Supabase Postgres.
+
+Ejemplo Secrets:
+
+DB_URL = "postgres://..."  # Copia desde Supabase → Connect → Pooler session mode (puerto 5432)
+
