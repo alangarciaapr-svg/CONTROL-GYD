@@ -16,3 +16,5 @@ Nota:
 - ➕ Nuevo en v7.3.1: **Auto-backup al guardar** (genera automáticamente app.db y deja botón de descarga en el sidebar).
 
 - 🛠️ v7.3.1: correcciones de robustez (foreign_keys ON por conexión, normalización de navegación).
+
+- ➕ Nuevo en v7.3.2: opción para **ocultar/mostrar el título** en la página (no afecta datos ni navegación).

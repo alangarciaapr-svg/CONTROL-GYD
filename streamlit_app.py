@@ -563,6 +563,10 @@ with st.sidebar:
     st.radio("Ir a", PAGES, key="nav_page")
     st.caption("Flujo: Mandante → Contrato Faena → Faena → Trabajadores → Documentos → Export.")
 
+    if "show_app_title" not in st.session_state:
+        st.session_state["show_app_title"] = True
+    st.checkbox("Mostrar título en la página", key="show_app_title")
+
     st.divider()
     st.subheader("Respaldo automático")
     if "auto_backup_enabled" not in st.session_state:
@@ -586,7 +590,10 @@ with st.sidebar:
     st.caption("⚠️ En Streamlit Community Cloud, DB/archivos locales pueden perderse en reboots/redeploy.")
     st.caption("Usa **Backup / Restore** para backup completo (DB + documentos).")
 
-st.title(APP_NAME)
+if st.session_state.get("show_app_title", True):
+    st.title(APP_NAME)
+else:
+    st.caption(APP_NAME)
 
 # ----------------------------
 # Pages
