@@ -55,6 +55,16 @@ def inject_css():
             border-radius: 14px;
             padding: 6px 10px;
         }
+        
+/* Buttons */
+div.stButton > button {
+    border-radius: 14px !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+}
+/* Sidebar spacing */
+section[data-testid="stSidebar"] .block-container {padding-top: 1rem;}
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -72,6 +82,26 @@ def safe_name(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
+
+
+def get_global_counts():
+    """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
+    out = {}
+    for key, sql in [
+        ("mandantes", "SELECT COUNT(*) AS n FROM mandantes"),
+        ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena"),
+        ("faenas", "SELECT COUNT(*) AS n FROM faenas"),
+        ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'"),
+        ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
+        ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
+        ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
+        ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
+    ]:
+        try:
+            out[key] = int(fetch_df(sql)["n"].iloc[0])
+        except Exception:
+            out[key] = 0
+    return out
 
 def norm_col(s: str) -> str:
     s = (s or "").strip().lower()
@@ -588,106 +618,6 @@ PAGES = [
     "Backup / Restore",
 ]
 
-# ----------------------------
-# Flujo guiado (definido temprano para evitar NameError en sidebar)
-# ----------------------------
-FLOW_STEPS = [
-    ("1) Mandante", "Mandantes", "Crea al menos 1 mandante."),
-    ("2) Contrato", "Contratos de Faena", "Crea al menos 1 contrato de faena."),
-    ("3) Faena", "Faenas", "Crea al menos 1 faena con fechas y estado."),
-    ("4) Trabajadores", "Trabajadores", "Carga trabajadores (manual o Excel)."),
-    ("5) Asignar", "Asignar Trabajadores", "Asigna trabajadores a una faena."),
-    ("6) Docs", "Documentos Trabajador", "Carga documentos (EPP, RIOHS, IRL, Contrato, Anexo)."),
-    ("7) Export", "Export (ZIP)", "Genera y descarga la carpeta ZIP de una faena."),
-]
-
-def get_flow_status():
-    # Devuelve lista de dicts: label, page, done, hint
-    counts = {}
-    try:
-        counts["mandantes"] = int(fetch_df("SELECT COUNT(*) n FROM mandantes")["n"].iloc[0])
-    except Exception:
-        counts["mandantes"] = 0
-    try:
-        counts["contratos"] = int(fetch_df("SELECT COUNT(*) n FROM contratos_faena")["n"].iloc[0])
-    except Exception:
-        counts["contratos"] = 0
-    try:
-        counts["faenas"] = int(fetch_df("SELECT COUNT(*) n FROM faenas")["n"].iloc[0])
-    except Exception:
-        counts["faenas"] = 0
-    try:
-        counts["trabajadores"] = int(fetch_df("SELECT COUNT(*) n FROM trabajadores")["n"].iloc[0])
-    except Exception:
-        counts["trabajadores"] = 0
-    try:
-        counts["asignaciones"] = int(fetch_df("SELECT COUNT(*) n FROM asignaciones")["n"].iloc[0])
-    except Exception:
-        counts["asignaciones"] = 0
-    try:
-        counts["docs"] = int(fetch_df("SELECT COUNT(*) n FROM trabajador_documentos")["n"].iloc[0])
-    except Exception:
-        counts["docs"] = 0
-    try:
-        counts["exports"] = int(fetch_df("SELECT COUNT(*) n FROM export_historial")["n"].iloc[0])
-    except Exception:
-        counts["exports"] = 0
-
-    done_map = {
-        "Mandantes": counts["mandantes"] > 0,
-        "Contratos de Faena": counts["contratos"] > 0,
-        "Faenas": counts["faenas"] > 0,
-        "Trabajadores": counts["trabajadores"] > 0,
-        "Asignar Trabajadores": counts["asignaciones"] > 0,
-        "Documentos Trabajador": counts["docs"] > 0,
-        "Export (ZIP)": counts["exports"] > 0,
-    }
-
-    out = []
-    for label, page, hint in FLOW_STEPS:
-        out.append({"label": label, "page": page, "done": bool(done_map.get(page)), "hint": hint})
-    return out
-
-def render_flow_widget(compact: bool = False):
-    steps = get_flow_status()
-    done_n = sum(1 for s in steps if s["done"])
-    total = len(steps)
-
-    if compact:
-        st.caption(f"Progreso: {done_n}/{total}")
-    else:
-        st.progress(done_n / total if total else 0)
-
-    for s in steps:
-        icon = "✅" if s["done"] else "⬜"
-        st.write(f"{icon} **{s['label']}** — {s['page']}")
-
-    st.caption("Tip: usa **Siguiente paso** para avanzar automáticamente.")
-    first_incomplete = next((s for s in steps if not s["done"]), None)
-
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        go_page = st.selectbox(
-            "Ir a",
-            [s["page"] for s in steps],
-            index=0,
-            key=f"flow_go_{'c' if compact else 'f'}",
-        )
-    with col_b:
-        if st.button("Ir", use_container_width=True, key=f"flow_go_btn_{'c' if compact else 'f'}"):
-            st.session_state["nav_page"] = go_page
-            st.rerun()
-
-    if first_incomplete is not None:
-        if st.button(
-            "Siguiente paso",
-            type="primary",
-            use_container_width=True,
-            key=f"flow_next_{'c' if compact else 'f'}",
-        ):
-            st.session_state["nav_page"] = first_incomplete["page"]
-            st.rerun()
-
 
 # Normaliza nav_page por si quedó un valor antiguo en session_state
 if st.session_state.get("nav_page") not in PAGES:
@@ -696,9 +626,9 @@ if st.session_state.get("nav_page") not in PAGES:
 
 if "nav_page" not in st.session_state:
     st.session_state["nav_page"] = "Dashboard"
-
 with st.sidebar:
-    st.markdown("### Menú")
+    st.markdown("### 🧾 Control documental de faenas")
+
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
         "Mandantes": "🏢 Mandantes",
@@ -710,34 +640,77 @@ with st.sidebar:
         "Export (ZIP)": "📦 Export (ZIP)",
         "Backup / Restore": "💾 Backup / Restore",
     }
+
     st.radio("Secciones", PAGES, key="nav_page", format_func=lambda x: PAGE_LABELS.get(x, x))
 
     st.divider()
-    st.markdown("### Atajos")
+    st.markdown("### 🔎 Contexto")
+    try:
+        _fa = fetch_df("""
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+        """)
+    except Exception:
+        _fa = pd.DataFrame()
+
+    if not _fa.empty:
+        default_id = st.session_state.get("selected_faena_id", int(_fa["id"].iloc[0]))
+        opts = _fa["id"].tolist()
+        if default_id not in opts:
+            default_id = int(opts[0])
+        idx = opts.index(default_id)
+        faena_id = st.selectbox(
+            "Faena seleccionada",
+            opts,
+            index=idx,
+            format_func=lambda x: f"{x} - {_fa[_fa['id']==x].iloc[0]['mandante']} / {_fa[_fa['id']==x].iloc[0]['nombre']} ({_fa[_fa['id']==x].iloc[0]['estado']})",
+        )
+        st.session_state["selected_faena_id"] = int(faena_id)
+
+        cctx1, cctx2 = st.columns(2)
+        with cctx1:
+            if st.button("📎 Docs", use_container_width=True):
+                st.session_state["nav_page"] = "Documentos Trabajador"
+                st.rerun()
+        with cctx2:
+            if st.button("📦 Export", use_container_width=True):
+                st.session_state["nav_page"] = "Export (ZIP)"
+                st.rerun()
+    else:
+        st.caption("(Aún no hay faenas para seleccionar)")
+
+    st.divider()
+    st.markdown("### ⚡ Resumen")
+    counts = get_global_counts()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Faenas", counts.get("faenas", 0))
+        st.metric("Trabajadores", counts.get("trabajadores", 0))
+    with c2:
+        st.metric("Activas", counts.get("faenas_activas", 0))
+        st.metric("Docs", counts.get("docs", 0))
+
+    st.divider()
+    st.markdown("### ➕ Atajos")
     cqa1, cqa2 = st.columns(2)
     with cqa1:
-        if st.button("➕ Mandante", use_container_width=True):
+        if st.button("Mandante", use_container_width=True):
             st.session_state["nav_page"] = "Mandantes"
             st.rerun()
-        if st.button("➕ Faena", use_container_width=True):
+        if st.button("Faena", use_container_width=True):
             st.session_state["nav_page"] = "Faenas"
             st.rerun()
     with cqa2:
-        if st.button("➕ Trabajador", use_container_width=True):
+        if st.button("Trabajador", use_container_width=True):
             st.session_state["nav_page"] = "Trabajadores"
             st.rerun()
-        if st.button("📦 Export", use_container_width=True):
-            st.session_state["nav_page"] = "Export (ZIP)"
+        if st.button("Asignar", use_container_width=True):
+            st.session_state["nav_page"] = "Asignar Trabajadores"
             st.rerun()
 
-
-
-st.divider()
-with st.expander("🧭 Flujo guiado", expanded=False):
-    render_flow_widget(compact=True)
-
     st.divider()
-    st.markdown("### Respaldo")
+    st.markdown("### 💾 Respaldo")
     if "auto_backup_enabled" not in st.session_state:
         st.session_state["auto_backup_enabled"] = True
     st.checkbox("Auto-backup al guardar (solo app.db)", key="auto_backup_enabled")
@@ -780,10 +753,6 @@ def page_dashboard():
     c3.metric("Faenas activas", fa_act)
     c4.metric("Trabajadores", trab_n)
     c5.metric("Asignaciones", asg_n)
-
-
-    with st.expander("🧭 Flujo guiado", expanded=False):
-        render_flow_widget(compact=False)
 
     st.divider()
 
@@ -983,7 +952,7 @@ def page_faenas():
         ORDER BY m.nombre, cf.nombre
     ''')
 
-    tab1, tab2, tab3 = st.tabs(["➕ Crear faena", "📋 Listado", "📎 Anexos"])
+    tab1, tab2, tab3 = st.tabs(["➕ Crear faena", "📋 Listado (semáforo)", "📎 Anexos"])
 
     with tab1:
         mandante_id = st.selectbox(
@@ -1030,82 +999,69 @@ def page_faenas():
             except Exception as e:
                 st.error(f"No se pudo crear: {e}")
 
-    df = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio, f.fecha_termino, f.ubicacion,
-               COALESCE(cf.nombre, '') AS contrato_faena
-        FROM faenas f
-        JOIN mandantes m ON m.id=f.mandante_id
-        LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-        ORDER BY f.id DESC
-    ''')
-
     with tab2:
-        # Semáforo de completitud (docs obligatorios por trabajador asignado)
-        prog = faena_progress_table()
-        if prog.empty:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+        df = faena_progress_table()
+        if df.empty:
+            st.info("No hay faenas aún.")
         else:
-            prog = prog.copy()
+            out = df.copy()
 
             def _semaforo(r):
-                if int(r.get("trabajadores", 0)) <= 0:
+                try:
+                    tr = int(r.get("trabajadores", 0) or 0)
+                    pct = float(r.get("cobertura_docs_pct", 0) or 0)
+                    falt = int(r.get("faltantes_total", 0) or 0)
+                except Exception:
+                    tr, pct, falt = 0, 0, 0
+
+                if tr == 0:
                     return "🔴 CRÍTICO"
-                if int(r.get("faltantes_total", 0)) <= 0:
+                if falt == 0 and pct >= 100:
                     return "🟢 OK"
-                if float(r.get("cobertura_docs_pct", 0.0)) >= 70.0:
+                if pct >= 70:
                     return "🟡 PENDIENTE"
                 return "🔴 CRÍTICO"
 
-            prog["semaforo"] = prog.apply(_semaforo, axis=1)
+            out["estado_docs"] = out.apply(_semaforo, axis=1)
+            out["cobertura_%"] = out["cobertura_docs_pct"].round(0).astype(int)
 
-            show = df.merge(
-                prog[["faena_id", "trabajadores", "trab_ok", "cobertura_docs_pct", "faltantes_total", "semaforo"]],
-                left_on="id",
-                right_on="faena_id",
-                how="left",
-            ).drop(columns=["faena_id"])
+            show = out.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
+            show = show[["estado_docs", "id", "mandante", "faena_nombre", "estado", "fecha_inicio", "fecha_termino", "trabajadores", "trab_ok", "cobertura_%", "faltantes_total"]].copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
-            show = show.rename(
-                columns={
-                    "cobertura_docs_pct": "cobertura_% (docs)",
-                    "faltantes_total": "faltantes_docs",
-                    "trab_ok": "trabajadores_ok",
-                }
-            )
+            st.caption("Regla semáforo: 🔴 sin trabajadores o cobertura <70% | 🟡 ≥70% con faltantes | 🟢 100% sin faltantes.")
 
-            for c in ["trabajadores", "trabajadores_ok", "faltantes_docs"]:
-                if c in show.columns:
-                    show[c] = show[c].fillna(0).astype(int)
-            if "cobertura_% (docs)" in show.columns:
-                show["cobertura_% (docs)"] = show["cobertura_% (docs)"].fillna(0.0)
-
-            try:
-                st.dataframe(
-                    show,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "cobertura_% (docs)": st.column_config.ProgressColumn(
-                            "Cobertura docs (%)",
-                            min_value=0,
-                            max_value=100,
-                            format="%.1f",
-                        ),
-                        "semaforo": st.column_config.TextColumn("Estado completitud"),
-                    },
-                )
-            except Exception:
-                st.dataframe(show, use_container_width=True, hide_index=True)
+            colq1, colq2 = st.columns([2, 1])
+            with colq1:
+                fid = st.selectbox("Acción rápida: seleccionar faena", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['mandante']} / {show[show['id']==x].iloc[0]['faena_nombre']}")
+            with colq2:
+                if st.button("Ir a Export", type="primary", use_container_width=True):
+                    st.session_state["selected_faena_id"] = int(fid)
+                    st.session_state["nav_page"] = "Export (ZIP)"
+                    st.rerun()
 
     with tab3:
-        if df.empty:
+        # Listado base para anexos (usa tabla de faenas)
+        base = fetch_df('''
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio, f.fecha_termino, f.ubicacion,
+                   COALESCE(cf.nombre, '') AS contrato_faena
+            FROM faenas f
+            JOIN mandantes m ON m.id=f.mandante_id
+            LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
+            ORDER BY f.id DESC
+        ''')
+
+        if base.empty:
             st.info("No hay faenas.")
             return
+
         faena_id = st.selectbox(
             "Faena",
-            df["id"].tolist(),
-            format_func=lambda x: f"{x} - {df[df['id']==x].iloc[0]['mandante']} / {df[df['id']==x].iloc[0]['nombre']}",
+            base["id"].tolist(),
+            format_func=lambda x: f"{x} - {base[base['id']==x].iloc[0]['mandante']} / {base[base['id']==x].iloc[0]['nombre']}",
         )
+        st.session_state["selected_faena_id"] = int(faena_id)
+
         st.markdown("### Subir anexo")
         up = st.file_uploader("Archivo anexo", key="up_anexo_faena", type=None)
         if st.button("Guardar anexo", type="primary", disabled=up is None):
@@ -1351,7 +1307,7 @@ def page_asignar_trabajadores():
 
 def page_documentos_trabajador():
     ui_header("Documentos Trabajador", "Carga documentos obligatorios (EPP, RIOHS, IRL, Contrato, Anexo) y extras si es necesario.")
-    trab = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos, nombres")
+    trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
     if trab.empty:
         ui_tip("Crea trabajadores primero.")
         return
@@ -1362,15 +1318,31 @@ def page_documentos_trabajador():
         format_func=lambda x: f"{trab[trab['id']==x].iloc[0]['apellidos']} {trab[trab['id']==x].iloc[0]['nombres']} ({trab[trab['id']==x].iloc[0]['rut']})",
     )
 
+    # Estado documental del trabajador
+    docs = fetch_df("SELECT doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC", (int(tid),))
+    tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
+    faltan = [d for d in DOC_OBLIGATORIOS if d not in tipos_presentes]
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    col1.metric("Obligatorios", len(DOC_OBLIGATORIOS))
+    col2.metric("Cargados", len([d for d in DOC_OBLIGATORIOS if d in tipos_presentes]))
+    col3.metric("Faltan", len(faltan))
+
+    if faltan:
+        st.warning("Faltan obligatorios: " + ", ".join(faltan))
+    else:
+        st.success("Trabajador completo (obligatorios OK).")
+
     tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
 
     with tab1:
         st.caption("Tipos obligatorios configurados:")
         st.code("\n".join(DOC_OBLIGATORIOS))
-        col1, col2 = st.columns([1, 2])
-        with col1:
+
+        colx1, colx2 = st.columns([1, 2])
+        with colx1:
             tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"])
-        with col2:
+        with colx2:
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación operador, Licencia, Examen ocupacional")
 
         up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
@@ -1389,8 +1361,11 @@ def page_documentos_trabajador():
             st.rerun()
 
     with tab2:
-        docs = fetch_df("SELECT id, doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC", (int(tid),))
-        st.dataframe(docs if not docs.empty else pd.DataFrame([{"info":"(sin documentos)"}]), use_container_width=True)
+        if docs.empty:
+            st.info("(sin documentos)")
+        else:
+            show = docs.copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
 def page_export_zip():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
@@ -1569,93 +1544,3 @@ else:
     # Si el estado quedó con un valor inesperado, vuelve a Dashboard
     st.session_state["nav_page"] = "Dashboard"
     st.rerun()
-# ----------------------------
-# Flujo guiado + Completitud
-# ----------------------------
-FLOW_STEPS = [
-    ("1) Mandante", "Mandantes", "Crea al menos 1 mandante."),
-    ("2) Contrato", "Contratos de Faena", "Crea al menos 1 contrato de faena."),
-    ("3) Faena", "Faenas", "Crea al menos 1 faena con fechas y estado."),
-    ("4) Trabajadores", "Trabajadores", "Carga trabajadores (manual o Excel)."),
-    ("5) Asignar", "Asignar Trabajadores", "Asigna trabajadores a una faena."),
-    ("6) Docs", "Documentos Trabajador", "Carga documentos (EPP, RIOHS, IRL, Contrato, Anexo)."),
-    ("7) Export", "Export (ZIP)", "Genera y descarga la carpeta ZIP de una faena."),
-]
-
-def get_flow_status():
-    # Devuelve lista de dicts: label, page, done, hint
-    counts = {}
-    try:
-        counts["mandantes"] = int(fetch_df("SELECT COUNT(*) n FROM mandantes")["n"].iloc[0])
-    except Exception:
-        counts["mandantes"] = 0
-    try:
-        counts["contratos"] = int(fetch_df("SELECT COUNT(*) n FROM contratos_faena")["n"].iloc[0])
-    except Exception:
-        counts["contratos"] = 0
-    try:
-        counts["faenas"] = int(fetch_df("SELECT COUNT(*) n FROM faenas")["n"].iloc[0])
-    except Exception:
-        counts["faenas"] = 0
-    try:
-        counts["trabajadores"] = int(fetch_df("SELECT COUNT(*) n FROM trabajadores")["n"].iloc[0])
-    except Exception:
-        counts["trabajadores"] = 0
-    try:
-        counts["asignaciones"] = int(fetch_df("SELECT COUNT(*) n FROM asignaciones")["n"].iloc[0])
-    except Exception:
-        counts["asignaciones"] = 0
-    try:
-        counts["docs"] = int(fetch_df("SELECT COUNT(*) n FROM trabajador_documentos")["n"].iloc[0])
-    except Exception:
-        counts["docs"] = 0
-    try:
-        counts["exports"] = int(fetch_df("SELECT COUNT(*) n FROM export_historial")["n"].iloc[0])
-    except Exception:
-        counts["exports"] = 0
-
-    done_map = {
-        "Mandantes": counts["mandantes"] > 0,
-        "Contratos de Faena": counts["contratos"] > 0,
-        "Faenas": counts["faenas"] > 0,
-        "Trabajadores": counts["trabajadores"] > 0,
-        "Asignar Trabajadores": counts["asignaciones"] > 0,
-        "Documentos Trabajador": counts["docs"] > 0,
-        "Export (ZIP)": counts["exports"] > 0,
-    }
-
-    out = []
-    for label, page, hint in FLOW_STEPS:
-        out.append({"label": label, "page": page, "done": bool(done_map.get(page)), "hint": hint})
-    return out
-
-def render_flow_widget(compact: bool = False):
-    steps = get_flow_status()
-    done_n = sum(1 for s in steps if s["done"])
-    total = len(steps)
-
-    if compact:
-        st.caption(f"Progreso: {done_n}/{total}")
-    else:
-        st.progress(done_n / total if total else 0)
-
-    for s in steps:
-        icon = "✅" if s["done"] else "⬜"
-        st.write(f"{icon} **{s['label']}** — {s['page']}")
-
-    st.caption("Tip: usa **Siguiente paso** para avanzar automáticamente.")
-    first_incomplete = next((s for s in steps if not s["done"]), None)
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        go_page = st.selectbox("Ir a", [s["page"] for s in steps], index=0, key=f"flow_go_{'c' if compact else 'f'}")
-    with col_b:
-        if st.button("Ir", use_container_width=True, key=f"flow_go_btn_{'c' if compact else 'f'}"):
-            st.session_state["nav_page"] = go_page
-            st.rerun()
-
-    if first_incomplete is not None:
-        if st.button("Siguiente paso", type="primary", use_container_width=True, key=f"flow_next_{'c' if compact else 'f'}"):
-            st.session_state["nav_page"] = first_incomplete["page"]
-            st.rerun()
-
-
