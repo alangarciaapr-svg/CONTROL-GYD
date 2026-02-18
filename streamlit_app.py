@@ -78,7 +78,12 @@ def ensure_dirs():
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
 def conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    try:
+        c.execute("PRAGMA foreign_keys = ON;")
+    except Exception:
+        pass
+    return c
 
 def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
     info = c.execute(f"PRAGMA table_info({table});").fetchall()
@@ -545,12 +550,17 @@ PAGES = [
     "Backup / Restore",
 ]
 
-if "page" not in st.session_state:
-    st.session_state["page"] = "Dashboard"
+# Normaliza nav_page por si quedó un valor antiguo en session_state
+if st.session_state.get("nav_page") not in PAGES:
+    st.session_state["nav_page"] = "Dashboard"
+
+
+if "nav_page" not in st.session_state:
+    st.session_state["nav_page"] = "Dashboard"
 
 with st.sidebar:
     st.header("Navegación")
-    st.radio("Ir a", PAGES, key="page")
+    st.radio("Ir a", PAGES, key="nav_page")
     st.caption("Flujo: Mandante → Contrato Faena → Faena → Trabajadores → Documentos → Export.")
 
     st.divider()
@@ -653,7 +663,7 @@ def page_dashboard():
     with colb1:
         if st.button("Ir a Export de esta faena"):
             st.session_state["selected_faena_id"] = int(faena_id)
-            st.session_state["page"] = "Export (ZIP)"
+            st.session_state["nav_page"] = "Export (ZIP)"
             st.rerun()
 
     st.divider()
@@ -1232,7 +1242,7 @@ with coldb2:
 # ----------------------------
 # Route
 # ----------------------------
-p = st.session_state["page"]
+p = st.session_state.get("nav_page", "Dashboard")
 if p == "Dashboard":
     page_dashboard()
 elif p == "Mandantes":
@@ -1251,3 +1261,8 @@ elif p == "Export (ZIP)":
     page_export_zip()
 elif p == "Backup / Restore":
     page_backup_restore()
+else:
+    # Si el estado quedó con un valor inesperado, vuelve a Dashboard
+    st.session_state["nav_page"] = "Dashboard"
+    st.rerun()
+
