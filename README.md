@@ -22,3 +22,5 @@ Nota:
 - ✨ Nuevo en v7.4: reorganización completa de UI (tabs, sidebar con atajos, estilo más profesional) sin perder funcionalidad.
 
 - v7.5.1: se corrige Guardar Mandante (submit siempre activo + validación post-submit + manejo duplicados).
+
+- v7.5.2: corrección de botones en formularios (sin disabled en forms) y validaciones post-submit; botones de upload/restore operativos con validación.

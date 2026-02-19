@@ -895,9 +895,17 @@ def page_contratos_faena():
             fi = st.date_input("Fecha inicio (opcional)", value=None)
             ft = st.date_input("Fecha término (opcional)", value=None)
             archivo = st.file_uploader("Archivo contrato (opcional)", key="up_contrato_faena", type=None)
-            ok = st.form_submit_button("Guardar contrato de faena", type="primary", disabled=not nombre.strip())
+            ok = st.form_submit_button("Guardar contrato de faena", type="primary")
 
         if ok:
+
+            if not nombre.strip():
+
+
+                st.error("Debes ingresar un nombre para el contrato de faena.")
+
+
+                st.stop()
             try:
                 file_path = None
                 sha = None
@@ -939,7 +947,12 @@ def page_contratos_faena():
             format_func=lambda x: f"{x} - {df[df['id']==x].iloc[0]['mandante']} / {df[df['id']==x].iloc[0]['nombre']}",
         )
         up = st.file_uploader("Archivo contrato", key="up_contrato_existente", type=None)
-        if st.button("Guardar archivo en contrato", type="primary", disabled=up is None):
+        if st.button("Guardar archivo en contrato", type="primary"):
+            if up is None:
+
+                st.error("Debes subir un archivo primero.")
+
+                st.stop()
             b = up.getvalue()
             file_path = save_file(["contratos_faena", "id", contrato_id], up.name, b)
             sha = sha256_bytes(b)
@@ -998,9 +1011,26 @@ def page_faenas():
             if errors:
                 st.warning("Revisar: " + " | ".join(errors))
 
-            ok = st.form_submit_button("Guardar faena", type="primary", disabled=bool(errors) or not nombre.strip())
+            ok = st.form_submit_button("Guardar faena", type="primary")
 
         if ok:
+
+            if not nombre.strip():
+
+
+                st.error("Debes ingresar un nombre para la faena.")
+
+
+                st.stop()
+
+
+            if errors:
+
+
+                st.error("Corrige las fechas/estado antes de guardar la faena.")
+
+
+                st.stop()
             try:
                 execute(
                     "INSERT INTO faenas(mandante_id, contrato_faena_id, nombre, ubicacion, fecha_inicio, fecha_termino, estado) VALUES(?,?,?,?,?,?,?)",
@@ -1077,7 +1107,12 @@ def page_faenas():
 
         st.markdown("### Subir anexo")
         up = st.file_uploader("Archivo anexo", key="up_anexo_faena", type=None)
-        if st.button("Guardar anexo", type="primary", disabled=up is None):
+        if st.button("Guardar anexo", type="primary"):
+            if up is None:
+
+                st.error("Debes subir un archivo primero.")
+
+                st.stop()
             b = up.getvalue()
             file_path = save_file(["faenas", faena_id, "anexos"], up.name, b)
             sha = sha256_bytes(b)
@@ -1210,9 +1245,17 @@ def page_trabajadores():
             email = st.text_input("Email (opcional)")
             fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
             vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
-            ok = st.form_submit_button("Guardar trabajador", type="primary", disabled=not (rut.strip() and nombres.strip() and apellidos.strip()))
+            ok = st.form_submit_button("Guardar trabajador", type="primary")
 
         if ok:
+
+            if not (rut.strip() and nombres.strip() and apellidos.strip()):
+
+
+                st.error("Debes completar RUT, Nombres y Apellidos.")
+
+
+                st.stop()
             try:
                 execute(
                     '''
@@ -1294,9 +1337,17 @@ def page_asignar_trabajadores():
             seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
             fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
             cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
-            ok = st.form_submit_button("Asignar seleccionados", type="primary", disabled=len(seleccion) == 0)
+            ok = st.form_submit_button("Asignar seleccionados", type="primary")
 
         if ok:
+
+            if len(seleccion) == 0:
+
+
+                st.error("Selecciona al menos un trabajador para asignar.")
+
+
+                st.stop()
             params = []
             for tid in seleccion:
                 params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
@@ -1359,7 +1410,12 @@ def page_documentos_trabajador():
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación operador, Licencia, Examen ocupacional")
 
         up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
-        if st.button("Guardar documento", type="primary", disabled=up is None):
+        if st.button("Guardar documento", type="primary"):
+            if up is None:
+
+                st.error("Debes subir un archivo primero.")
+
+                st.stop()
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
             folder = ["trabajadores", tid, safe_name(doc_tipo)]
@@ -1502,7 +1558,12 @@ def page_backup_restore():
         with coldb2:
             st.markdown("### Restaurar app.db")
             up_db = st.file_uploader("Sube un archivo .db", type=["db", "sqlite", "sqlite3"], key="up_db_only")
-            if st.button("Restaurar app.db", type="primary", disabled=up_db is None, use_container_width=True):
+            if st.button("Restaurar app.db", type="primary", use_container_width=True):
+                if up_db is None:
+
+                    st.error("Debes subir un archivo .db primero.")
+
+                    st.stop()
                 try:
                     with open(DB_PATH, "wb") as f:
                         f.write(up_db.getvalue())
@@ -1523,7 +1584,12 @@ def page_backup_restore():
         st.divider()
         st.markdown("### 2) Restaurar Backup completo")
         up = st.file_uploader("Sube backup ZIP", type=["zip"], key="up_backup_zip")
-        if st.button("Restaurar ahora", type="primary", disabled=up is None, use_container_width=True):
+        if st.button("Restaurar ahora", type="primary", use_container_width=True):
+            if up is None:
+
+                st.error("Debes subir un backup ZIP primero.")
+
+                st.stop()
             try:
                 restore_from_backup_zip(up.getvalue())
                 st.success("Backup restaurado. La app se reiniciará.")
