@@ -20,3 +20,5 @@ Nota:
 - ➕ Nuevo en v7.3.3: opción para **ocultar/mostrar el título** en la página (no afecta datos ni navegación).
 
 - ✨ Nuevo en v7.4: reorganización completa de UI (tabs, sidebar con atajos, estilo más profesional) sin perder funcionalidad.
+
+- v7.5.1: se corrige Guardar Mandante (submit siempre activo + validación post-submit + manejo duplicados).

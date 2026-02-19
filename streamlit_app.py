@@ -846,21 +846,34 @@ def page_mandantes():
     tab1, tab2 = st.tabs(["📋 Listado", "➕ Crear"])
 
     with tab2:
-        with st.form("form_mandante"):
-            nombre = st.text_input("Nombre mandante", placeholder="Bosque Los Lagos")
-            ok = st.form_submit_button("Guardar mandante", type="primary", disabled=not nombre.strip())
+        with st.form("form_mandante", clear_on_submit=True):
+            nombre = st.text_input("Nombre mandante", placeholder="Bosque Los Lagos", key="mandante_nombre_in")
+            ok = st.form_submit_button("Guardar mandante", type="primary")
         if ok:
-            try:
-                execute("INSERT INTO mandantes(nombre) VALUES(?)", (nombre.strip(),))
-                st.success("Mandante creado.")
-                auto_backup_db("mandante")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo crear: {e}")
+            nombre_clean = (nombre or "").strip()
+            if not nombre_clean:
+                st.warning("Ingresa un nombre de mandante.")
+            else:
+                try:
+                    execute("INSERT INTO mandantes(nombre) VALUES(?)", (nombre_clean,))
+                    st.success("Mandante creado.")
+                    auto_backup_db("mandante")
+                    st.rerun()
+                except Exception as e:
+                    # Manejo amigable de duplicados
+                    msg = str(e)
+                    if "UNIQUE" in msg.upper():
+                        st.error("Ya existe un mandante con ese nombre.")
+                    else:
+                        st.error(f"No se pudo crear: {e}")
 
     with tab1:
         df = fetch_df("SELECT id, nombre FROM mandantes ORDER BY id DESC")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        q = st.text_input("Buscar mandante", placeholder="Nombre...")
+        out = df.copy()
+        if q.strip():
+            out = out[out["nombre"].astype(str).str.lower().str.contains(q.strip().lower(), na=False)]
+        st.dataframe(out, use_container_width=True, hide_index=True)
 
 def page_contratos_faena():
     ui_header("Contratos de Faena", "Crea contratos por mandante y carga el archivo si aplica.")
