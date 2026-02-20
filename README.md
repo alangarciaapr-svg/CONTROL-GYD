@@ -40,3 +40,7 @@ Nota:
 - v8.0.3: Reparado 'Documentos Trabajador' eliminando wrappers HTML que generaban cuadros en blanco; selector de faena + toggle funcionan sin cajas vacías.
 
 - v8.0.4: Restore de Backup ZIP ahora soporta formatos antiguos si traen .db y entrega error claro si el ZIP es solo código. Se agregan migraciones para columnas faltantes en contratos/faenas/asignaciones/documentos.
+
+- v8.1: Faenas ahora permite editar y eliminar (con confirmación y borrado de dependencias: asignaciones/anexos). Se mantiene semáforo y anexos.
+
+- v8.2: Documentos Empresa por FAENA (nuevo módulo), export ZIP por faena ahora incluye 02_Documentos_Empresa_Faena. Export mensual (por mes de inicio) con historial mensual.
