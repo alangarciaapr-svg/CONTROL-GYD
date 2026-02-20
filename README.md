@@ -34,3 +34,5 @@ Nota:
 - v7.9: Dashboard 'otro nivel': Inbox de gestión con CTA, Vista Global vs Faena, Acciones rápidas, 2 gráficos mínimos.
 
 - v8.0: Carga/importación de trabajadores por FAENA (Importar Excel y asignar). Documentos Trabajador ahora puede operar por faena (solo asignados) y muestra pendientes por faena. Documentación del trabajador se reutiliza si se repite en otra faena.
+
+- v8.0.2: Documentos Trabajador ahora permite seleccionar faena dentro del apartado (sin depender del Dashboard), manteniendo modo 'Solo esta faena'.

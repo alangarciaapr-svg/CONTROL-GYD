@@ -1808,44 +1808,63 @@ def page_documentos_empresa():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 def page_documentos_trabajador():
-    ui_header("Documentos Trabajador", "Carga documentos obligatorios por trabajador. Si trabajas por faena, verás solo los trabajadores asignados a la faena seleccionada.")
-    faena_id = st.session_state.get("selected_faena_id")
+    ui_header(
+        "Documentos Trabajador",
+        "Carga documentos obligatorios por trabajador. Puedes trabajar por FAENA: selecciona una faena y verás solo los trabajadores asignados.",
+    )
 
-    # Contexto: por faena (si hay una seleccionada) o global
-    scoped = False
-    faena_info = None
-    if faena_id:
-        try:
-            faena_info = fetch_df('''
-                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-                WHERE f.id=?
-            ''', (int(faena_id),))
-        except Exception:
-            faena_info = None
+    # Lista de faenas para selector local (en este mismo apartado)
+    faenas = fetch_df(
+        '''
+        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+        ORDER BY f.id DESC
+        '''
+    )
+
+    # Selector de faena dentro del apartado
+    current = st.session_state.get("selected_faena_id")
+    ids = [None] + (faenas["id"].tolist() if not faenas.empty else [])
+    default_index = 0
+    if current in ids:
+        default_index = ids.index(current)
 
     st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-    c1, c2 = st.columns([2, 1])
+    c1, c2 = st.columns([3, 1])
+
     with c1:
-        if faena_info is not None and not faena_info.empty:
-            r = faena_info.iloc[0]
-            st.markdown(f"**Faena seleccionada:** {int(r['id'])} — {r['mandante']} / {r['nombre']} ({r['estado']})")
-        else:
-            st.markdown("**Faena seleccionada:** (no hay)")
+        faena_pick = st.selectbox(
+            "Faena (opcional)",
+            ids,
+            index=default_index,
+            format_func=lambda x: "(sin faena)" if x is None else (
+                f"{int(x)} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']} ({faenas[faenas['id']==x].iloc[0]['estado']})"
+            ),
+            key="docs_faena_pick",
+        )
+        # guardar selección
+        st.session_state["selected_faena_id"] = None if faena_pick is None else int(faena_pick)
+
     with c2:
-        default = True if (faena_info is not None and not faena_info.empty) else False
-        scoped = st.toggle("Solo esta faena", value=default)
+        default_scoped = True if faena_pick is not None else False
+        scoped = st.toggle("Solo esta faena", value=default_scoped, key="docs_scoped_toggle")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if scoped and (faena_info is not None) and (not faena_info.empty):
-        trab = fetch_assigned_workers(int(faena_id))
+    # Fuente de trabajadores: por faena o global
+    if scoped:
+        if faena_pick is None:
+            st.error("Activa 'Solo esta faena' pero no has seleccionado una faena.")
+            st.stop()
+
+        trab = fetch_assigned_workers(int(faena_pick))
         if trab.empty:
             ui_tip("Esta faena no tiene trabajadores asignados. Ve a 'Asignar Trabajadores' para incorporar personal.")
             return
 
-        # Pendientes por faena (resumen)
+        # Pendientes por faena (resumen accionable)
         with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
-            pend = pendientes_obligatorios(int(faena_id))
+            pend = pendientes_obligatorios(int(faena_pick))
             if not pend:
                 st.info("(sin asignaciones)")
             else:
@@ -1863,15 +1882,18 @@ def page_documentos_trabajador():
             ui_tip("Crea trabajadores primero.")
             return
 
-    # Selector de trabajador (solo los de la faena si aplica)
+    # Selector de trabajador (solo asignados si scoped)
     def _fmt(x):
         r = trab[trab["id"] == x].iloc[0]
         return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
 
-    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt)
+    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt, key="docs_trabajador_pick")
 
-    # Estado documental del trabajador (global)
-    docs = fetch_df("SELECT doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC", (int(tid),))
+    # Estado documental del trabajador (global: se reutiliza entre faenas)
+    docs = fetch_df(
+        "SELECT doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
+        (int(tid),),
+    )
     tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
     faltan = [d for d in DOC_OBLIGATORIOS if d not in tipos_presentes]
 
@@ -1893,20 +1915,26 @@ def page_documentos_trabajador():
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"])
+            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick")
         with colx2:
-            tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación operador, Licencia, Examen ocupacional")
+            tipo_otro = st.text_input(
+                "Si eliges OTRO, escribe el nombre",
+                placeholder="Ej: Certificación operador, Licencia, Examen ocupacional",
+                key="doc_tipo_otro",
+            )
 
         up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
         if st.button("Guardar documento", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo primero.")
                 st.stop()
+
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
             folder = ["trabajadores", tid, safe_name(doc_tipo)]
             file_path = save_file(folder, up.name, b)
             sha = sha256_bytes(b)
+
             execute(
                 "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, sha256, created_at) VALUES(?,?,?,?,?,?)",
                 (int(tid), doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
