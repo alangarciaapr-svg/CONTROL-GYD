@@ -28,3 +28,5 @@ Nota:
 - v7.6: Nuevo apartado 'Documentos Empresa' + Dashboard más dinámico (KPIs, gráficos, tab Empresa). Export ZIP incluye carpeta 02_Documentos_Empresa.
 
 - v7.7: Contratos de Faena permite editar y eliminar (con confirmación y manejo de faenas asociadas), además de gestionar archivo.
+
+- v7.8: Documentos Empresa sugeridos: CERTIFICADO_CUMPLIMIENTO_LABORAL, CERTIFICADO_ACCIDENTABILIDAD, OTROS. Documentos Trabajador agrega LIQUIDACIONES y FINIQUITO. UI iOS-like (cards, bordes redondeados).
