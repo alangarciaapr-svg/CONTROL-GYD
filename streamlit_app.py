@@ -2431,6 +2431,7 @@ def page_export_zip():
                 else:
                     st.success(f"{k} — OK")
 
+
 st.divider()
 st.write("**Documentos empresa (por faena):**")
 if miss_emp:
@@ -2440,11 +2441,12 @@ else:
 
 
     with tab2:
+        include_global = st.checkbox("Incluir documentos empresa globales (además de los de la faena)", value=True, key="exp_inc_global")
         colx1, colx2 = st.columns([1, 1])
         with colx1:
             if st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
                 try:
-                    zip_bytes, name = export_zip_for_faena(int(faena_id))
+                    zip_bytes, name = export_zip_for_faena(int(faena_id), include_global_empresa_docs=include_global)
                     path = persist_export(int(faena_id), zip_bytes, name)
                     st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
                     auto_backup_db("export_zip")
