@@ -27,6 +27,16 @@ DOC_OBLIGATORIOS = [
     "CONTRATO_TRABAJO",
     "ANEXO_CONTRATO",
 ]
+
+
+DOC_EMPRESA_SUGERIDOS = [
+    "RUT_EMPRESA",
+    "CERTIFICADO_VIGENCIA",
+    "RIOHS_EMPRESA",
+    "POLIZA_SEGURO",
+    "CERTIFICADO_MUTUALIDAD",
+    "PREVIRRED_ULTIMO",
+]
 REQ_DOCS_N = len(DOC_OBLIGATORIOS)
 
 # ----------------------------
@@ -95,6 +105,7 @@ def get_global_counts():
         ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
         ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
         ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
+            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos"),
         ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
     ]:
         try:
@@ -256,6 +267,19 @@ def init_db():
         ''')
 
         # Eliminado: "Documentos extra faena" (no tabla ni UI en esta versión)
+
+
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS empresa_documentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_tipo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        ''')
+
 
         c.execute('''
         CREATE TABLE IF NOT EXISTS export_historial (
@@ -465,6 +489,16 @@ def export_zip_for_faena(faena_id: int):
             with open(src, "rb") as fp:
                 z.writestr(f"01_Anexos_Faena/{fname}", fp.read())
 
+    # 02_Documentos_Empresa
+    edocs = fetch_df("SELECT * FROM empresa_documentos ORDER BY id")
+    for _, d in edocs.iterrows():
+        src = d["file_path"]
+        if src and os.path.exists(src):
+            fname = os.path.basename(src)
+            tipo = safe_name(d["doc_tipo"])
+            with open(src, "rb") as fp:
+                z.writestr(f"02_Documentos_Empresa/{tipo}/{fname}", fp.read())
+
     # 03_Trabajadores
     asign = fetch_df('''
         SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
@@ -612,12 +646,12 @@ PAGES = [
     "Contratos de Faena",
     "Faenas",
     "Trabajadores",
+    "Documentos Empresa",
     "Asignar Trabajadores",
     "Documentos Trabajador",
     "Export (ZIP)",
     "Backup / Restore",
 ]
-
 
 # Normaliza nav_page por si quedó un valor antiguo en session_state
 if st.session_state.get("nav_page") not in PAGES:
@@ -635,6 +669,7 @@ with st.sidebar:
         "Contratos de Faena": "📄 Contratos de Faena",
         "Faenas": "🛠️ Faenas",
         "Trabajadores": "👷 Trabajadores",
+        "Documentos Empresa": "🏛️ Documentos Empresa",
         "Asignar Trabajadores": "🧩 Asignar Trabajadores",
         "Documentos Trabajador": "📎 Documentos Trabajador",
         "Export (ZIP)": "📦 Export (ZIP)",
@@ -741,31 +776,59 @@ st.title(f"{APP_NAME} — {current_section}")
 # ----------------------------
 def page_dashboard():
     ui_header("Dashboard", "Resumen general, cobertura de documentos y alertas.")
-    mand_n = int(fetch_df("SELECT COUNT(*) AS n FROM mandantes")["n"].iloc[0])
-    faena_n = int(fetch_df("SELECT COUNT(*) AS n FROM faenas")["n"].iloc[0])
-    fa_act = int(fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'")["n"].iloc[0])
-    trab_n = int(fetch_df("SELECT COUNT(*) AS n FROM trabajadores")["n"].iloc[0])
-    asg_n = int(fetch_df("SELECT COUNT(*) AS n FROM asignaciones")["n"].iloc[0])
+    counts = get_global_counts()
+    mand_n = counts.get("mandantes", 0)
+    faena_n = counts.get("faenas", 0)
+    fa_act = counts.get("faenas_activas", 0)
+    trab_n = counts.get("trabajadores", 0)
+    asg_n = counts.get("asignaciones", 0)
+    docs_emp = counts.get("docs_empresa", 0)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Mandantes", mand_n)
     c2.metric("Faenas", faena_n)
-    c3.metric("Faenas activas", fa_act)
+    c3.metric("Activas", fa_act)
     c4.metric("Trabajadores", trab_n)
     c5.metric("Asignaciones", asg_n)
+    c6.metric("Docs empresa", docs_emp)
+
+    df_prog = faena_progress_table()
+
+    if not df_prog.empty:
+        def _semaforo(r):
+            tr = int(r.get("trabajadores", 0) or 0)
+            pct = float(r.get("cobertura_docs_pct", 0) or 0)
+            falt = int(r.get("faltantes_total", 0) or 0)
+            if tr == 0:
+                return "CRITICO"
+            if falt == 0 and pct >= 100:
+                return "OK"
+            if pct >= 70:
+                return "PENDIENTE"
+            return "CRITICO"
+
+        sem = df_prog.apply(_semaforo, axis=1)
+        k_ok = int((sem == "OK").sum())
+        k_pen = int((sem == "PENDIENTE").sum())
+        k_cri = int((sem == "CRITICO").sum())
+
+        ck1, ck2, ck3 = st.columns(3)
+        ck1.metric("🟢 Faenas OK", k_ok)
+        ck2.metric("🟡 Pendientes", k_pen)
+        ck3.metric("🔴 Críticas", k_cri)
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs(["📋 Avance por faena", "✅ Pendientes", "⏳ Alertas"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Avance por faena", "✅ Pendientes", "📈 Indicadores", "🏢 Empresa", "⏳ Alertas"])
+
     with tab1:
-        df = faena_progress_table()
-        if df.empty:
+        if df_prog.empty:
             ui_tip("Crea un mandante, contrato de faena y una faena para comenzar.")
             return
 
         colf1, colf2, colf3 = st.columns([2, 1, 1])
         with colf1:
-            mandantes = ["(todos)"] + sorted(df["mandante"].unique().tolist())
+            mandantes = ["(todos)"] + sorted(df_prog["mandante"].unique().tolist())
             f_mand = st.selectbox("Mandante", mandantes, index=0)
         with colf2:
             estados = ["(todos)"] + ESTADOS_FAENA
@@ -773,7 +836,7 @@ def page_dashboard():
         with colf3:
             q = st.text_input("Buscar faena", placeholder="Ej: bellavista")
 
-        out = df.copy()
+        out = df_prog.copy()
         if f_mand != "(todos)":
             out = out[out["mandante"] == f_mand]
         if f_estado != "(todos)":
@@ -792,16 +855,17 @@ def page_dashboard():
         st.dataframe(show, use_container_width=True, hide_index=True)
 
     with tab2:
-        df = faena_progress_table()
-        if df.empty:
+        if df_prog.empty:
             ui_tip("No hay faenas aún.")
             return
-        show = df.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
+        show = df_prog.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
         faena_id = st.selectbox(
             "Faena",
             show["id"].tolist(),
             format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['mandante']} / {show[show['id']==x].iloc[0]['faena_nombre']}",
         )
+        st.session_state["selected_faena_id"] = int(faena_id)
+
         pend = pendientes_obligatorios(int(faena_id))
         if not pend:
             st.info("(sin trabajadores asignados)")
@@ -816,11 +880,51 @@ def page_dashboard():
                     st.success(f"{k} — OK")
 
         if st.button("Ir a Export de esta faena", use_container_width=True):
-            st.session_state["selected_faena_id"] = int(faena_id)
             st.session_state["nav_page"] = "Export (ZIP)"
             st.rerun()
 
     with tab3:
+        if df_prog.empty:
+            st.info("Crea faenas para ver indicadores.")
+        else:
+            st.markdown("### Faenas por estado")
+            s = df_prog.groupby("estado")["faena_id"].count().rename("cantidad")
+            st.bar_chart(s)
+
+            st.divider()
+            st.markdown("### Cobertura documental promedio por mandante")
+            mdf = df_prog.groupby("mandante")["cobertura_docs_pct"].mean().sort_values(ascending=False).rename("cobertura_promedio_%")
+            st.bar_chart(mdf)
+
+            st.divider()
+            st.markdown("### Top faenas críticas (por faltantes)")
+            top = df_prog.copy().sort_values(["faltantes_total", "cobertura_docs_pct"], ascending=[False, True]).head(10)
+            top = top.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
+            st.dataframe(top[["id","mandante","faena_nombre","estado","trabajadores","cobertura_docs_pct","faltantes_total"]], use_container_width=True, hide_index=True)
+
+    with tab4:
+        st.markdown("### Estado documentos empresa (se exportan en el ZIP)")
+        edf = fetch_df("SELECT doc_tipo, nombre_archivo, created_at FROM empresa_documentos ORDER BY id DESC")
+        tipos_presentes = set(edf["doc_tipo"].astype(str).tolist()) if not edf.empty else set()
+        faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
+
+        cex1, cex2, cex3 = st.columns([1,1,2])
+        cex1.metric("Docs empresa", int(len(edf)))
+        cex2.metric("Tipos presentes", int(len(set(tipos_presentes))))
+        cex3.metric("Faltan sugeridos", int(len(faltan)))
+
+        if faltan:
+            st.warning("Sugeridos faltantes: " + ", ".join(faltan))
+        else:
+            st.success("Sugeridos completos (si aplica).")
+
+        if st.button("Abrir Documentos Empresa", type="primary"):
+            st.session_state["nav_page"] = "Documentos Empresa"
+            st.rerun()
+
+        st.dataframe(edf.head(20) if not edf.empty else pd.DataFrame([{"info":"(sin documentos empresa)"}]), use_container_width=True, hide_index=True)
+
+    with tab5:
         today = date.today()
         limit = today + timedelta(days=30)
         tdf = fetch_df("SELECT rut, apellidos, nombres, cargo, vigencia_examen FROM trabajadores")
@@ -876,13 +980,13 @@ def page_mandantes():
         st.dataframe(out, use_container_width=True, hide_index=True)
 
 def page_contratos_faena():
-    ui_header("Contratos de Faena", "Crea contratos por mandante y carga el archivo si aplica.")
+    ui_header("Contratos de Faena", "Crea, edita o elimina contratos por mandante. Puedes adjuntar archivo al contrato.")
     mand = fetch_df("SELECT * FROM mandantes ORDER BY nombre")
     if mand.empty:
         ui_tip("Primero crea un mandante.")
         return
 
-    tab1, tab2 = st.tabs(["➕ Crear contrato", "📋 Listado / Archivo"])
+    tab1, tab2 = st.tabs(["➕ Crear contrato", "✏️ Editar / Eliminar / Archivo"])
 
     with tab1:
         with st.form("form_contrato_faena", clear_on_submit=False):
@@ -898,23 +1002,17 @@ def page_contratos_faena():
             ok = st.form_submit_button("Guardar contrato de faena", type="primary")
 
         if ok:
-
             if not nombre.strip():
-
-
                 st.error("Debes ingresar un nombre para el contrato de faena.")
-
-
                 st.stop()
             try:
                 file_path = None
                 sha = None
-                created_at = None
+                created_at = datetime.utcnow().isoformat(timespec="seconds")
                 if archivo is not None:
                     b = archivo.getvalue()
                     file_path = save_file(["contratos_faena", mandante_id], archivo.name, b)
                     sha = sha256_bytes(b)
-                    created_at = datetime.utcnow().isoformat(timespec="seconds")
 
                 execute(
                     "INSERT INTO contratos_faena(mandante_id, nombre, fecha_inicio, fecha_termino, file_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
@@ -928,41 +1026,117 @@ def page_contratos_faena():
 
     with tab2:
         df = fetch_df('''
-            SELECT cf.id, m.nombre AS mandante, cf.nombre, cf.fecha_inicio, cf.fecha_termino,
+            SELECT cf.id, cf.mandante_id, m.nombre AS mandante, cf.nombre, cf.fecha_inicio, cf.fecha_termino, cf.file_path,
                    CASE WHEN cf.file_path IS NULL THEN '(sin archivo)' ELSE 'OK' END AS archivo
             FROM contratos_faena cf
             JOIN mandantes m ON m.id=cf.mandante_id
             ORDER BY cf.id DESC
         ''')
-        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.markdown("### Actualizar / agregar archivo")
         if df.empty:
             st.info("No hay contratos.")
             return
+
+        st.markdown("### 📋 Contratos existentes")
+        st.dataframe(df.drop(columns=["file_path","mandante_id"]), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("### ✏️ Editar datos del contrato")
+
         contrato_id = st.selectbox(
-            "Contrato de faena",
+            "Selecciona contrato",
             df["id"].tolist(),
             format_func=lambda x: f"{x} - {df[df['id']==x].iloc[0]['mandante']} / {df[df['id']==x].iloc[0]['nombre']}",
+            key="sel_contrato_edit",
         )
-        up = st.file_uploader("Archivo contrato", key="up_contrato_existente", type=None)
-        if st.button("Guardar archivo en contrato", type="primary"):
-            if up is None:
+        row = df[df["id"] == contrato_id].iloc[0]
 
-                st.error("Debes subir un archivo primero.")
-
-                st.stop()
-            b = up.getvalue()
-            file_path = save_file(["contratos_faena", "id", contrato_id], up.name, b)
-            sha = sha256_bytes(b)
-            execute(
-                "UPDATE contratos_faena SET file_path=?, sha256=?, created_at=? WHERE id=?",
-                (file_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
+        with st.form("form_edit_contrato"):
+            mandante_id_new = st.selectbox(
+                "Mandante (cambiar)",
+                mand["id"].tolist(),
+                index=mand["id"].tolist().index(int(row["mandante_id"])) if int(row["mandante_id"]) in mand["id"].tolist() else 0,
+                format_func=lambda x: mand[mand["id"] == x].iloc[0]["nombre"],
             )
-            st.success("Archivo actualizado.")
-            auto_backup_db("contrato_archivo")
-            st.rerun()
+            nombre_new = st.text_input("Nombre", value=str(row["nombre"]))
+            fi_new = st.date_input("Fecha inicio (opcional)", value=parse_date_maybe(row["fecha_inicio"]))
+            ft_new = st.date_input("Fecha término (opcional)", value=parse_date_maybe(row["fecha_termino"]))
+            upd = st.form_submit_button("Guardar cambios", type="primary")
+
+        if upd:
+            if not nombre_new.strip():
+                st.error("El nombre no puede estar vacío.")
+                st.stop()
+            try:
+                execute(
+                    "UPDATE contratos_faena SET mandante_id=?, nombre=?, fecha_inicio=?, fecha_termino=? WHERE id=?",
+                    (int(mandante_id_new), nombre_new.strip(), str(fi_new) if fi_new else None, str(ft_new) if ft_new else None, int(contrato_id)),
+                )
+                st.success("Contrato actualizado.")
+                auto_backup_db("contrato_edit")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo actualizar: {e}")
+
+        st.divider()
+        st.markdown("### 📎 Archivo del contrato")
+
+        up = st.file_uploader("Subir / reemplazar archivo", key="up_contrato_existente", type=None)
+        cfa1, cfa2 = st.columns([1, 1])
+        with cfa1:
+            if st.button("Guardar archivo", type="primary", use_container_width=True):
+                if up is None:
+                    st.error("Debes subir un archivo primero.")
+                    st.stop()
+                b = up.getvalue()
+                file_path = save_file(["contratos_faena", "id", contrato_id], up.name, b)
+                sha = sha256_bytes(b)
+                execute(
+                    "UPDATE contratos_faena SET file_path=?, sha256=?, created_at=? WHERE id=?",
+                    (file_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
+                )
+                st.success("Archivo actualizado.")
+                auto_backup_db("contrato_archivo")
+                st.rerun()
+        with cfa2:
+            # descarga si existe
+            current_path = row.get("file_path")
+            if current_path and os.path.exists(str(current_path)):
+                with open(str(current_path), "rb") as fp:
+                    st.download_button(
+                        "Descargar archivo actual",
+                        data=fp.read(),
+                        file_name=os.path.basename(str(current_path)),
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                    )
+            else:
+                st.button("Descargar archivo actual", disabled=True, use_container_width=True)
+
+        st.divider()
+        st.markdown("### 🗑️ Eliminar contrato")
+        st.caption("Si este contrato está asociado a faenas existentes, al eliminarlo esas faenas quedarán con contrato en blanco (contrato_faena_id = NULL).")
+
+        # Dependencias
+        dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE contrato_faena_id=?", (int(contrato_id),))
+        dep_n = int(dep["n"].iloc[0]) if not dep.empty else 0
+
+        st.warning(f"Faenas asociadas a este contrato: {dep_n}")
+
+        confirm = st.checkbox("Confirmo que deseo eliminar este contrato", key="chk_del_contrato")
+        if st.button("Eliminar contrato definitivamente", type="secondary"):
+            if not confirm:
+                st.error("Debes confirmar el checkbox antes de eliminar.")
+                st.stop()
+            try:
+                # primero desvincular (por seguridad explícita, aunque FK está ON DELETE SET NULL)
+                execute("UPDATE faenas SET contrato_faena_id=NULL WHERE contrato_faena_id=?", (int(contrato_id),))
+                execute("DELETE FROM contratos_faena WHERE id=?", (int(contrato_id),))
+                st.success("Contrato eliminado.")
+                auto_backup_db("contrato_delete")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo eliminar: {e}")
 
 def page_faenas():
     ui_header("Faenas", "Crea faenas por mandante, registra fechas/estado y carga anexos si aplica.")
@@ -1369,6 +1543,60 @@ def page_asignar_trabajadores():
     ''', (int(faena_id),))
     st.dataframe(asg, use_container_width=True, hide_index=True)
 
+def page_documentos_empresa():
+    ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
+    st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
+
+    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, created_at FROM empresa_documentos ORDER BY id DESC")
+    tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
+    faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    c1.metric("Tipos sugeridos", len(DOC_EMPRESA_SUGERIDOS))
+    c2.metric("Tipos presentes", len(set(tipos_presentes)))
+    c3.metric("Faltan sugeridos", len(faltan))
+
+    if faltan:
+        st.warning("Sugeridos faltantes: " + ", ".join(faltan))
+    else:
+        st.success("Sugeridos completos (si aplica).")
+
+    tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
+
+    with tab1:
+        st.caption("Tipos sugeridos:")
+        st.code("\n".join(DOC_EMPRESA_SUGERIDOS))
+
+        colx1, colx2 = st.columns([1, 2])
+        with colx1:
+            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"])
+        with colx2:
+            tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
+
+        up = st.file_uploader("Archivo", key="up_doc_empresa", type=None)
+        if st.button("Guardar documento empresa", type="primary"):
+            if up is None:
+                st.error("Debes subir un archivo.")
+                st.stop()
+            doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
+            b = up.getvalue()
+            folder = ["empresa", safe_name(doc_tipo)]
+            file_path = save_file(folder, up.name, b)
+            sha = sha256_bytes(b)
+            execute(
+                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, sha256, created_at) VALUES(?,?,?,?,?)",
+                (doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+            )
+            st.success("Documento empresa guardado.")
+            auto_backup_db("doc_empresa")
+            st.rerun()
+
+    with tab2:
+        if df.empty:
+            st.info("(sin documentos empresa)")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
 def page_documentos_trabajador():
     ui_header("Documentos Trabajador", "Carga documentos obligatorios (EPP, RIOHS, IRL, Contrato, Anexo) y extras si es necesario.")
     trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
@@ -1611,6 +1839,8 @@ elif p == "Faenas":
     page_faenas()
 elif p == "Trabajadores":
     page_trabajadores()
+elif p == "Documentos Empresa":
+    page_documentos_empresa()
 elif p == "Asignar Trabajadores":
     page_asignar_trabajadores()
 elif p == "Documentos Trabajador":

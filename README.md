@@ -24,3 +24,7 @@ Nota:
 - v7.5.1: se corrige Guardar Mandante (submit siempre activo + validación post-submit + manejo duplicados).
 
 - v7.5.2: corrección de botones en formularios (sin disabled en forms) y validaciones post-submit; botones de upload/restore operativos con validación.
+
+- v7.6: Nuevo apartado 'Documentos Empresa' + Dashboard más dinámico (KPIs, gráficos, tab Empresa). Export ZIP incluye carpeta 02_Documentos_Empresa.
+
+- v7.7: Contratos de Faena permite editar y eliminar (con confirmación y manejo de faenas asociadas), además de gestionar archivo.
