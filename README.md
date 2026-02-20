@@ -36,3 +36,5 @@ Nota:
 - v8.0: Carga/importación de trabajadores por FAENA (Importar Excel y asignar). Documentos Trabajador ahora puede operar por faena (solo asignados) y muestra pendientes por faena. Documentación del trabajador se reutiliza si se repite en otra faena.
 
 - v8.0.2: Documentos Trabajador ahora permite seleccionar faena dentro del apartado (sin depender del Dashboard), manteniendo modo 'Solo esta faena'.
+
+- v8.0.3: Reparado 'Documentos Trabajador' eliminando wrappers HTML que generaban cuadros en blanco; selector de faena + toggle funcionan sin cajas vacías.

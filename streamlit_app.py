@@ -1822,16 +1822,12 @@ def page_documentos_trabajador():
         '''
     )
 
-    # Selector de faena dentro del apartado
+    # Selector de faena dentro del apartado (no genera cajas vacías)
     current = st.session_state.get("selected_faena_id")
     ids = [None] + (faenas["id"].tolist() if not faenas.empty else [])
-    default_index = 0
-    if current in ids:
-        default_index = ids.index(current)
+    default_index = ids.index(current) if (current in ids) else 0
 
-    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
     c1, c2 = st.columns([3, 1])
-
     with c1:
         faena_pick = st.selectbox(
             "Faena (opcional)",
@@ -1842,14 +1838,13 @@ def page_documentos_trabajador():
             ),
             key="docs_faena_pick",
         )
-        # guardar selección
         st.session_state["selected_faena_id"] = None if faena_pick is None else int(faena_pick)
 
     with c2:
         default_scoped = True if faena_pick is not None else False
         scoped = st.toggle("Solo esta faena", value=default_scoped, key="docs_scoped_toggle")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.divider()
 
     # Fuente de trabajadores: por faena o global
     if scoped:
