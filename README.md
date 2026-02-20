@@ -30,3 +30,7 @@ Nota:
 - v7.7: Contratos de Faena permite editar y eliminar (con confirmación y manejo de faenas asociadas), además de gestionar archivo.
 
 - v7.8: Documentos Empresa sugeridos: CERTIFICADO_CUMPLIMIENTO_LABORAL, CERTIFICADO_ACCIDENTABILIDAD, OTROS. Documentos Trabajador agrega LIQUIDACIONES y FINIQUITO. UI iOS-like (cards, bordes redondeados).
+
+- v7.9: Dashboard 'otro nivel': Inbox de gestión con CTA, Vista Global vs Faena, Acciones rápidas, 2 gráficos mínimos.
+
+- v8.0: Carga/importación de trabajadores por FAENA (Importar Excel y asignar). Documentos Trabajador ahora puede operar por faena (solo asignados) y muestra pendientes por faena. Documentación del trabajador se reutiliza si se repite en otra faena.

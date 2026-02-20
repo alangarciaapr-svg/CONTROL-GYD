@@ -148,6 +148,20 @@ def safe_name(s: str) -> str:
     return s.strip("_") or "item"
 
 
+
+def fetch_assigned_workers(faena_id: int):
+    """Devuelve dataframe de trabajadores asignados a una faena."""
+    return fetch_df(
+        '''
+        SELECT t.id, t.rut, t.apellidos, t.nombres, COALESCE(a.cargo_faena,'') AS cargo_faena, COALESCE(t.cargo,'') AS cargo
+        FROM asignaciones a
+        JOIN trabajadores t ON t.id=a.trabajador_id
+        WHERE a.faena_id=? AND a.estado='ACTIVA'
+        ORDER BY t.apellidos, t.nombres
+        ''',
+        (int(faena_id),),
+    )
+
 def get_global_counts():
     """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
     out = {}
@@ -829,175 +843,190 @@ st.title(f"{APP_NAME} — {current_section}")
 # Pages
 # ----------------------------
 def page_dashboard():
-    ui_header("Dashboard", "Resumen general, cobertura de documentos y alertas.")
+    ui_header("Dashboard", "Centro de control: pendientes, acciones rápidas y estado documental (estilo app).")
+
     counts = get_global_counts()
     mand_n = counts.get("mandantes", 0)
     faena_n = counts.get("faenas", 0)
     fa_act = counts.get("faenas_activas", 0)
     trab_n = counts.get("trabajadores", 0)
-    asg_n = counts.get("asignaciones", 0)
     docs_emp = counts.get("docs_empresa", 0)
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Mandantes", mand_n)
-    c2.metric("Faenas", faena_n)
-    c3.metric("Activas", fa_act)
-    c4.metric("Trabajadores", trab_n)
-    c5.metric("Asignaciones", asg_n)
-    c6.metric("Docs empresa", docs_emp)
-
+    # Contexto de vista
     df_prog = faena_progress_table()
 
-    if not df_prog.empty:
-        def _semaforo(r):
-            tr = int(r.get("trabajadores", 0) or 0)
-            pct = float(r.get("cobertura_docs_pct", 0) or 0)
-            falt = int(r.get("faltantes_total", 0) or 0)
-            if tr == 0:
-                return "CRITICO"
-            if falt == 0 and pct >= 100:
-                return "OK"
-            if pct >= 70:
-                return "PENDIENTE"
-            return "CRITICO"
+    def go(page: str, faena_id=None):
+        if faena_id is not None:
+            st.session_state["selected_faena_id"] = int(faena_id)
+        st.session_state["nav_page"] = page
+        st.rerun()
 
-        sem = df_prog.apply(_semaforo, axis=1)
-        k_ok = int((sem == "OK").sum())
-        k_pen = int((sem == "PENDIENTE").sum())
-        k_cri = int((sem == "CRITICO").sum())
+    # Top KPIs (compactos)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Faenas", faena_n)
+    c2.metric("Activas", fa_act)
+    c3.metric("Trabajadores", trab_n)
+    c4.metric("Mandantes", mand_n)
+    c5.metric("Docs empresa", docs_emp)
 
-        ck1, ck2, ck3 = st.columns(3)
-        ck1.metric("🟢 Faenas OK", k_ok)
-        ck2.metric("🟡 Pendientes", k_pen)
-        ck3.metric("🔴 Críticas", k_cri)
+    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+    view = st.radio("Vista", ["🌐 Global", "🛠️ Faena"], horizontal=True, label_visibility="collapsed")
 
-    st.divider()
-
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Avance por faena", "✅ Pendientes", "📈 Indicadores", "🏢 Empresa", "⏳ Alertas"])
-
-    with tab1:
+    selected_faena_id = st.session_state.get("selected_faena_id")
+    if view == "🛠️ Faena":
         if df_prog.empty:
-            ui_tip("Crea un mandante, contrato de faena y una faena para comenzar.")
+            st.info("No hay faenas para seleccionar.")
+            st.markdown("</div>", unsafe_allow_html=True)
             return
 
-        colf1, colf2, colf3 = st.columns([2, 1, 1])
-        with colf1:
-            mandantes = ["(todos)"] + sorted(df_prog["mandante"].unique().tolist())
-            f_mand = st.selectbox("Mandante", mandantes, index=0)
-        with colf2:
-            estados = ["(todos)"] + ESTADOS_FAENA
-            f_estado = st.selectbox("Estado", estados, index=0)
-        with colf3:
-            q = st.text_input("Buscar faena", placeholder="Ej: bellavista")
-
-        out = df_prog.copy()
-        if f_mand != "(todos)":
-            out = out[out["mandante"] == f_mand]
-        if f_estado != "(todos)":
-            out = out[out["estado"] == f_estado]
-        if q.strip():
-            out = out[out["faena"].str.lower().str.contains(q.strip().lower(), na=False)]
-
-        def _avance_row(r):
-            if int(r["trabajadores"]) == 0:
-                return "0/0"
-            return f"{int(r['trab_ok'])}/{int(r['trabajadores'])}"
-
-        out["avance_trab"] = out.apply(_avance_row, axis=1)
-        out = out.rename(columns={"faena_id": "id", "faena": "faena_nombre", "cobertura_docs_pct": "cobertura_docs_%"})
-        show = out[["id", "mandante", "faena_nombre", "estado", "fecha_inicio", "fecha_termino", "trabajadores", "avance_trab", "cobertura_docs_%", "faltantes_total"]].copy()
-        st.dataframe(show, use_container_width=True, hide_index=True)
-
-    with tab2:
-        if df_prog.empty:
-            ui_tip("No hay faenas aún.")
-            return
         show = df_prog.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
+        if selected_faena_id not in show["id"].tolist():
+            selected_faena_id = int(show["id"].iloc[0])
+            st.session_state["selected_faena_id"] = selected_faena_id
+
         faena_id = st.selectbox(
             "Faena",
             show["id"].tolist(),
-            format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['mandante']} / {show[show['id']==x].iloc[0]['faena_nombre']}",
+            index=show["id"].tolist().index(selected_faena_id),
+            format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['mandante']} / {show[show['id']==x].iloc[0]['faena_nombre']} ({show[show['id']==x].iloc[0]['estado']})",
         )
         st.session_state["selected_faena_id"] = int(faena_id)
 
-        pend = pendientes_obligatorios(int(faena_id))
-        if not pend:
-            st.info("(sin trabajadores asignados)")
+        row = show[show["id"] == int(faena_id)].iloc[0]
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("Cobertura docs %", int(round(float(row["cobertura_docs_pct"] or 0), 0)))
+        cc2.metric("Faltantes", int(row["faltantes_total"] or 0))
+        cc3.metric("Trabajadores", int(row["trabajadores"] or 0))
+        cc4.metric("OK", int(row["trab_ok"] or 0))
+
+        ab1, ab2, ab3 = st.columns(3)
+        with ab1:
+            if st.button("📎 Cargar docs trabajador", use_container_width=True):
+                go("Documentos Trabajador", faena_id=int(faena_id))
+        with ab2:
+            if st.button("📦 Exportar ZIP", type="primary", use_container_width=True):
+                go("Export (ZIP)", faena_id=int(faena_id))
+        with ab3:
+            if st.button("🧩 Asignar trabajadores", use_container_width=True):
+                go("Asignar Trabajadores", faena_id=int(faena_id))
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Acciones rápidas (estilo app)
+    st.markdown("### ⚡ Acciones rápidas")
+    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+    qa1, qa2, qa3, qa4 = st.columns(4)
+    with qa1:
+        if st.button("🏢 Nuevo mandante", use_container_width=True):
+            go("Mandantes")
+    with qa2:
+        if st.button("📄 Nuevo contrato", use_container_width=True):
+            go("Contratos de Faena")
+    with qa3:
+        if st.button("🛠️ Nueva faena", use_container_width=True):
+            go("Faenas")
+    with qa4:
+        if st.button("👷 Importar trabajadores", use_container_width=True):
+            go("Trabajadores")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Inbox de gestión (críticas/pendientes + CTA)
+    st.markdown("### 📥 Inbox de gestión")
+    st.caption("Lo importante primero. Tarjetas accionables para resolver rápido.")
+
+    if df_prog.empty:
+        ui_tip("Aún no hay faenas. Crea una faena para empezar.")
+        return
+
+    def semaforo(r):
+        tr = int(r.get("trabajadores", 0) or 0)
+        pct = float(r.get("cobertura_docs_pct", 0) or 0)
+        falt = int(r.get("faltantes_total", 0) or 0)
+        if tr == 0:
+            return "CRITICO"
+        if falt == 0 and pct >= 100:
+            return "OK"
+        if pct >= 70:
+            return "PENDIENTE"
+        return "CRITICO"
+
+    inbox = df_prog.copy()
+    inbox["semaforo"] = inbox.apply(semaforo, axis=1)
+    inbox = inbox.rename(columns={"faena_id":"id", "faena":"faena_nombre"})
+
+    # Críticas y pendientes (Top 5)
+    crit = inbox[inbox["semaforo"]=="CRITICO"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(5)
+    pend = inbox[inbox["semaforo"]=="PENDIENTE"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(5)
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+        st.markdown("#### 🔴 Críticas (resolver hoy)")
+        if crit.empty:
+            st.success("No hay faenas críticas 🎉")
         else:
-            ok = sum(1 for v in pend.values() if not v)
-            total = len(pend)
-            st.metric("Trabajadores OK", f"{ok}/{total}")
-            for k, missing in pend.items():
-                if missing:
-                    st.error(f"{k} — faltan: {', '.join(missing)}")
-                else:
-                    st.success(f"{k} — OK")
+            for _, r in crit.iterrows():
+                st.markdown(f"**{int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
+                st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)} · Trabajadores: {int(r['trabajadores'] or 0)}")
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("📎 Resolver docs", key=f"cta_docs_crit_{int(r['id'])}", use_container_width=True):
+                        go("Export (ZIP)", faena_id=int(r["id"]))
+                with b2:
+                    if st.button("🧩 Asignar", key=f"cta_asg_crit_{int(r['id'])}", use_container_width=True):
+                        go("Asignar Trabajadores", faena_id=int(r["id"]))
+                st.divider()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        if st.button("Ir a Export de esta faena", use_container_width=True):
-            st.session_state["nav_page"] = "Export (ZIP)"
-            st.rerun()
-
-    with tab3:
-        if df_prog.empty:
-            st.info("Crea faenas para ver indicadores.")
+    with colB:
+        st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+        st.markdown("#### 🟡 Pendientes (subir a OK)")
+        if pend.empty:
+            st.info("No hay faenas pendientes.")
         else:
-            st.markdown("### Faenas por estado")
-            s = df_prog.groupby("estado")["faena_id"].count().rename("cantidad")
-            st.bar_chart(s)
+            for _, r in pend.iterrows():
+                st.markdown(f"**{int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
+                st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)}")
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("📎 Docs", key=f"cta_docs_pen_{int(r['id'])}", use_container_width=True):
+                        go("Documentos Trabajador", faena_id=int(r["id"]))
+                with b2:
+                    if st.button("📦 Export", key=f"cta_exp_pen_{int(r['id'])}", type="primary", use_container_width=True):
+                        go("Export (ZIP)", faena_id=int(r["id"]))
+                st.divider()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-            st.divider()
-            st.markdown("### Cobertura documental promedio por mandante")
-            mdf = df_prog.groupby("mandante")["cobertura_docs_pct"].mean().sort_values(ascending=False).rename("cobertura_promedio_%")
-            st.bar_chart(mdf)
+    # Gráficos mínimos (2 max)
+    st.markdown("### 📊 Gráficos (mínimos)")
+    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+    g1, g2 = st.columns(2)
 
-            st.divider()
-            st.markdown("### Top faenas críticas (por faltantes)")
-            top = df_prog.copy().sort_values(["faltantes_total", "cobertura_docs_pct"], ascending=[False, True]).head(10)
-            top = top.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
-            st.dataframe(top[["id","mandante","faena_nombre","estado","trabajadores","cobertura_docs_pct","faltantes_total"]], use_container_width=True, hide_index=True)
+    with g1:
+        st.markdown("**Faenas por estado**")
+        s = inbox.groupby("estado")["id"].count().rename("cantidad")
+        st.bar_chart(s)
 
-    with tab4:
-        st.markdown("### Estado documentos empresa (se exportan en el ZIP)")
-        edf = fetch_df("SELECT doc_tipo, nombre_archivo, created_at FROM empresa_documentos ORDER BY id DESC")
-        tipos_presentes = set(edf["doc_tipo"].astype(str).tolist()) if not edf.empty else set()
-        faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
+    with g2:
+        st.markdown("**Cobertura promedio por mandante**")
+        mdf = inbox.groupby("mandante")["cobertura_docs_pct"].mean().sort_values(ascending=False).rename("cobertura_promedio_%")
+        st.bar_chart(mdf)
 
-        cex1, cex2, cex3 = st.columns([1,1,2])
-        cex1.metric("Docs empresa", int(len(edf)))
-        cex2.metric("Tipos presentes", int(len(set(tipos_presentes))))
-        cex3.metric("Faltan sugeridos", int(len(faltan)))
+    st.markdown("</div>", unsafe_allow_html=True)
 
-        if faltan:
-            st.warning("Sugeridos faltantes: " + ", ".join(faltan))
-        else:
-            st.success("Sugeridos completos (si aplica).")
-
-        if st.button("Abrir Documentos Empresa", type="primary"):
-            st.session_state["nav_page"] = "Documentos Empresa"
-            st.rerun()
-
-        st.dataframe(edf.head(20) if not edf.empty else pd.DataFrame([{"info":"(sin documentos empresa)"}]), use_container_width=True, hide_index=True)
-
-    with tab5:
-        today = date.today()
-        limit = today + timedelta(days=30)
-        tdf = fetch_df("SELECT rut, apellidos, nombres, cargo, vigencia_examen FROM trabajadores")
-        rows = []
-        for _, r in tdf.iterrows():
-            d = parse_date_maybe(r.get("vigencia_examen"))
-            if d and d <= limit:
-                rows.append({
-                    "rut": r["rut"],
-                    "trabajador": f"{r['apellidos']} {r['nombres']}",
-                    "cargo": r.get("cargo",""),
-                    "vigencia_examen": str(d),
-                    "dias_restantes": (d - today).days
-                })
-        if rows:
-            adf = pd.DataFrame(rows).sort_values("dias_restantes")
-            st.dataframe(adf, use_container_width=True, hide_index=True)
-        else:
-            st.success("Sin vencimientos dentro de 30 días (según vigencia_examen).")
+    # Acceso a detalles (sin llenar de tablas)
+    st.markdown("### 🔎 Ver detalle")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        if st.button("📋 Ver listado de faenas (semáforo)", use_container_width=True):
+            go("Faenas")
+    with d2:
+        if st.button("🏛️ Ver documentos empresa", use_container_width=True):
+            go("Documentos Empresa")
+    with d3:
+        if st.button("💾 Backup / Restore", use_container_width=True):
+            go("Backup / Restore")
 
 def page_mandantes():
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante.")
@@ -1523,19 +1552,14 @@ def page_trabajadores():
         st.dataframe(out, use_container_width=True, hide_index=True)
 
 def page_asignar_trabajadores():
-    ui_header("Asignar Trabajadores", "Asigna trabajadores a una faena (quedan activos y listos para control documental).")
+    ui_header("Asignar Trabajadores", "Carga e incorpora trabajadores por faena. Si un trabajador se repite en otra faena, mantiene su documentación ya cargada.")
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
         ORDER BY f.id DESC
     ''')
-    trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
-
     if faenas.empty:
         ui_tip("Crea faenas primero.")
-        return
-    if trab.empty:
-        ui_tip("Crea trabajadores primero.")
         return
 
     col1, col2 = st.columns([2, 1])
@@ -1548,54 +1572,186 @@ def page_asignar_trabajadores():
     with col2:
         st.session_state["selected_faena_id"] = int(faena_id)
 
-    asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=?", (int(faena_id),))
-    asignados_ids = set(asignados["trabajador_id"].tolist()) if not asignados.empty else set()
-    disponibles = trab[~trab["id"].isin(asignados_ids)].copy()
+    tab1, tab2, tab3 = st.tabs(["🧩 Asignar existentes", "📥 Importar Excel y asignar", "📋 Asignados"])
 
-    def _fmt_trab(x):
-        r = trab[trab["id"] == x].iloc[0]
-        return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
+    # -------------------------
+    # Tab 1: asignar existentes
+    # -------------------------
+    with tab1:
+        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        if trab.empty:
+            ui_tip("Crea trabajadores primero (o usa 'Importar Excel y asignar').")
+            return
 
-    st.divider()
-    st.markdown("### Agregar asignaciones")
-    if disponibles.empty:
-        st.success("Todos los trabajadores ya están asignados.")
-    else:
-        with st.form("form_asignar"):
-            seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
-            fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
-            cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
-            ok = st.form_submit_button("Asignar seleccionados", type="primary")
+        asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=?", (int(faena_id),))
+        asignados_ids = set(asignados["trabajador_id"].tolist()) if not asignados.empty else set()
+        disponibles = trab[~trab["id"].isin(asignados_ids)].copy()
 
-        if ok:
+        def _fmt_trab(x):
+            r = trab[trab["id"] == x].iloc[0]
+            return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
 
-            if len(seleccion) == 0:
+        st.markdown("#### Agregar asignaciones")
+        if disponibles.empty:
+            st.success("Todos los trabajadores ya están asignados.")
+        else:
+            with st.form("form_asignar"):
+                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
+                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
+                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
+                ok = st.form_submit_button("Asignar seleccionados", type="primary")
 
+            if ok:
+                if len(seleccion) == 0:
+                    st.error("Selecciona al menos un trabajador para asignar.")
+                    st.stop()
+                params = []
+                for tid in seleccion:
+                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
+                executemany(
+                    "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
+                    params,
+                )
+                st.success("Trabajadores asignados.")
+                auto_backup_db("asignacion")
+                st.rerun()
 
-                st.error("Selecciona al menos un trabajador para asignar.")
+    # ---------------------------------
+    # Tab 2: importar Excel y asignar
+    # ---------------------------------
+    with tab2:
+        st.write("Sube Excel de trabajadores para **esta faena**. Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
+        up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trab_por_faena")
+        if up is not None:
+            try:
+                xls = pd.ExcelFile(up)
+                sheet = st.selectbox("Hoja", xls.sheet_names, index=0, key="sheet_trab_por_faena")
+                raw = pd.read_excel(xls, sheet_name=sheet)
 
+                colmap = {c: norm_col(str(c)) for c in raw.columns}
+                df = raw.rename(columns=colmap).copy()
 
-                st.stop()
-            params = []
-            for tid in seleccion:
-                params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
-            executemany(
-                "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
-                params,
-            )
-            st.success("Trabajadores asignados.")
-            auto_backup_db("asignacion")
-            st.rerun()
+                st.caption("Vista previa (primeras 10 filas)")
+                st.dataframe(df.head(10), use_container_width=True)
 
-    st.divider()
-    st.markdown("### Asignados en esta faena")
-    asg = fetch_df('''
-        SELECT t.apellidos || ' ' || t.nombres AS trabajador, t.rut, a.cargo_faena, a.fecha_ingreso, a.estado
-        FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE a.faena_id=?
-        ORDER BY t.apellidos, t.nombres
-    ''', (int(faena_id),))
-    st.dataframe(asg, use_container_width=True, hide_index=True)
+                if "rut" not in df.columns or "nombre" not in df.columns:
+                    st.error("El Excel debe tener columnas 'RUT' y 'NOMBRE'.")
+                else:
+                    overwrite = st.checkbox("Sobrescribir datos si el RUT ya existe", value=True, key="ow_trab_por_faena")
+                    fecha_ingreso = st.date_input("Fecha ingreso para esta faena", value=date.today(), key="fi_trab_por_faena")
+                    cargo_faena_all = st.text_input("Cargo en faena (opcional, aplica a todos)", key="cargo_faena_all")
+
+                    if st.button("Importar y asignar a esta faena", type="primary"):
+                        existing = fetch_df("SELECT rut, id FROM trabajadores")
+                        rut_to_id = {str(r["rut"]): int(r["id"]) for _, r in existing.iterrows()} if not existing.empty else {}
+
+                        rows = inserted = updated = skipped = assigned = 0
+
+                        has_cargo = "cargo" in df.columns
+                        has_cc = "centro_costo" in df.columns
+                        has_email = "email" in df.columns
+                        fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
+                        has_ve = "vigencia_examen" in df.columns
+
+                        def _to_text_date(v):
+                            if v is None or pd.isna(v):
+                                return None
+                            if isinstance(v, datetime):
+                                return str(v.date())
+                            if isinstance(v, date):
+                                return str(v)
+                            return str(v)
+
+                        with conn() as c:
+                            c.execute("PRAGMA foreign_keys = ON;")
+                            for _, r in df.iterrows():
+                                rows += 1
+                                rut = clean_rut(str(r.get("rut", "") or ""))
+                                nombre = str(r.get("nombre", "") or "").strip()
+
+                                if not rut or rut.lower() in ("nan", "none"):
+                                    skipped += 1
+                                    continue
+                                if not nombre or nombre.lower() in ("nan", "none"):
+                                    skipped += 1
+                                    continue
+
+                                nombres, apellidos = split_nombre_completo(nombre)
+                                cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
+                                centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
+                                email = str(r.get("email", "") or "").strip() if has_email else ""
+                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
+                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
+
+                                if overwrite:
+                                    c.execute(
+                                        '''
+                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                        VALUES(?,?,?,?,?,?,?,?)
+                                        ON CONFLICT(rut) DO UPDATE SET
+                                            nombres=excluded.nombres,
+                                            apellidos=excluded.apellidos,
+                                            cargo=excluded.cargo,
+                                            centro_costo=excluded.centro_costo,
+                                            email=excluded.email,
+                                            fecha_contrato=excluded.fecha_contrato,
+                                            vigencia_examen=excluded.vigencia_examen
+                                        ''',
+                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                    )
+                                    if rut in rut_to_id:
+                                        updated += 1
+                                    else:
+                                        inserted += 1
+                                else:
+                                    if rut in rut_to_id:
+                                        skipped += 1
+                                        continue
+                                    c.execute(
+                                        '''
+                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                        VALUES(?,?,?,?,?,?,?,?)
+                                        ''',
+                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                    )
+                                    inserted += 1
+
+                                # obtener id del trabajador
+                                if rut not in rut_to_id:
+                                    rid = c.execute("SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
+                                    if rid:
+                                        rut_to_id[rut] = int(rid[0])
+
+                                tid = rut_to_id.get(rut)
+                                if tid:
+                                    c.execute(
+                                        "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
+                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                    )
+                                    assigned += 1
+
+                            c.commit()
+
+                        st.success(f"Listo. Filas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped} | Asignados: {assigned}")
+                        auto_backup_db("import_asignar_faena")
+                        # llevar a docs con la faena seleccionada
+                        st.session_state["selected_faena_id"] = int(faena_id)
+                        st.session_state["nav_page"] = "Documentos Trabajador"
+                        st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo leer/importar el Excel: {e}")
+
+    # -------------------------
+    # Tab 3: listado asignados
+    # -------------------------
+    with tab3:
+        asg = fetch_df('''
+            SELECT t.apellidos || ' ' || t.nombres AS trabajador, t.rut, a.cargo_faena, a.fecha_ingreso, a.estado
+            FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=?
+            ORDER BY t.apellidos, t.nombres
+        ''', (int(faena_id),))
+        st.dataframe(asg, use_container_width=True, hide_index=True)
 
 def page_documentos_empresa():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
@@ -1652,19 +1808,69 @@ def page_documentos_empresa():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 def page_documentos_trabajador():
-    ui_header("Documentos Trabajador", "Carga documentos obligatorios (EPP, RIOHS, IRL, Contrato, Anexo) y extras si es necesario.")
-    trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
-    if trab.empty:
-        ui_tip("Crea trabajadores primero.")
-        return
+    ui_header("Documentos Trabajador", "Carga documentos obligatorios por trabajador. Si trabajas por faena, verás solo los trabajadores asignados a la faena seleccionada.")
+    faena_id = st.session_state.get("selected_faena_id")
 
-    tid = st.selectbox(
-        "Trabajador",
-        trab["id"].tolist(),
-        format_func=lambda x: f"{trab[trab['id']==x].iloc[0]['apellidos']} {trab[trab['id']==x].iloc[0]['nombres']} ({trab[trab['id']==x].iloc[0]['rut']})",
-    )
+    # Contexto: por faena (si hay una seleccionada) o global
+    scoped = False
+    faena_info = None
+    if faena_id:
+        try:
+            faena_info = fetch_df('''
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+                WHERE f.id=?
+            ''', (int(faena_id),))
+        except Exception:
+            faena_info = None
 
-    # Estado documental del trabajador
+    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        if faena_info is not None and not faena_info.empty:
+            r = faena_info.iloc[0]
+            st.markdown(f"**Faena seleccionada:** {int(r['id'])} — {r['mandante']} / {r['nombre']} ({r['estado']})")
+        else:
+            st.markdown("**Faena seleccionada:** (no hay)")
+    with c2:
+        default = True if (faena_info is not None and not faena_info.empty) else False
+        scoped = st.toggle("Solo esta faena", value=default)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if scoped and (faena_info is not None) and (not faena_info.empty):
+        trab = fetch_assigned_workers(int(faena_id))
+        if trab.empty:
+            ui_tip("Esta faena no tiene trabajadores asignados. Ve a 'Asignar Trabajadores' para incorporar personal.")
+            return
+
+        # Pendientes por faena (resumen)
+        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
+            pend = pendientes_obligatorios(int(faena_id))
+            if not pend:
+                st.info("(sin asignaciones)")
+            else:
+                ok = sum(1 for v in pend.values() if not v)
+                total = len(pend)
+                st.metric("Trabajadores OK", f"{ok}/{total}")
+                for k, missing in pend.items():
+                    if missing:
+                        st.error(f"{k} — faltan: {', '.join(missing)}")
+                    else:
+                        st.success(f"{k} — OK")
+    else:
+        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        if trab.empty:
+            ui_tip("Crea trabajadores primero.")
+            return
+
+    # Selector de trabajador (solo los de la faena si aplica)
+    def _fmt(x):
+        r = trab[trab["id"] == x].iloc[0]
+        return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
+
+    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt)
+
+    # Estado documental del trabajador (global)
     docs = fetch_df("SELECT doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC", (int(tid),))
     tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
     faltan = [d for d in DOC_OBLIGATORIOS if d not in tipos_presentes]
@@ -1694,9 +1900,7 @@ def page_documentos_trabajador():
         up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
         if st.button("Guardar documento", type="primary"):
             if up is None:
-
                 st.error("Debes subir un archivo primero.")
-
                 st.stop()
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
@@ -1715,8 +1919,7 @@ def page_documentos_trabajador():
         if docs.empty:
             st.info("(sin documentos)")
         else:
-            show = docs.copy()
-            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.dataframe(docs.copy(), use_container_width=True, hide_index=True)
 
 def page_export_zip():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
