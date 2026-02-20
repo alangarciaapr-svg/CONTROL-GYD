@@ -38,3 +38,5 @@ Nota:
 - v8.0.2: Documentos Trabajador ahora permite seleccionar faena dentro del apartado (sin depender del Dashboard), manteniendo modo 'Solo esta faena'.
 
 - v8.0.3: Reparado 'Documentos Trabajador' eliminando wrappers HTML que generaban cuadros en blanco; selector de faena + toggle funcionan sin cajas vacías.
+
+- v8.0.4: Restore de Backup ZIP ahora soporta formatos antiguos si traen .db y entrega error claro si el ZIP es solo código. Se agregan migraciones para columnas faltantes en contratos/faenas/asignaciones/documentos.

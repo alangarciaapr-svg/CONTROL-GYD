@@ -621,29 +621,66 @@ def make_backup_zip_bytes():
     buff.seek(0)
     return buff.getvalue()
 
+
 def restore_from_backup_zip(uploaded_bytes: bytes):
+    """Restaura backup completo. Soporta formato actual (backup/app.db) y formatos antiguos si contienen algún .db."""
     tmp = f"_restore_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(tmp, exist_ok=True)
     try:
         with zipfile.ZipFile(io.BytesIO(uploaded_bytes), "r") as z:
             z.extractall(tmp)
 
-        db_candidate = os.path.join(tmp, "backup", "app.db")
-        if not os.path.exists(db_candidate):
-            raise ValueError("El ZIP no contiene backup/app.db")
+        # 1) Buscar base de datos en distintas rutas (compatibilidad)
+        candidates = [
+            os.path.join(tmp, "backup", "app.db"),
+            os.path.join(tmp, "app.db"),
+            os.path.join(tmp, "backup", "DB", "app.db"),
+            os.path.join(tmp, "data", "app.db"),
+        ]
 
+        # buscar cualquier .db/.sqlite dentro del ZIP
+        for root, _, files in os.walk(tmp):
+            for fn in files:
+                low = fn.lower()
+                if low.endswith((".db", ".sqlite", ".sqlite3")):
+                    candidates.append(os.path.join(root, fn))
+
+        db_candidate = next((p for p in candidates if p and os.path.exists(p)), None)
+
+        # Caso típico de backups antiguos: zip de código sin base de datos
+        if db_candidate is None:
+            # heurística: si existe streamlit_app.py, es backup de código
+            has_code = os.path.exists(os.path.join(tmp, "streamlit_app.py")) or os.path.exists(os.path.join(tmp, "backup", "streamlit_app.py"))
+            if has_code:
+                raise ValueError(
+                    "Este ZIP parece ser un backup de CÓDIGO (incluye streamlit_app.py), pero NO contiene la base de datos (app.db). "
+                    "Para restaurar datos necesitas un backup que incluya 'backup/app.db' (Backup completo) o subir un archivo .db en 'Base (app.db)'."
+                )
+            raise ValueError("El ZIP no contiene una base de datos (.db/.sqlite).")
+
+        # 2) Reemplazar DB
+        ensure_dirs()
         if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
         os.replace(db_candidate, DB_PATH)
 
-        up_candidate = os.path.join(tmp, "backup", UPLOAD_ROOT)
-        if os.path.exists(up_candidate):
+        # 3) Restaurar uploads si vienen (formatos: backup/uploads/... o uploads/...)
+        #    Nota: en el formato actual los uploads quedan como backup/uploads/...
+        up1 = os.path.join(tmp, "backup", UPLOAD_ROOT)
+        up2 = os.path.join(tmp, UPLOAD_ROOT)
+        up_candidate = up1 if os.path.exists(up1) else (up2 if os.path.exists(up2) else None)
+
+        if up_candidate:
             if os.path.exists(UPLOAD_ROOT):
                 shutil.rmtree(UPLOAD_ROOT, ignore_errors=True)
             shutil.copytree(up_candidate, UPLOAD_ROOT)
+
+        # 4) Migraciones: crear tablas/columnas nuevas para compatibilidad
+        init_db()
         ensure_dirs()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
 
 
 def make_db_only_bytes():
