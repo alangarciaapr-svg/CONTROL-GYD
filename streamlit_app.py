@@ -457,14 +457,6 @@ def pendientes_obligatorios(faena_id: int):
     if asign.empty:
         return out
 
-
-def pendientes_empresa_faena(faena_id: int):
-    """Lista de documentos de empresa requeridos faltantes para una faena."""
-    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
-    present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
-    missing = [d for d in DOC_EMPRESA_REQUERIDOS if d not in present]
-    return missing
-
     ids = asign["trabajador_id"].astype(int).tolist()
     docs_all = fetch_df(
         "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
@@ -484,7 +476,17 @@ def pendientes_empresa_faena(faena_id: int):
         out[label] = missing
     return out
 
+
+def pendientes_empresa_faena(faena_id: int):
+    """Lista de documentos de empresa requeridos faltantes para una faena."""
+    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
+    present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
+    missing = [d for d in DOC_EMPRESA_REQUERIDOS if d not in present]
+    return missing
+
+
 def faena_progress_table():
+
     faenas = fetch_df('''
         SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
                m.nombre AS mandante
@@ -2432,12 +2434,12 @@ def page_export_zip():
                     st.success(f"{k} — OK")
 
 
-st.divider()
-st.write("**Documentos empresa (por faena):**")
-if miss_emp:
-    st.error("Faltan: " + ", ".join(miss_emp))
-else:
-    st.success("OK (requeridos completos).")
+        st.divider()
+        st.write("**Documentos empresa (por faena):**")
+        if miss_emp:
+            st.error("Faltan: " + ", ".join(miss_emp))
+        else:
+            st.success("OK (requeridos completos).")
 
 
     with tab2:
@@ -2477,61 +2479,61 @@ else:
                 st.warning("El archivo no está en disco (posible reboot/redeploy). Usa Backup/Restore para conservarlo.")
 
 
-with tab4:
-    st.markdown("Genera un ZIP con **todas las faenas** cuyo **inicio** cae dentro de un mes (YYYY-MM).")
-    fa = fetch_df("SELECT DISTINCT substr(fecha_inicio,1,7) AS ym FROM faenas WHERE fecha_inicio IS NOT NULL AND TRIM(fecha_inicio)<>'' ORDER BY ym DESC")
-    ym_opts = fa["ym"].tolist() if not fa.empty else []
-    if not ym_opts:
-        st.info("No hay fechas de inicio registradas para exportar por mes.")
-    else:
-        ym = st.selectbox("Mes", ym_opts, key="exp_mes_pick")
-        include_global = st.checkbox("Incluir documentos empresa globales (una vez)", value=True, key="exp_mes_inc_global")
-
-        # Mostrar faenas incluidas
-        lst = fetch_df('''
-            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
-            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-            WHERE substr(f.fecha_inicio,1,7)=?
-            ORDER BY f.id DESC
-        ''', (ym,))
-        st.caption(f"Faenas incluidas: {len(lst)}")
-        st.dataframe(lst[["id","mandante","nombre","estado","fecha_inicio"]], use_container_width=True, hide_index=True)
-
-        colm1, colm2 = st.columns([1,1])
-        with colm1:
-            if st.button("Generar ZIP mensual y guardar", type="primary", use_container_width=True):
-                try:
-                    y, m = ym.split("-")
-                    zip_bytes, name = export_zip_for_mes(int(y), int(m), include_global_empresa_docs=include_global)
-                    path = persist_export_mes(ym, zip_bytes)
-                    st.success(f"ZIP mensual generado: {os.path.basename(path)}")
-                    auto_backup_db("export_mes")
-                    st.download_button("Descargar ZIP mensual (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
-                except Exception as e:
-                    st.error(f"No se pudo generar ZIP mensual: {e}")
-        with colm2:
-            st.caption("Se guarda en historial mensual (si no hay reboot). Para conservar, usa Backup / Restore.")
-
-    st.divider()
-    st.markdown("#### 🗂️ Historial mensual")
-    histm = fetch_df("SELECT id, year_month, file_path, size_bytes, created_at FROM export_historial_mes ORDER BY id DESC")
-    if histm.empty:
-        st.info("(sin exportaciones mensuales guardadas aún)")
-    else:
-        show = histm.copy()
-        show["archivo"] = show["file_path"].apply(lambda p: os.path.basename(p))
-        show["size_kb"] = (show["size_bytes"] / 1024).round(1)
-        st.dataframe(show[["id","year_month","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
-
-        exp_id = st.selectbox("Elegir export mensual para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['year_month']} / {show[show['id']==x].iloc[0]['archivo']}", key="pick_hist_mes")
-        row = show[show["id"] == exp_id].iloc[0]
-        p = row["file_path"]
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                b = f.read()
-            st.download_button("Descargar export mensual seleccionado", data=b, file_name=os.path.basename(p), mime="application/zip", use_container_width=True)
+    with tab4:
+        st.markdown("Genera un ZIP con **todas las faenas** cuyo **inicio** cae dentro de un mes (YYYY-MM).")
+        fa = fetch_df("SELECT DISTINCT substr(fecha_inicio,1,7) AS ym FROM faenas WHERE fecha_inicio IS NOT NULL AND TRIM(fecha_inicio)<>'' ORDER BY ym DESC")
+        ym_opts = fa["ym"].tolist() if not fa.empty else []
+        if not ym_opts:
+            st.info("No hay fechas de inicio registradas para exportar por mes.")
         else:
-            st.warning("El archivo no está en disco (posible reboot/redeploy). Usa Backup/Restore para conservarlo.")
+            ym = st.selectbox("Mes", ym_opts, key="exp_mes_pick")
+            include_global = st.checkbox("Incluir documentos empresa globales (una vez)", value=True, key="exp_mes_inc_global")
+
+            # Mostrar faenas incluidas
+            lst = fetch_df('''
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
+                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+                WHERE substr(f.fecha_inicio,1,7)=?
+                ORDER BY f.id DESC
+            ''', (ym,))
+            st.caption(f"Faenas incluidas: {len(lst)}")
+            st.dataframe(lst[["id","mandante","nombre","estado","fecha_inicio"]], use_container_width=True, hide_index=True)
+
+            colm1, colm2 = st.columns([1,1])
+            with colm1:
+                if st.button("Generar ZIP mensual y guardar", type="primary", use_container_width=True):
+                    try:
+                        y, m = ym.split("-")
+                        zip_bytes, name = export_zip_for_mes(int(y), int(m), include_global_empresa_docs=include_global)
+                        path = persist_export_mes(ym, zip_bytes)
+                        st.success(f"ZIP mensual generado: {os.path.basename(path)}")
+                        auto_backup_db("export_mes")
+                        st.download_button("Descargar ZIP mensual (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
+                    except Exception as e:
+                        st.error(f"No se pudo generar ZIP mensual: {e}")
+            with colm2:
+                st.caption("Se guarda en historial mensual (si no hay reboot). Para conservar, usa Backup / Restore.")
+
+        st.divider()
+        st.markdown("#### 🗂️ Historial mensual")
+        histm = fetch_df("SELECT id, year_month, file_path, size_bytes, created_at FROM export_historial_mes ORDER BY id DESC")
+        if histm.empty:
+            st.info("(sin exportaciones mensuales guardadas aún)")
+        else:
+            show = histm.copy()
+            show["archivo"] = show["file_path"].apply(lambda p: os.path.basename(p))
+            show["size_kb"] = (show["size_bytes"] / 1024).round(1)
+            st.dataframe(show[["id","year_month","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
+
+            exp_id = st.selectbox("Elegir export mensual para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['year_month']} / {show[show['id']==x].iloc[0]['archivo']}", key="pick_hist_mes")
+            row = show[show["id"] == exp_id].iloc[0]
+            p = row["file_path"]
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    b = f.read()
+                st.download_button("Descargar export mensual seleccionado", data=b, file_name=os.path.basename(p), mime="application/zip", use_container_width=True)
+            else:
+                st.warning("El archivo no está en disco (posible reboot/redeploy). Usa Backup/Restore para conservarlo.")
 
 def page_backup_restore():
     ui_header("Backup / Restore", "Respalda la base y documentos para evitar pérdidas en Streamlit Community Cloud.")

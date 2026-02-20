@@ -44,3 +44,9 @@ Nota:
 - v8.1: Faenas ahora permite editar y eliminar (con confirmación y borrado de dependencias: asignaciones/anexos). Se mantiene semáforo y anexos.
 
 - v8.2: Documentos Empresa por FAENA (nuevo módulo), export ZIP por faena ahora incluye 02_Documentos_Empresa_Faena. Export mensual (por mes de inicio) con historial mensual.
+
+- v8.2.2: Fix crítico: bloque 'miss_emp' mal indentado en Export (ZIP) que provocaba NameError al iniciar la app.
+
+- v8.2.3: Fix crítico: bloque 'with tab4' (Export mensual) quedó fuera de page_export_zip. Se reindentó para quedar dentro del módulo Export.
+
+- v8.2.4: Fix crítico: pendientes_obligatorios quedó truncada por indentación y pendientes_empresa_faena contenía código inalcanzable. Se reescribieron ambas funciones.
