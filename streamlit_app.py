@@ -2259,45 +2259,45 @@ def page_documentos_empresa():
             st.rerun()
 
 
-with tab2:
-    if df.empty:
-        st.info("(sin documentos empresa)")
-    else:
-        docs = df.copy()
-        show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-        st.dataframe(show, use_container_width=True, hide_index=True)
-
-st.divider()
-st.markdown("#### 🔎 Ver / Descargar")
-pick_id = st.selectbox(
-    "Documento",
-    docs["id"].tolist(),
-    format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-    key="emp_pick_doc",
-)
-row = docs[docs["id"] == pick_id].iloc[0]
-fpath = row.get("file_path", "")
-fname = row.get("nombre_archivo", "documento")
-if not fpath or not os.path.exists(fpath):
-    st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
-else:
-    with open(fpath, "rb") as fp:
-        b = fp.read()
-    st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="emp_dl_btn")
-
-    with st.expander("Vista previa (opcional)", expanded=False):
-        ext = os.path.splitext(str(fpath))[1].lower()
-        if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-            st.image(b, caption=fname, use_container_width=True)
-        elif ext == ".pdf":
-            if len(b) <= 10 * 1024 * 1024:
-                b64 = base64.b64encode(b).decode("utf-8")
-                html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                st.components.v1.html(html, height=680, scrolling=True)
-            else:
-                st.info("PDF demasiado grande para vista previa. Descárgalo.")
+    with tab2:
+        if df.empty:
+            st.info("(sin documentos empresa)")
         else:
-            st.info("Vista previa no disponible para este tipo. Descárgalo.")
+            docs = df.copy()
+            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### 🔎 Ver / Descargar")
+    pick_id = st.selectbox(
+        "Documento",
+        docs["id"].tolist(),
+        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+        key="emp_pick_doc",
+    )
+    row = docs[docs["id"] == pick_id].iloc[0]
+    fpath = row.get("file_path", "")
+    fname = row.get("nombre_archivo", "documento")
+    if not fpath or not os.path.exists(fpath):
+        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
+    else:
+        with open(fpath, "rb") as fp:
+            b = fp.read()
+        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="emp_dl_btn")
+
+        with st.expander("Vista previa (opcional)", expanded=False):
+            ext = os.path.splitext(str(fpath))[1].lower()
+            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                st.image(b, caption=fname, use_container_width=True)
+            elif ext == ".pdf":
+                if len(b) <= 10 * 1024 * 1024:
+                    b64 = base64.b64encode(b).decode("utf-8")
+                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
+                    st.components.v1.html(html, height=680, scrolling=True)
+                else:
+                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
+            else:
+                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
@@ -2374,44 +2374,44 @@ def page_documentos_empresa_faena():
             st.rerun()
 
 
-with tab2:
-    if docs.empty:
-        st.info("(sin documentos)")
-    else:
-        show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-        st.dataframe(show, use_container_width=True, hide_index=True)
-
-st.divider()
-st.markdown("#### 🔎 Ver / Descargar")
-pick_id = st.selectbox(
-    "Documento",
-    docs["id"].tolist(),
-    format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-    key="empf_pick_doc",
-)
-row = docs[docs["id"] == pick_id].iloc[0]
-fpath = row.get("file_path", "")
-fname = row.get("nombre_archivo", "documento")
-if not fpath or not os.path.exists(fpath):
-    st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
-else:
-    with open(fpath, "rb") as fp:
-        b = fp.read()
-    st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="empf_dl_btn")
-
-    with st.expander("Vista previa (opcional)", expanded=False):
-        ext = os.path.splitext(str(fpath))[1].lower()
-        if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-            st.image(b, caption=fname, use_container_width=True)
-        elif ext == ".pdf":
-            if len(b) <= 10 * 1024 * 1024:
-                b64 = base64.b64encode(b).decode("utf-8")
-                html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                st.components.v1.html(html, height=680, scrolling=True)
-            else:
-                st.info("PDF demasiado grande para vista previa. Descárgalo.")
+    with tab2:
+        if docs.empty:
+            st.info("(sin documentos)")
         else:
-            st.info("Vista previa no disponible para este tipo. Descárgalo.")
+            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### 🔎 Ver / Descargar")
+    pick_id = st.selectbox(
+        "Documento",
+        docs["id"].tolist(),
+        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+        key="empf_pick_doc",
+    )
+    row = docs[docs["id"] == pick_id].iloc[0]
+    fpath = row.get("file_path", "")
+    fname = row.get("nombre_archivo", "documento")
+    if not fpath or not os.path.exists(fpath):
+        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
+    else:
+        with open(fpath, "rb") as fp:
+            b = fp.read()
+        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="empf_dl_btn")
+
+        with st.expander("Vista previa (opcional)", expanded=False):
+            ext = os.path.splitext(str(fpath))[1].lower()
+            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                st.image(b, caption=fname, use_container_width=True)
+            elif ext == ".pdf":
+                if len(b) <= 10 * 1024 * 1024:
+                    b64 = base64.b64encode(b).decode("utf-8")
+                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
+                    st.components.v1.html(html, height=680, scrolling=True)
+                else:
+                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
+            else:
+                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_documentos_trabajador():
     ui_header(
@@ -2545,44 +2545,44 @@ def page_documentos_trabajador():
             st.rerun()
 
 
-with tab2:
-    if docs.empty:
-        st.info("(sin documentos)")
-    else:
-        show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-        st.dataframe(show, use_container_width=True, hide_index=True)
-
-st.divider()
-st.markdown("#### 🔎 Ver / Descargar")
-pick_id = st.selectbox(
-    "Documento",
-    docs["id"].tolist(),
-    format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-    key="trab_pick_doc",
-)
-row = docs[docs["id"] == pick_id].iloc[0]
-fpath = row.get("file_path", "")
-fname = row.get("nombre_archivo", "documento")
-if not fpath or not os.path.exists(fpath):
-    st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
-else:
-    with open(fpath, "rb") as fp:
-        b = fp.read()
-    st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="trab_dl_btn")
-
-    with st.expander("Vista previa (opcional)", expanded=False):
-        ext = os.path.splitext(str(fpath))[1].lower()
-        if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-            st.image(b, caption=fname, use_container_width=True)
-        elif ext == ".pdf":
-            if len(b) <= 10 * 1024 * 1024:
-                b64 = base64.b64encode(b).decode("utf-8")
-                html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                st.components.v1.html(html, height=680, scrolling=True)
-            else:
-                st.info("PDF demasiado grande para vista previa. Descárgalo.")
+    with tab2:
+        if docs.empty:
+            st.info("(sin documentos)")
         else:
-            st.info("Vista previa no disponible para este tipo. Descárgalo.")
+            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### 🔎 Ver / Descargar")
+    pick_id = st.selectbox(
+        "Documento",
+        docs["id"].tolist(),
+        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+        key="trab_pick_doc",
+    )
+    row = docs[docs["id"] == pick_id].iloc[0]
+    fpath = row.get("file_path", "")
+    fname = row.get("nombre_archivo", "documento")
+    if not fpath or not os.path.exists(fpath):
+        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
+    else:
+        with open(fpath, "rb") as fp:
+            b = fp.read()
+        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="trab_dl_btn")
+
+        with st.expander("Vista previa (opcional)", expanded=False):
+            ext = os.path.splitext(str(fpath))[1].lower()
+            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                st.image(b, caption=fname, use_container_width=True)
+            elif ext == ".pdf":
+                if len(b) <= 10 * 1024 * 1024:
+                    b64 = base64.b64encode(b).decode("utf-8")
+                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
+                    st.components.v1.html(html, height=680, scrolling=True)
+                else:
+                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
+            else:
+                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_export_zip():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
