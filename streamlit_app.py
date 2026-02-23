@@ -2349,74 +2349,74 @@ def page_asignar_trabajadores():
             except Exception as e:
                 st.error(f"No se pudo leer/importar el Excel: {e}")
 
-# -------------------------
-# Tab 3: asignados + quitar
-# -------------------------
-with tab3:
-    docs_asg = fetch_df('''
-        SELECT a.id AS asignacion_id,
-               t.id AS trabajador_id,
-               t.apellidos || ' ' || t.nombres AS trabajador,
-               t.rut,
-               a.cargo_faena,
-               a.fecha_ingreso,
-               a.estado
-        FROM asignaciones a
-        JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE a.faena_id=?
-        ORDER BY t.apellidos, t.nombres
-    ''', (int(faena_id),))
+    # -------------------------
+    # Tab 3: asignados + quitar
+    # -------------------------
+    with tab3:
+        docs_asg = fetch_df('''
+            SELECT a.id AS asignacion_id,
+                   t.id AS trabajador_id,
+                   t.apellidos || ' ' || t.nombres AS trabajador,
+                   t.rut,
+                   a.cargo_faena,
+                   a.fecha_ingreso,
+                   a.estado
+            FROM asignaciones a
+            JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=?
+            ORDER BY t.apellidos, t.nombres
+        ''', (int(faena_id),))
 
-    if docs_asg.empty:
-        st.info("(sin trabajadores asignados)")
-    else:
-        st.dataframe(
-            docs_asg[["trabajador","rut","cargo_faena","fecha_ingreso","estado"]],
-            use_container_width=True,
-            hide_index=True,
-        )
+        if docs_asg.empty:
+            st.info("(sin trabajadores asignados)")
+        else:
+            st.dataframe(
+                docs_asg[["trabajador","rut","cargo_faena","fecha_ingreso","estado"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        st.divider()
-        st.markdown("#### 🗑️ Quitar trabajadores de esta faena")
-        st.caption("Esto **solo elimina la asignación** (no elimina al trabajador ni sus documentos).")
+            st.divider()
+            st.markdown("#### 🗑️ Quitar trabajadores de esta faena")
+            st.caption("Esto **solo elimina la asignación** (no elimina al trabajador ni sus documentos).")
 
-        def _fmt_asg(tid):
-            r = docs_asg[docs_asg["trabajador_id"] == tid].iloc[0]
-            return f"{r['trabajador']} ({r['rut']})"
+            def _fmt_asg(tid):
+                r = docs_asg[docs_asg["trabajador_id"] == tid].iloc[0]
+                return f"{r['trabajador']} ({r['rut']})"
 
-        to_remove = st.multiselect(
-            "Selecciona trabajadores a quitar",
-            docs_asg["trabajador_id"].tolist(),
-            format_func=_fmt_asg,
-            key="asg_remove_multi",
-        )
-        confirm = st.checkbox(
-            "Confirmo que deseo quitar los seleccionados de esta faena",
-            key="asg_remove_confirm",
-        )
+            to_remove = st.multiselect(
+                "Selecciona trabajadores a quitar",
+                docs_asg["trabajador_id"].tolist(),
+                format_func=_fmt_asg,
+                key="asg_remove_multi",
+            )
+            confirm = st.checkbox(
+                "Confirmo que deseo quitar los seleccionados de esta faena",
+                key="asg_remove_confirm",
+            )
 
-        cols = st.columns([1, 1, 2])
-        with cols[0]:
-            if st.button("Quitar seleccionados", type="secondary", use_container_width=True, key="btn_asg_remove"):
-                if not to_remove:
-                    st.error("Selecciona al menos un trabajador.")
-                    st.stop()
-                if not confirm:
-                    st.error("Debes confirmar el checkbox antes de quitar.")
-                    st.stop()
-                try:
-                    params = [(int(faena_id), int(tid)) for tid in to_remove]
-                    executemany("DELETE FROM asignaciones WHERE faena_id=? AND trabajador_id=?", params)
-                    st.success(f"Listo. Quitados: {len(to_remove)}")
-                    auto_backup_db("asignacion_remove")
+            cols = st.columns([1, 1, 2])
+            with cols[0]:
+                if st.button("Quitar seleccionados", type="secondary", use_container_width=True, key="btn_asg_remove"):
+                    if not to_remove:
+                        st.error("Selecciona al menos un trabajador.")
+                        st.stop()
+                    if not confirm:
+                        st.error("Debes confirmar el checkbox antes de quitar.")
+                        st.stop()
+                    try:
+                        params = [(int(faena_id), int(tid)) for tid in to_remove]
+                        executemany("DELETE FROM asignaciones WHERE faena_id=? AND trabajador_id=?", params)
+                        st.success(f"Listo. Quitados: {len(to_remove)}")
+                        auto_backup_db("asignacion_remove")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo quitar: {e}")
+
+            with cols[1]:
+                if st.button("Limpiar selección", use_container_width=True, key="btn_asg_remove_clear"):
+                    st.session_state["asg_remove_multi"] = []
                     st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo quitar: {e}")
-
-        with cols[1]:
-            if st.button("Limpiar selección", use_container_width=True, key="btn_asg_remove_clear"):
-                st.session_state["asg_remove_multi"] = []
-                st.rerun()
 def page_documentos_empresa():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
