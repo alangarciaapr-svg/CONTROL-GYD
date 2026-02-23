@@ -54,3 +54,7 @@ Nota:
 - v8.2.5: Trabajadores ahora permite crear, editar y eliminar (con validación y confirmación). Eliminar borra asignaciones y documentos asociados.
 
 - v8.2.6: Ver/Descargar documentos cargados (Trabajador, Empresa global y Empresa por faena) con botón de descarga y vista previa (imagen/PDF).
+
+- v8.2.7: En Asignar Trabajadores → pestaña Asignados, permite quitar trabajadores de una faena (elimina la asignación, no el trabajador ni sus documentos).
+
+- v8.2.8: Documentos (Trabajador/Empresa/Empresa por Faena) ahora solo permiten descargar (sin vista previa). Mandantes con overview, KPIs y gestión (editar/eliminar).

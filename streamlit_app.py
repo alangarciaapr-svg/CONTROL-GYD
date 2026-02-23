@@ -1302,10 +1302,98 @@ def page_dashboard():
 
 
 def page_mandantes():
-    ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante.")
-    tab1, tab2 = st.tabs(["📋 Listado", "➕ Crear"])
+    ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante. Aquí puedes crear, editar y revisar su avance.")
 
-    with tab2:
+    # KPIs rápidos
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        try:
+            st.metric("Mandantes", int(fetch_df("SELECT COUNT(*) AS n FROM mandantes")["n"].iloc[0]))
+        except Exception:
+            st.metric("Mandantes", 0)
+    with k2:
+        try:
+            st.metric("Contratos de faena", int(fetch_df("SELECT COUNT(*) AS n FROM contratos_faena")["n"].iloc[0]))
+        except Exception:
+            st.metric("Contratos de faena", 0)
+    with k3:
+        try:
+            st.metric("Faenas", int(fetch_df("SELECT COUNT(*) AS n FROM faenas")["n"].iloc[0]))
+        except Exception:
+            st.metric("Faenas", 0)
+
+    tab_over, tab_create, tab_manage = st.tabs(["📌 Overview", "➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
+
+    # -------------------------
+    # Tab Overview
+    # -------------------------
+    with tab_over:
+        df = fetch_df('''
+            SELECT
+                m.id,
+                m.nombre,
+                (SELECT COUNT(*) FROM contratos_faena cf WHERE cf.mandante_id=m.id) AS contratos,
+                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id) AS faenas_total,
+                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id AND f.estado='ACTIVA') AS faenas_activas
+            FROM mandantes m
+            ORDER BY m.id DESC
+        ''')
+
+        q = st.text_input("Buscar mandante", placeholder="Escribe nombre…", key="mand_q")
+        out = df.copy()
+        if q.strip():
+            qq = q.strip().lower()
+            out = out[out["nombre"].astype(str).str.lower().str.contains(qq, na=False)]
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.dataframe(
+                out.rename(columns={
+                    "nombre": "Mandante",
+                    "contratos": "Contratos",
+                    "faenas_total": "Faenas",
+                    "faenas_activas": "Activas",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+        with c2:
+            st.markdown("#### Detalle rápido")
+            if out.empty:
+                st.info("Sin resultados.")
+            else:
+                mid = st.selectbox("Mandante", out["id"].tolist(),
+                                   format_func=lambda x: out[out["id"]==x].iloc[0]["nombre"],
+                                   key="mand_detail_sel")
+                row = df[df["id"] == mid].iloc[0]
+                st.metric("Contratos", int(row["contratos"]))
+                st.metric("Faenas", int(row["faenas_total"]))
+                st.metric("Faenas activas", int(row["faenas_activas"]))
+                # Lista corta de faenas
+                fa = fetch_df('''
+                    SELECT id, nombre, estado, fecha_inicio, fecha_termino
+                    FROM faenas
+                    WHERE mandante_id=?
+                    ORDER BY id DESC
+                    LIMIT 10
+                ''', (int(mid),))
+                if fa.empty:
+                    st.caption("Sin faenas asociadas.")
+                else:
+                    st.caption("Últimas faenas (máx 10)")
+                    st.dataframe(
+                        fa.rename(columns={
+                            "nombre":"Faena", "estado":"Estado",
+                            "fecha_inicio":"Inicio", "fecha_termino":"Término"
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+    # -------------------------
+    # Tab Crear
+    # -------------------------
+    with tab_create:
         with st.form("form_mandante", clear_on_submit=True):
             nombre = st.text_input("Nombre mandante", placeholder="Bosque Los Lagos", key="mandante_nombre_in")
             ok = st.form_submit_button("Guardar mandante", type="primary")
@@ -1320,20 +1408,68 @@ def page_mandantes():
                     auto_backup_db("mandante")
                     st.rerun()
                 except Exception as e:
-                    # Manejo amigable de duplicados
                     msg = str(e)
                     if "UNIQUE" in msg.upper():
                         st.error("Ya existe un mandante con ese nombre.")
                     else:
                         st.error(f"No se pudo crear: {e}")
 
-    with tab1:
-        df = fetch_df("SELECT id, nombre FROM mandantes ORDER BY id DESC")
-        q = st.text_input("Buscar mandante", placeholder="Nombre...")
-        out = df.copy()
-        if q.strip():
-            out = out[out["nombre"].astype(str).str.lower().str.contains(q.strip().lower(), na=False)]
-        st.dataframe(out, use_container_width=True, hide_index=True)
+    # -------------------------
+    # Tab Editar / Eliminar
+    # -------------------------
+    with tab_manage:
+        df_all = fetch_df("SELECT id, nombre FROM mandantes ORDER BY id DESC")
+        if df_all.empty:
+            st.info("No hay mandantes para gestionar.")
+        else:
+            mid = st.selectbox(
+                "Selecciona mandante",
+                df_all["id"].tolist(),
+                format_func=lambda x: df_all[df_all["id"]==x].iloc[0]["nombre"],
+                key="mand_manage_sel",
+            )
+            row = df_all[df_all["id"] == mid].iloc[0]
+
+            st.markdown("### ✏️ Editar")
+            with st.form("form_mand_edit"):
+                nombre_new = st.text_input("Nombre", value=str(row["nombre"] or ""), key="mand_name_new")
+                ok_upd = st.form_submit_button("Guardar cambios", type="primary")
+            if ok_upd:
+                nn = (nombre_new or "").strip()
+                if not nn:
+                    st.error("El nombre no puede estar vacío.")
+                else:
+                    try:
+                        execute("UPDATE mandantes SET nombre=? WHERE id=?", (nn, int(mid)))
+                        st.success("Mandante actualizado.")
+                        auto_backup_db("mandante_edit")
+                        st.rerun()
+                    except Exception as e:
+                        msg = str(e)
+                        if "UNIQUE" in msg.upper():
+                            st.error("Ya existe un mandante con ese nombre.")
+                        else:
+                            st.error(f"No se pudo actualizar: {e}")
+
+            st.divider()
+            st.markdown("### 🗑️ Eliminar")
+            dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE mandante_id=?", (int(mid),))
+            n_faenas = int(dep["n"].iloc[0]) if not dep.empty else 0
+            if n_faenas > 0:
+                st.warning(f"No se puede eliminar porque tiene {n_faenas} faena(s) asociada(s). Primero reasigna o elimina esas faenas.")
+            else:
+                confirm = st.checkbox("Confirmo que deseo eliminar este mandante", key="mand_del_confirm")
+                if st.button("Eliminar mandante definitivamente", type="secondary", key="mand_del_btn"):
+                    if not confirm:
+                        st.error("Debes confirmar antes de eliminar.")
+                        st.stop()
+                    try:
+                        execute("DELETE FROM mandantes WHERE id=?", (int(mid),))
+                        st.success("Mandante eliminado.")
+                        auto_backup_db("mandante_delete")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo eliminar: {e}")
 
 def page_contratos_faena():
     ui_header("Contratos de Faena", "Crea, edita o elimina contratos por mandante. Puedes adjuntar archivo al contrato.")
@@ -2209,23 +2345,78 @@ def page_asignar_trabajadores():
                         auto_backup_db("import_asignar_faena")
                         # llevar a docs con la faena seleccionada
                         st.session_state["selected_faena_id"] = int(faena_id)
-                        st.session_state["nav_page"] = "Documentos Trabajador"
-                        st.rerun()
+                        go("Documentos Trabajador", faena_id=int(faena_id))
             except Exception as e:
                 st.error(f"No se pudo leer/importar el Excel: {e}")
 
-    # -------------------------
-    # Tab 3: listado asignados
-    # -------------------------
-    with tab3:
-        asg = fetch_df('''
-            SELECT t.apellidos || ' ' || t.nombres AS trabajador, t.rut, a.cargo_faena, a.fecha_ingreso, a.estado
-            FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
-            WHERE a.faena_id=?
-            ORDER BY t.apellidos, t.nombres
-        ''', (int(faena_id),))
-        st.dataframe(asg, use_container_width=True, hide_index=True)
+# -------------------------
+# Tab 3: asignados + quitar
+# -------------------------
+with tab3:
+    docs_asg = fetch_df('''
+        SELECT a.id AS asignacion_id,
+               t.id AS trabajador_id,
+               t.apellidos || ' ' || t.nombres AS trabajador,
+               t.rut,
+               a.cargo_faena,
+               a.fecha_ingreso,
+               a.estado
+        FROM asignaciones a
+        JOIN trabajadores t ON t.id=a.trabajador_id
+        WHERE a.faena_id=?
+        ORDER BY t.apellidos, t.nombres
+    ''', (int(faena_id),))
 
+    if docs_asg.empty:
+        st.info("(sin trabajadores asignados)")
+    else:
+        st.dataframe(
+            docs_asg[["trabajador","rut","cargo_faena","fecha_ingreso","estado"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+        st.markdown("#### 🗑️ Quitar trabajadores de esta faena")
+        st.caption("Esto **solo elimina la asignación** (no elimina al trabajador ni sus documentos).")
+
+        def _fmt_asg(tid):
+            r = docs_asg[docs_asg["trabajador_id"] == tid].iloc[0]
+            return f"{r['trabajador']} ({r['rut']})"
+
+        to_remove = st.multiselect(
+            "Selecciona trabajadores a quitar",
+            docs_asg["trabajador_id"].tolist(),
+            format_func=_fmt_asg,
+            key="asg_remove_multi",
+        )
+        confirm = st.checkbox(
+            "Confirmo que deseo quitar los seleccionados de esta faena",
+            key="asg_remove_confirm",
+        )
+
+        cols = st.columns([1, 1, 2])
+        with cols[0]:
+            if st.button("Quitar seleccionados", type="secondary", use_container_width=True, key="btn_asg_remove"):
+                if not to_remove:
+                    st.error("Selecciona al menos un trabajador.")
+                    st.stop()
+                if not confirm:
+                    st.error("Debes confirmar el checkbox antes de quitar.")
+                    st.stop()
+                try:
+                    params = [(int(faena_id), int(tid)) for tid in to_remove]
+                    executemany("DELETE FROM asignaciones WHERE faena_id=? AND trabajador_id=?", params)
+                    st.success(f"Listo. Quitados: {len(to_remove)}")
+                    auto_backup_db("asignacion_remove")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo quitar: {e}")
+
+        with cols[1]:
+            if st.button("Limpiar selección", use_container_width=True, key="btn_asg_remove_clear"):
+                st.session_state["asg_remove_multi"] = []
+                st.rerun()
 def page_documentos_empresa():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
@@ -2300,20 +2491,6 @@ def page_documentos_empresa():
         with open(fpath, "rb") as fp:
             b = fp.read()
         st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="emp_dl_btn")
-
-        with st.expander("Vista previa (opcional)", expanded=False):
-            ext = os.path.splitext(str(fpath))[1].lower()
-            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                st.image(b, caption=fname, use_container_width=True)
-            elif ext == ".pdf":
-                if len(b) <= 10 * 1024 * 1024:
-                    b64 = base64.b64encode(b).decode("utf-8")
-                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                    st.components.v1.html(html, height=680, scrolling=True)
-                else:
-                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
-            else:
-                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
@@ -2414,20 +2591,6 @@ def page_documentos_empresa_faena():
         with open(fpath, "rb") as fp:
             b = fp.read()
         st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="empf_dl_btn")
-
-        with st.expander("Vista previa (opcional)", expanded=False):
-            ext = os.path.splitext(str(fpath))[1].lower()
-            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                st.image(b, caption=fname, use_container_width=True)
-            elif ext == ".pdf":
-                if len(b) <= 10 * 1024 * 1024:
-                    b64 = base64.b64encode(b).decode("utf-8")
-                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                    st.components.v1.html(html, height=680, scrolling=True)
-                else:
-                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
-            else:
-                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_documentos_trabajador():
     ui_header(
@@ -2585,20 +2748,6 @@ def page_documentos_trabajador():
         with open(fpath, "rb") as fp:
             b = fp.read()
         st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="trab_dl_btn")
-
-        with st.expander("Vista previa (opcional)", expanded=False):
-            ext = os.path.splitext(str(fpath))[1].lower()
-            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                st.image(b, caption=fname, use_container_width=True)
-            elif ext == ".pdf":
-                if len(b) <= 10 * 1024 * 1024:
-                    b64 = base64.b64encode(b).decode("utf-8")
-                    html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="650" type="application/pdf"></iframe>'
-                    st.components.v1.html(html, height=680, scrolling=True)
-                else:
-                    st.info("PDF demasiado grande para vista previa. Descárgalo.")
-            else:
-                st.info("Vista previa no disponible para este tipo. Descárgalo.")
 
 def page_export_zip():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
