@@ -52,3 +52,5 @@ Nota:
 - v8.2.4: Fix crítico: pendientes_obligatorios quedó truncada por indentación y pendientes_empresa_faena contenía código inalcanzable. Se reescribieron ambas funciones.
 
 - v8.2.5: Trabajadores ahora permite crear, editar y eliminar (con validación y confirmación). Eliminar borra asignaciones y documentos asociados.
+
+- v8.2.6: Ver/Descargar documentos cargados (Trabajador, Empresa global y Empresa por faena) con botón de descarga y vista previa (imagen/PDF).
