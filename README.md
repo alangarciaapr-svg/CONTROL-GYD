@@ -58,3 +58,5 @@ Nota:
 - v8.2.7: En Asignar Trabajadores → pestaña Asignados, permite quitar trabajadores de una faena (elimina la asignación, no el trabajador ni sus documentos).
 
 - v8.2.8: Documentos (Trabajador/Empresa/Empresa por Faena) ahora solo permiten descargar (sin vista previa). Mandantes con overview, KPIs y gestión (editar/eliminar).
+
+- v8.2.9: Export ZIP permite elegir qué incluir (Contrato/Anexos/Empresa Global/Empresa por Faena/Trabajadores) y filtrar por tipo de documento.

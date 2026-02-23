@@ -555,7 +555,17 @@ def parse_date_maybe(s):
     except Exception:
         return None
 
-def export_zip_for_faena(faena_id: int, include_global_empresa_docs: bool = True):
+def export_zip_for_faena(
+    faena_id: int,
+    include_global_empresa_docs: bool = True,
+    include_contrato: bool = True,
+    include_anexos: bool = True,
+    include_empresa_faena: bool = True,
+    include_trabajadores: bool = True,
+    doc_types_empresa_global=None,
+    doc_types_empresa_faena=None,
+    doc_types_trabajador=None,
+):
     faena = fetch_df('''
         SELECT f.*, m.nombre AS mandante_nombre, cf.nombre AS contrato_nombre, cf.file_path AS contrato_path
         FROM faenas f
@@ -567,10 +577,15 @@ def export_zip_for_faena(faena_id: int, include_global_empresa_docs: bool = True
         raise ValueError("Faena no encontrada.")
     f = faena.iloc[0]
 
+    # Filtros opcionales (None => incluye todo)
+    _set_emp_glob = set(doc_types_empresa_global) if doc_types_empresa_global else None
+    _set_emp_faena = set(doc_types_empresa_faena) if doc_types_empresa_faena else None
+    _set_trab = set(doc_types_trabajador) if doc_types_trabajador else None
+
     buff = io.BytesIO()
     z = zipfile.ZipFile(buff, "w", zipfile.ZIP_DEFLATED)
 
-    # Index + pendientes
+    # Index + pendientes (se incluyen siempre como guía)
     pend_t = pendientes_obligatorios(faena_id)
     miss_emp = pendientes_empresa_faena(faena_id)
 
@@ -598,27 +613,30 @@ def export_zip_for_faena(faena_id: int, include_global_empresa_docs: bool = True
     else:
         idx.append("* OK")
 
-    z.writestr("99_Index_Pendientes.txt", "\n".join(idx))
+    z.writestr("99_Index_Pendientes.txt", "\\n".join(idx))
 
     # 00_Contrato_Faena
-    if f.get("contrato_path") and os.path.exists(f["contrato_path"]):
+    if include_contrato and f.get("contrato_path") and os.path.exists(f["contrato_path"]):
         fname = os.path.basename(f["contrato_path"])
         with open(f["contrato_path"], "rb") as fp:
             z.writestr(f"00_Contrato_Faena/{fname}", fp.read())
 
     # 01_Anexos_Faena
-    anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (faena_id,))
-    for _, a in anexos.iterrows():
-        src = a["file_path"]
-        if src and os.path.exists(src):
-            fname = os.path.basename(src)
-            with open(src, "rb") as fp:
-                z.writestr(f"01_Anexos_Faena/{fname}", fp.read())
+    if include_anexos:
+        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (faena_id,))
+        for _, a in anexos.iterrows():
+            src = a["file_path"]
+            if src and os.path.exists(src):
+                fname = os.path.basename(src)
+                with open(src, "rb") as fp:
+                    z.writestr(f"01_Anexos_Faena/{fname}", fp.read())
 
     # 02_Documentos_Empresa (global)
     if include_global_empresa_docs:
         edocs = fetch_df("SELECT * FROM empresa_documentos ORDER BY id")
         for _, d in edocs.iterrows():
+            if _set_emp_glob is not None and str(d.get("doc_tipo", "")) not in _set_emp_glob:
+                continue
             src = d["file_path"]
             if src and os.path.exists(src):
                 fname = os.path.basename(src)
@@ -627,35 +645,41 @@ def export_zip_for_faena(faena_id: int, include_global_empresa_docs: bool = True
                     z.writestr(f"02_Documentos_Empresa/{tipo}/{fname}", fp.read())
 
     # 02_Documentos_Empresa_Faena (por faena)
-    fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id", (faena_id,))
-    for _, d in fedocs.iterrows():
-        src = d["file_path"]
-        if src and os.path.exists(src):
-            fname = os.path.basename(src)
-            tipo = safe_name(d["doc_tipo"])
-            with open(src, "rb") as fp:
-                z.writestr(f"02_Documentos_Empresa_Faena/{tipo}/{fname}", fp.read())
-
-    # 03_Trabajadores
-    asign = fetch_df('''
-        SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
-        FROM asignaciones a
-        JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE a.faena_id=?
-        ORDER BY t.apellidos, t.nombres
-    ''', (faena_id,))
-    for _, r in asign.iterrows():
-        tid = int(r["trabajador_id"])
-        tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
-
-        tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
-        for _, d in tdocs.iterrows():
+    if include_empresa_faena:
+        fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id", (faena_id,))
+        for _, d in fedocs.iterrows():
+            if _set_emp_faena is not None and str(d.get("doc_tipo", "")) not in _set_emp_faena:
+                continue
             src = d["file_path"]
             if src and os.path.exists(src):
                 fname = os.path.basename(src)
                 tipo = safe_name(d["doc_tipo"])
                 with open(src, "rb") as fp:
-                    z.writestr(f"03_Trabajadores/{tdir}/{tipo}/{fname}", fp.read())
+                    z.writestr(f"02_Documentos_Empresa_Faena/{tipo}/{fname}", fp.read())
+
+    # 03_Trabajadores
+    if include_trabajadores:
+        asign = fetch_df('''
+            SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
+            FROM asignaciones a
+            JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=?
+            ORDER BY t.apellidos, t.nombres
+        ''', (faena_id,))
+        for _, r in asign.iterrows():
+            tid = int(r["trabajador_id"])
+            tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
+
+            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
+            for _, d in tdocs.iterrows():
+                if _set_trab is not None and str(d.get("doc_tipo", "")) not in _set_trab:
+                    continue
+                src = d["file_path"]
+                if src and os.path.exists(src):
+                    fname = os.path.basename(src)
+                    tipo = safe_name(d["doc_tipo"])
+                    with open(src, "rb") as fp:
+                        z.writestr(f"03_Trabajadores/{tdir}/{tipo}/{fname}", fp.read())
 
     z.close()
     buff.seek(0)
@@ -2466,32 +2490,46 @@ def page_documentos_empresa():
             st.rerun()
 
 
-    with tab2:
-        if df.empty:
-            st.info("(sin documentos empresa)")
-        else:
-            docs = df.copy()
-            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-            st.dataframe(show, use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.markdown("#### 🔎 Ver / Descargar")
-    pick_id = st.selectbox(
-        "Documento",
-        docs["id"].tolist(),
-        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-        key="emp_pick_doc",
-    )
-    row = docs[docs["id"] == pick_id].iloc[0]
-    fpath = row.get("file_path", "")
-    fname = row.get("nombre_archivo", "documento")
-    if not fpath or not os.path.exists(fpath):
-        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
+with tab2:
+    if df.empty:
+        st.info("(sin documentos empresa)")
     else:
-        with open(fpath, "rb") as fp:
-            b = fp.read()
-        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="emp_dl_btn")
+        docs = df.copy()
+        show = (
+            docs[["doc_tipo", "nombre_archivo", "created_at"]].copy()
+            if all(c in docs.columns for c in ["doc_tipo", "nombre_archivo", "created_at"])
+            else docs.copy()
+        )
+        st.dataframe(show, use_container_width=True, hide_index=True)
 
+        st.divider()
+        st.markdown("#### ⬇️ Descargar documento")
+        pick_id = st.selectbox(
+            "Documento",
+            docs["id"].tolist(),
+            format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+            key="emp_pick_doc",
+        )
+        row = docs[docs["id"] == pick_id].iloc[0]
+        fpath = row.get("file_path", "")
+        fname = row.get("nombre_archivo", "documento")
+        if not fpath or not os.path.exists(fpath):
+            st.warning(
+                "El archivo no está disponible en disco (posible reboot/redeploy). "
+                "Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo."
+            )
+        else:
+            with open(fpath, "rb") as fp:
+                b = fp.read()
+            st.download_button(
+                "Descargar",
+                data=b,
+                file_name=fname,
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="emp_dl_btn",
+            )
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
 
@@ -2796,21 +2834,89 @@ def page_export_zip():
             st.success("OK (requeridos completos).")
 
 
-    with tab2:
-        include_global = st.checkbox("Incluir documentos empresa globales (además de los de la faena)", value=True, key="exp_inc_global")
-        colx1, colx2 = st.columns([1, 1])
-        with colx1:
-            if st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
-                try:
-                    zip_bytes, name = export_zip_for_faena(int(faena_id), include_global_empresa_docs=include_global)
-                    path = persist_export(int(faena_id), zip_bytes, name)
-                    st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
-                    auto_backup_db("export_zip")
-                    st.download_button("Descargar ZIP (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
-                except Exception as e:
-                    st.error(f"No se pudo generar ZIP: {e}")
-        with colx2:
-            st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
+
+with tab2:
+    st.markdown("### 📦 Selecciona qué incluir en el ZIP")
+
+    cA, cB, cC = st.columns(3)
+    with cA:
+        inc_contrato = st.checkbox("Contrato de faena", value=True, key="exp_inc_contrato")
+        inc_anexos = st.checkbox("Anexos de faena", value=True, key="exp_inc_anexos")
+    with cB:
+        inc_emp_faena = st.checkbox("Docs empresa (por faena)", value=True, key="exp_inc_emp_faena")
+        inc_emp_global = st.checkbox("Docs empresa (global)", value=True, key="exp_inc_emp_global")
+    with cC:
+        inc_trab = st.checkbox("Docs trabajadores", value=True, key="exp_inc_trab")
+
+    st.divider()
+    st.markdown("#### (Opcional) Filtrar por tipo de documento")
+
+    # Tipos disponibles
+    emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
+    emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
+
+    emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo", (int(faena_id),))
+    emp_faena_list = emp_faena_types["doc_tipo"].dropna().astype(str).tolist() if not emp_faena_types.empty else []
+
+    trab_types = fetch_df('''
+        SELECT DISTINCT td.doc_tipo AS doc_tipo
+        FROM trabajador_documentos td
+        JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
+        WHERE a.faena_id=?
+        ORDER BY td.doc_tipo
+    ''', (int(faena_id),))
+    trab_list = trab_types["doc_tipo"].dropna().astype(str).tolist() if not trab_types.empty else []
+
+    colf1, colf2, colf3 = st.columns(3)
+    with colf1:
+        emp_global_sel = []
+        if inc_emp_global and emp_global_list:
+            emp_global_sel = st.multiselect("Tipos Empresa Global", emp_global_list, default=emp_global_list, key="exp_types_emp_global")
+        elif inc_emp_global and not emp_global_list:
+            st.caption("Sin docs empresa global cargados.")
+    with colf2:
+        emp_faena_sel = []
+        if inc_emp_faena and emp_faena_list:
+            emp_faena_sel = st.multiselect("Tipos Empresa por Faena", emp_faena_list, default=emp_faena_list, key="exp_types_emp_faena")
+        elif inc_emp_faena and not emp_faena_list:
+            st.caption("Sin docs empresa por faena cargados.")
+    with colf3:
+        trab_sel = []
+        if inc_trab and trab_list:
+            trab_sel = st.multiselect("Tipos Trabajador", trab_list, default=trab_list, key="exp_types_trab")
+        elif inc_trab and not trab_list:
+            st.caption("Sin docs trabajador cargados para esta faena.")
+
+    st.divider()
+    colx1, colx2 = st.columns([1, 1])
+    with colx1:
+        if st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
+            try:
+                zip_bytes, name = export_zip_for_faena(
+                    int(faena_id),
+                    include_global_empresa_docs=inc_emp_global,
+                    include_contrato=inc_contrato,
+                    include_anexos=inc_anexos,
+                    include_empresa_faena=inc_emp_faena,
+                    include_trabajadores=inc_trab,
+                    doc_types_empresa_global=(emp_global_sel or None),
+                    doc_types_empresa_faena=(emp_faena_sel or None),
+                    doc_types_trabajador=(trab_sel or None),
+                )
+                path = persist_export(int(faena_id), zip_bytes, name)
+                st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
+                auto_backup_db("export_zip")
+                st.download_button(
+                    "Descargar ZIP (recién generado)",
+                    data=zip_bytes,
+                    file_name=os.path.basename(path),
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"No se pudo generar ZIP: {e}")
+    with colx2:
+        st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
 
     with tab3:
         hist = fetch_df("SELECT id, file_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
