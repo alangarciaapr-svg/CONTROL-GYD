@@ -954,6 +954,16 @@ def auto_backup_db(tag: str = "auto"):
     except Exception:
         pass
 
+
+def go(page: str, faena_id=None):
+    """Navegación segura hacia otra página del sidebar.
+    Evita setear directamente el key del widget 'nav_page' luego de renderizado.
+    """
+    st.session_state["nav_request"] = page
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = int(faena_id)
+    st.rerun()
+
 # ----------------------------
 # Init
 # ----------------------------
@@ -1123,16 +1133,6 @@ def page_dashboard():
     # Contexto de vista
     df_prog = faena_progress_table()
 
-    
-def go(page: str, faena_id=None):
-    """Navegación segura: NO setea el key del widget 'nav_page' después de renderizar.
-    Deja un request y fuerza rerun; al inicio del script se aplica antes de crear el radio.
-    """
-    st.session_state["nav_request"] = page
-    if faena_id is not None:
-        st.session_state["nav_request_faena_id"] = int(faena_id)
-    st.rerun()
-
     # Top KPIs (compactos)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Faenas", faena_n)
@@ -1299,6 +1299,7 @@ def go(page: str, faena_id=None):
     with d3:
         if st.button("💾 Backup / Restore", use_container_width=True):
             go("Backup / Restore")
+
 
 def page_mandantes():
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante.")
