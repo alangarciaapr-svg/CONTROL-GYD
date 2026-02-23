@@ -978,6 +978,17 @@ PAGES = [
     "Backup / Restore",
 ]
 
+
+# Aplica navegación solicitada por botones (antes de crear el widget del sidebar)
+if st.session_state.get("nav_request") is not None:
+    _req = st.session_state.get("nav_request")
+    if _req in PAGES:
+        st.session_state["nav_page"] = _req
+    if st.session_state.get("nav_request_faena_id") is not None:
+        st.session_state["selected_faena_id"] = int(st.session_state.get("nav_request_faena_id"))
+    st.session_state.pop("nav_request", None)
+    st.session_state.pop("nav_request_faena_id", None)
+
 # Normaliza nav_page por si quedó un valor antiguo en session_state
 if st.session_state.get("nav_page") not in PAGES:
     st.session_state["nav_page"] = "Dashboard"
@@ -1112,11 +1123,15 @@ def page_dashboard():
     # Contexto de vista
     df_prog = faena_progress_table()
 
-    def go(page: str, faena_id=None):
-        if faena_id is not None:
-            st.session_state["selected_faena_id"] = int(faena_id)
-        st.session_state["nav_page"] = page
-        st.rerun()
+    
+def go(page: str, faena_id=None):
+    """Navegación segura: NO setea el key del widget 'nav_page' después de renderizar.
+    Deja un request y fuerza rerun; al inicio del script se aplica antes de crear el radio.
+    """
+    st.session_state["nav_request"] = page
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = int(faena_id)
+    st.rerun()
 
     # Top KPIs (compactos)
     c1, c2, c3, c4, c5 = st.columns(5)
