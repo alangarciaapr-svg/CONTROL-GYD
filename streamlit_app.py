@@ -1755,16 +1755,19 @@ def page_faenas():
                 st.error(f"No se pudo eliminar: {e}")
 
 def page_trabajadores():
-    ui_header("Trabajadores", "Carga masiva por Excel o gestión manual. Luego asigna a faenas y adjunta documentos.")
-    tab1, tab2, tab3 = st.tabs(["📥 Importar Excel", "➕ Crear / Editar", "📋 Listado"])
+    ui_header("Trabajadores", "Carga masiva por Excel o gestión manual. Puedes crear, editar o eliminar trabajadores. Luego asigna a faenas y adjunta documentos.")
+    tab1, tab2, tab3 = st.tabs(["📥 Importar Excel", "🧩 Gestión", "📋 Listado"])
 
+    # -------------------------
+    # Tab 1: Importación Excel
+    # -------------------------
     with tab1:
         st.write("Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
         up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trabajadores")
         if up is not None:
             try:
                 xls = pd.ExcelFile(up)
-                sheet = st.selectbox("Hoja", xls.sheet_names, index=0)
+                sheet = st.selectbox("Hoja", xls.sheet_names, index=0, key="sheet_excel_trab")
                 raw = pd.read_excel(xls, sheet_name=sheet)
 
                 colmap = {c: norm_col(str(c)) for c in raw.columns}
@@ -1776,9 +1779,9 @@ def page_trabajadores():
                 if "rut" not in df.columns or "nombre" not in df.columns:
                     st.error("El Excel debe tener columnas 'RUT' y 'NOMBRE'.")
                 else:
-                    overwrite = st.checkbox("Sobrescribir si el RUT ya existe", value=True)
+                    overwrite = st.checkbox("Sobrescribir si el RUT ya existe", value=True, key="ow_excel_trab")
 
-                    if st.button("Importar Excel ahora", type="primary"):
+                    if st.button("Importar Excel ahora", type="primary", key="btn_import_excel_trab"):
                         existing_set = set(fetch_df("SELECT rut FROM trabajadores")["rut"].astype(str).tolist())
 
                         rows = inserted = updated = skipped = 0
@@ -1861,54 +1864,137 @@ def page_trabajadores():
             except Exception as e:
                 st.error(f"No se pudo leer/importar el Excel: {e}")
 
+    # -------------------------
+    # Tab 2: Gestión (crear/editar/eliminar)
+    # -------------------------
     with tab2:
-        with st.form("form_trabajador_manual"):
-            rut = st.text_input("RUT", placeholder="12.345.678-9")
-            nombres = st.text_input("Nombres", placeholder="Juan")
-            apellidos = st.text_input("Apellidos", placeholder="Pérez")
-            cargo = st.text_input("Cargo", placeholder="Operador Harvester")
-            centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA")
-            email = st.text_input("Email (opcional)")
-            fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
-            vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
-            ok = st.form_submit_button("Guardar trabajador", type="primary")
+        t_create, t_edit = st.tabs(["➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
 
-        if ok:
+        with t_create:
+            with st.form("form_trabajador_manual"):
+                rut = st.text_input("RUT", placeholder="12.345.678-9")
+                nombres = st.text_input("Nombres", placeholder="Juan")
+                apellidos = st.text_input("Apellidos", placeholder="Pérez")
+                cargo = st.text_input("Cargo", placeholder="Operador Harvester")
+                centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA")
+                email = st.text_input("Email (opcional)")
+                fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
+                vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
+                ok = st.form_submit_button("Guardar trabajador", type="primary")
 
-            if not (rut.strip() and nombres.strip() and apellidos.strip()):
+            if ok:
+                if not (rut.strip() and nombres.strip() and apellidos.strip()):
+                    st.error("Debes completar RUT, Nombres y Apellidos.")
+                    st.stop()
+                try:
+                    execute(
+                        '''
+                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                        VALUES(?,?,?,?,?,?,?,?)
+                        ON CONFLICT(rut) DO UPDATE SET
+                            nombres=excluded.nombres,
+                            apellidos=excluded.apellidos,
+                            cargo=excluded.cargo,
+                            centro_costo=excluded.centro_costo,
+                            email=excluded.email,
+                            fecha_contrato=excluded.fecha_contrato,
+                            vigencia_examen=excluded.vigencia_examen
+                        ''',
+                        (clean_rut(rut), nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
+                         str(fecha_contrato) if fecha_contrato else None,
+                         str(vigencia_examen) if vigencia_examen else None),
+                    )
+                    st.success("Trabajador guardado.")
+                    auto_backup_db("trabajador")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
 
+        with t_edit:
+            df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY apellidos, nombres")
+            if df.empty:
+                st.info("No hay trabajadores aún.")
+                return
 
-                st.error("Debes completar RUT, Nombres y Apellidos.")
+            def _fmt(x):
+                r = df[df["id"] == x].iloc[0]
+                return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
 
+            tid = st.selectbox("Selecciona trabajador", df["id"].tolist(), format_func=_fmt, key="trab_edit_sel")
+            row = df[df["id"] == tid].iloc[0]
 
-                st.stop()
-            try:
-                execute(
-                    '''
-                    INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                    VALUES(?,?,?,?,?,?,?,?)
-                    ON CONFLICT(rut) DO UPDATE SET
-                        nombres=excluded.nombres,
-                        apellidos=excluded.apellidos,
-                        cargo=excluded.cargo,
-                        centro_costo=excluded.centro_costo,
-                        email=excluded.email,
-                        fecha_contrato=excluded.fecha_contrato,
-                        vigencia_examen=excluded.vigencia_examen
-                    ''',
-                    (clean_rut(rut), nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
-                     str(fecha_contrato) if fecha_contrato else None,
-                     str(vigencia_examen) if vigencia_examen else None),
-                )
-                st.success("Trabajador guardado.")
-                auto_backup_db("trabajador")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar: {e}")
+            st.markdown("### ✏️ Editar trabajador")
+            with st.form("form_trabajador_edit"):
+                rut_new = st.text_input("RUT", value=str(row["rut"] or ""))
+                nombres_new = st.text_input("Nombres", value=str(row["nombres"] or ""))
+                apellidos_new = st.text_input("Apellidos", value=str(row["apellidos"] or ""))
+                cargo_new = st.text_input("Cargo", value=str(row["cargo"] or ""))
+                cc_new = st.text_input("Centro de costo (opcional)", value=str(row["centro_costo"] or ""))
+                email_new = st.text_input("Email (opcional)", value=str(row["email"] or ""))
+                fc_new = st.date_input("Fecha de contrato (opcional)", value=parse_date_maybe(row["fecha_contrato"]))
+                ve_new = st.date_input("Vigencia examen (opcional)", value=parse_date_maybe(row["vigencia_examen"]))
+                ok_upd = st.form_submit_button("Guardar cambios", type="primary")
 
+            if ok_upd:
+                if not (rut_new.strip() and nombres_new.strip() and apellidos_new.strip()):
+                    st.error("Debes completar RUT, Nombres y Apellidos.")
+                    st.stop()
+                try:
+                    execute(
+                        "UPDATE trabajadores SET rut=?, nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=?",
+                        (
+                            clean_rut(rut_new),
+                            nombres_new.strip(),
+                            apellidos_new.strip(),
+                            cargo_new.strip(),
+                            cc_new.strip(),
+                            email_new.strip(),
+                            str(fc_new) if fc_new else None,
+                            str(ve_new) if ve_new else None,
+                            int(tid),
+                        ),
+                    )
+                    st.success("Trabajador actualizado.")
+                    auto_backup_db("trabajador_edit")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo actualizar: {e}")
+
+            st.divider()
+            st.markdown("### 🗑️ Eliminar trabajador")
+            st.caption("Se eliminarán también sus asignaciones a faenas y sus documentos. Esto NO elimina archivos físicos en disco (solo la base de datos).")
+
+            dep_asg = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
+            dep_docs = fetch_df("SELECT COUNT(*) AS n FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
+            dep_faenas = fetch_df("SELECT COUNT(DISTINCT faena_id) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
+
+            n_asg = int(dep_asg["n"].iloc[0]) if not dep_asg.empty else 0
+            n_docs = int(dep_docs["n"].iloc[0]) if not dep_docs.empty else 0
+            n_faenas = int(dep_faenas["n"].iloc[0]) if not dep_faenas.empty else 0
+
+            st.warning(f"Dependencias: {n_asg} asignaciones (en {n_faenas} faenas) · {n_docs} documentos")
+
+            confirm = st.checkbox("Confirmo que deseo eliminar este trabajador", key="chk_del_trab")
+            if st.button("Eliminar trabajador definitivamente", type="secondary", key="btn_del_trab"):
+                if not confirm:
+                    st.error("Debes confirmar el checkbox antes de eliminar.")
+                    st.stop()
+                try:
+                    execute("DELETE FROM asignaciones WHERE trabajador_id=?", (int(tid),))
+                    execute("DELETE FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
+                    execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
+                    st.success("Trabajador eliminado.")
+                    auto_backup_db("trabajador_delete")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo eliminar: {e}")
+
+    # -------------------------
+    # Tab 3: Listado
+    # -------------------------
     with tab3:
         df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY id DESC")
-        q = st.text_input("Buscar", placeholder="RUT, nombre o cargo")
+        q = st.text_input("Buscar", placeholder="RUT, nombre o cargo", key="q_trab_list")
         out = df.copy()
         if q.strip():
             qq = q.strip().lower()
@@ -1919,6 +2005,7 @@ def page_trabajadores():
                 out["cargo"].astype(str).str.lower().str.contains(qq, na=False)
             ]
         st.dataframe(out, use_container_width=True, hide_index=True)
+        st.caption("Para editar/eliminar: ve a la pestaña **Gestión → Editar / Eliminar**.")
 
 def page_asignar_trabajadores():
     ui_header("Asignar Trabajadores", "Carga e incorpora trabajadores por faena. Si un trabajador se repite en otra faena, mantiene su documentación ya cargada.")

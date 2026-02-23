@@ -50,3 +50,5 @@ Nota:
 - v8.2.3: Fix crítico: bloque 'with tab4' (Export mensual) quedó fuera de page_export_zip. Se reindentó para quedar dentro del módulo Export.
 
 - v8.2.4: Fix crítico: pendientes_obligatorios quedó truncada por indentación y pendientes_empresa_faena contenía código inalcanzable. Se reescribieron ambas funciones.
+
+- v8.2.5: Trabajadores ahora permite crear, editar y eliminar (con validación y confirmación). Eliminar borra asignaciones y documentos asociados.
