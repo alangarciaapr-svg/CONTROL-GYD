@@ -2491,45 +2491,45 @@ def page_documentos_empresa():
 
 
 
-with tab2:
-    if df.empty:
-        st.info("(sin documentos empresa)")
-    else:
-        docs = df.copy()
-        show = (
-            docs[["doc_tipo", "nombre_archivo", "created_at"]].copy()
-            if all(c in docs.columns for c in ["doc_tipo", "nombre_archivo", "created_at"])
-            else docs.copy()
-        )
-        st.dataframe(show, use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.markdown("#### ⬇️ Descargar documento")
-        pick_id = st.selectbox(
-            "Documento",
-            docs["id"].tolist(),
-            format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-            key="emp_pick_doc",
-        )
-        row = docs[docs["id"] == pick_id].iloc[0]
-        fpath = row.get("file_path", "")
-        fname = row.get("nombre_archivo", "documento")
-        if not fpath or not os.path.exists(fpath):
-            st.warning(
-                "El archivo no está disponible en disco (posible reboot/redeploy). "
-                "Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo."
-            )
+    with tab2:
+        if df.empty:
+            st.info("(sin documentos empresa)")
         else:
-            with open(fpath, "rb") as fp:
-                b = fp.read()
-            st.download_button(
-                "Descargar",
-                data=b,
-                file_name=fname,
-                mime="application/octet-stream",
-                use_container_width=True,
-                key="emp_dl_btn",
+            docs = df.copy()
+            show = (
+                docs[["doc_tipo", "nombre_archivo", "created_at"]].copy()
+                if all(c in docs.columns for c in ["doc_tipo", "nombre_archivo", "created_at"])
+                else docs.copy()
             )
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.markdown("#### ⬇️ Descargar documento")
+            pick_id = st.selectbox(
+                "Documento",
+                docs["id"].tolist(),
+                format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+                key="emp_pick_doc",
+            )
+            row = docs[docs["id"] == pick_id].iloc[0]
+            fpath = row.get("file_path", "")
+            fname = row.get("nombre_archivo", "documento")
+            if not fpath or not os.path.exists(fpath):
+                st.warning(
+                    "El archivo no está disponible en disco (posible reboot/redeploy). "
+                    "Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo."
+                )
+            else:
+                with open(fpath, "rb") as fp:
+                    b = fp.read()
+                st.download_button(
+                    "Descargar",
+                    data=b,
+                    file_name=fname,
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                    key="emp_dl_btn",
+                )
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
 
