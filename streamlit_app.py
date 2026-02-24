@@ -10,6 +10,204 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+# ----------------------------
+# Auth (usuarios/roles/permisos)
+# ----------------------------
+
+AUTH_ITERATIONS = 200_000
+
+DEFAULT_PERMS = {
+    # vistas
+    "view_dashboard": True,
+    "view_mandantes": True,
+    "view_contratos": True,
+    "view_faenas": True,
+    "view_trabajadores": True,
+    "view_docs_empresa": True,
+    "view_docs_empresa_faena": True,
+    "view_asignaciones": True,
+    "view_docs_trabajador": True,
+    "view_export": True,
+    "view_backup": True,
+    # acciones (edición/carga)
+    "edit_mandantes": True,
+    "edit_contratos": True,
+    "edit_faenas": True,
+    "edit_trabajadores": True,
+    "upload_docs": True,
+    "export_zip": True,
+    "backup_restore": True,
+    "manage_users": False,
+}
+
+ROLE_TEMPLATES = {
+    "ADMIN": {**DEFAULT_PERMS, "manage_users": True},
+    "OPERADOR": {**DEFAULT_PERMS, "manage_users": False},
+    "LECTOR": {
+        # solo lectura (sin edición ni carga)
+        **{k: (k.startswith("view_")) for k in DEFAULT_PERMS.keys()},
+        "export_zip": True,
+        "backup_restore": False,
+        "manage_users": False,
+        "upload_docs": False,
+        "edit_mandantes": False,
+        "edit_contratos": False,
+        "edit_faenas": False,
+        "edit_trabajadores": False,
+    },
+}
+
+def _b64e(b: bytes) -> str:
+    return base64.b64encode(b).decode("utf-8")
+
+def _b64d(s: str) -> bytes:
+    return base64.b64decode((s or "").encode("utf-8"))
+
+def hash_password(password: str, salt_b64: str | None = None) -> tuple[str, str]:
+    """Devuelve (salt_b64, hash_b64) usando PBKDF2-HMAC-SHA256."""
+    if not password:
+        raise ValueError("Password vacío")
+    if salt_b64:
+        salt = _b64d(salt_b64)
+    else:
+        salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, AUTH_ITERATIONS)
+    return _b64e(salt), _b64e(dk)
+
+def verify_password(password: str, salt_b64: str, hash_b64: str) -> bool:
+    try:
+        _, h = hash_password(password, salt_b64=salt_b64)
+        return secrets.compare_digest(h, hash_b64)
+    except Exception:
+        return False
+
+def perms_from_row(role: str, perms_json: str | None):
+    role = (role or "OPERADOR").upper()
+    perms = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES["OPERADOR"]).copy()
+    if perms_json:
+        try:
+            extra = json.loads(perms_json)
+            if isinstance(extra, dict):
+                for k,v in extra.items():
+                    if k in perms:
+                        perms[k] = bool(v)
+        except Exception:
+            pass
+    return perms
+
+def ensure_users_table():
+    execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            salt_b64 TEXT NOT NULL,
+            pass_hash_b64 TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'OPERADOR',
+            perms_json TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    ''')
+    # índice opcional
+    execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+
+def users_count() -> int:
+    try:
+        df = fetch_df("SELECT COUNT(*) AS n FROM users")
+        return int(df["n"].iloc[0]) if not df.empty else 0
+    except Exception:
+        return 0
+
+def auth_set_session(user_row: dict):
+    st.session_state["auth_user"] = {
+        "id": int(user_row["id"]),
+        "username": str(user_row["username"]),
+        "role": str(user_row.get("role") or "OPERADOR"),
+        "perms": perms_from_row(str(user_row.get("role") or "OPERADOR"), user_row.get("perms_json")),
+    }
+
+def auth_logout():
+    st.session_state.pop("auth_user", None)
+    # no tocamos nav_page para no romper widgets; solo rerun
+    st.rerun()
+
+def current_user():
+    return st.session_state.get("auth_user")
+
+def has_perm(perm: str) -> bool:
+    u = current_user()
+    if not u:
+        return False
+    return bool(u.get("perms", {}).get(perm, False))
+
+def require_perm(perm: str):
+    if not has_perm(perm):
+        st.error("No tienes permisos para acceder a esta sección.")
+        st.stop()
+
+def auth_gate_ui():
+    """Pantalla de inicio: si no hay usuarios => crea admin. Si hay usuarios => login."""
+    ui_header("Inicio de sesión", "Accede con tu usuario y contraseña para usar la app.")
+
+    ensure_users_table()
+
+    if users_count() == 0:
+        st.info("Primer uso: crea el usuario ADMINISTRADOR.")
+        with st.form("form_first_admin"):
+            username = st.text_input("Usuario admin", value="admin")
+            pw1 = st.text_input("Contraseña", type="password")
+            pw2 = st.text_input("Repetir contraseña", type="password")
+            ok = st.form_submit_button("Crear administrador", type="primary")
+        if ok:
+            u = (username or "").strip()
+            if not u:
+                st.error("Usuario requerido.")
+                st.stop()
+            if not pw1 or pw1 != pw2:
+                st.error("Las contraseñas no coinciden o están vacías.")
+                st.stop()
+            salt_b64, h_b64 = hash_password(pw1)
+            perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
+            try:
+                execute(
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                    (u, salt_b64, h_b64, "ADMIN", perms_json),
+                )
+                auto_backup_db("users_first_admin")
+                # login inmediato
+                df = fetch_df("SELECT * FROM users WHERE username=?", (u,))
+                auth_set_session(df.iloc[0].to_dict())
+                st.success("Administrador creado. Entrando a la app…")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo crear admin: {e}")
+        st.stop()
+
+    # Login normal
+    with st.form("form_login"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        ok = st.form_submit_button("Ingresar", type="primary")
+    if ok:
+        u = (username or "").strip()
+        if not u or not password:
+            st.error("Usuario y contraseña son obligatorios.")
+            st.stop()
+        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+        if df.empty:
+            st.error("Usuario no existe o está desactivado.")
+            st.stop()
+        row = df.iloc[0].to_dict()
+        if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
+            st.error("Contraseña incorrecta.")
+            st.stop()
+        auth_set_session(row)
+        st.success("Ingreso exitoso.")
+        st.rerun()
+
+    st.stop()
+
 
 # ----------------------------
 # Config
@@ -411,7 +609,7 @@ def init_db():
         ''')
 
         c.commit()
-
+    ensure_users_table()
 def fetch_df(q: str, params=()):
     with conn() as c:
         return pd.read_sql_query(q, c, params=params)
@@ -997,6 +1195,13 @@ init_db()
 inject_css()
 
 # ----------------------------
+# Auth gate
+# ----------------------------
+if current_user() is None:
+    auth_gate_ui()
+
+
+# ----------------------------
 # Sidebar navigation
 # ----------------------------
 PAGES = [
@@ -1010,7 +1215,9 @@ PAGES = [
     "Documentos Trabajador",
     "Export (ZIP)",
     "Backup / Restore",
+    "Admin Usuarios",
 ]
+
 
 
 # Aplica navegación solicitada por botones (antes de crear el widget del sidebar)
@@ -1032,6 +1239,10 @@ if "nav_page" not in st.session_state:
     st.session_state["nav_page"] = "Dashboard"
 with st.sidebar:
     st.markdown("### 🧾 Control documental de faenas")
+    u = current_user()
+    st.caption(f"👤 {u['username']} · {u['role']}")
+    if st.button("Cerrar sesión", use_container_width=True):
+        auth_logout()
 
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
@@ -1044,9 +1255,31 @@ with st.sidebar:
         "Documentos Trabajador": "📎 Documentos Trabajador",
         "Export (ZIP)": "📦 Export (ZIP)",
         "Backup / Restore": "💾 Backup / Restore",
+        "Admin Usuarios": "🔐 Admin Usuarios",
     }
 
-    st.radio("Secciones", PAGES, key="nav_page", format_func=lambda x: PAGE_LABELS.get(x, x))
+# Filtra páginas según permisos (admin users solo para ADMIN)
+PAGE_PERM = {
+    "Dashboard": "view_dashboard",
+    "Mandantes": "view_mandantes",
+    "Contratos de Faena": "view_contratos",
+    "Faenas": "view_faenas",
+    "Trabajadores": "view_trabajadores",
+    "Documentos Empresa": "view_docs_empresa",
+    "Documentos Empresa (Faena)": "view_docs_empresa_faena",
+    "Asignar Trabajadores": "view_asignaciones",
+    "Documentos Trabajador": "view_docs_trabajador",
+    "Export (ZIP)": "view_export",
+    "Backup / Restore": "view_backup",
+    "Admin Usuarios": "manage_users",
+}
+VISIBLE_PAGES = [p for p in PAGES if has_perm(PAGE_PERM.get(p, "view_dashboard"))]
+
+# Si por permisos nav_page quedó fuera, ajusta al primero disponible
+if st.session_state.get("nav_page") not in VISIBLE_PAGES:
+    st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
+
+    st.radio("Secciones", VISIBLE_PAGES, key="nav_page", format_func=lambda x: PAGE_LABELS.get(x, x))
 
     st.divider()
     st.markdown("### 🔎 Contexto")
@@ -3084,10 +3317,156 @@ def page_backup_restore():
             except Exception as e:
                 st.error(f"No se pudo restaurar: {e}")
 
+def page_admin_usuarios():
+    ui_header("Administración de Usuarios", "Solo ADMIN puede crear, editar o eliminar usuarios y sus poderes.")
+
+    require_perm("manage_users")
+
+    ensure_users_table()
+
+    tab1, tab2 = st.tabs(["👥 Usuarios", "➕ Crear / Configurar"])
+
+    with tab1:
+        df = fetch_df("SELECT id, username, role, is_active, created_at, updated_at FROM users ORDER BY id DESC")
+        if df.empty:
+            st.info("No hay usuarios.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            st.divider()
+            uid = st.selectbox("Selecciona usuario", df["id"].tolist(), format_func=lambda x: df[df["id"]==x].iloc[0]["username"], key="adm_user_sel")
+            row = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),)).iloc[0].to_dict()
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                new_role = st.selectbox("Rol", ["ADMIN", "OPERADOR", "LECTOR"], index=["ADMIN","OPERADOR","LECTOR"].index((row.get("role") or "OPERADOR").upper()), key="adm_role_sel")
+                active = st.checkbox("Activo", value=bool(int(row.get("is_active",1))), key="adm_user_active")
+            with c2:
+                st.markdown("**Reset contraseña**")
+                pw1 = st.text_input("Nueva contraseña", type="password", key="adm_pw1")
+                pw2 = st.text_input("Repetir", type="password", key="adm_pw2")
+            with c3:
+                st.markdown("**Acciones**")
+                del_confirm = st.checkbox("Confirmo eliminar usuario", key="adm_del_confirm")
+                del_btn = st.button("Eliminar usuario", type="secondary", use_container_width=True, key="adm_del_btn")
+
+            # Permisos personalizados
+            st.divider()
+            st.markdown("### Poderes (permisos)")
+            current_perms = perms_from_row(new_role, row.get("perms_json"))
+            # si es admin, por defecto todo true (pero editable)
+            cols = st.columns(3)
+            keys = list(DEFAULT_PERMS.keys())
+            new_perms = {}
+            for i,k in enumerate(keys):
+                with cols[i % 3]:
+                    new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}")
+
+            # Guardar cambios
+            if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
+                try:
+                    perms_json = json.dumps(new_perms)
+                    execute(
+                        "UPDATE users SET role=?, perms_json=?, is_active=?, updated_at=datetime('now') WHERE id=?",
+                        (new_role, perms_json, 1 if active else 0, int(uid)),
+                    )
+                    # reset password if provided
+                    if pw1 or pw2:
+                        if not pw1 or pw1 != pw2:
+                            st.error("Contraseñas no coinciden o están vacías.")
+                            st.stop()
+                        salt_b64, h_b64 = hash_password(pw1)
+                        execute(
+                            "UPDATE users SET salt_b64=?, pass_hash_b64=?, updated_at=datetime('now') WHERE id=?",
+                            (salt_b64, h_b64, int(uid)),
+                        )
+                    auto_backup_db("users_update")
+                    st.success("Cambios guardados.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if del_btn:
+                if not del_confirm:
+                    st.error("Debes confirmar antes de eliminar.")
+                    st.stop()
+                # Evita eliminarte a ti mismo
+                cu = current_user()
+                if cu and int(cu["id"]) == int(uid):
+                    st.error("No puedes eliminar tu propio usuario.")
+                    st.stop()
+                try:
+                    execute("DELETE FROM users WHERE id=?", (int(uid),))
+                    auto_backup_db("users_delete")
+                    st.success("Usuario eliminado.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo eliminar: {e}")
+
+    with tab2:
+        st.markdown("### Crear usuario")
+        with st.form("form_create_user", clear_on_submit=True):
+            username = st.text_input("Usuario", placeholder="ej: operador1")
+            role = st.selectbox("Rol", ["OPERADOR", "LECTOR", "ADMIN"])
+            pw1 = st.text_input("Contraseña", type="password")
+            pw2 = st.text_input("Repetir contraseña", type="password")
+            st.markdown("#### Poderes (opcional)")
+            base = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES["OPERADOR"])
+            cols = st.columns(3)
+            perms = {}
+            keys = list(DEFAULT_PERMS.keys())
+            for i,k in enumerate(keys):
+                with cols[i % 3]:
+                    perms[k] = st.checkbox(k, value=bool(base.get(k, False)), key=f"new_perm_{k}")
+            ok = st.form_submit_button("Crear usuario", type="primary")
+
+        if ok:
+            u = (username or "").strip()
+            if not u:
+                st.error("Usuario requerido.")
+                st.stop()
+            if not pw1 or pw1 != pw2:
+                st.error("Contraseñas no coinciden o están vacías.")
+                st.stop()
+            try:
+                salt_b64, h_b64 = hash_password(pw1)
+                execute(
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                    (u, salt_b64, h_b64, role, json.dumps(perms)),
+                )
+                auto_backup_db("users_create")
+                st.success("Usuario creado.")
+                st.rerun()
+            except Exception as e:
+                msg = str(e)
+                if "UNIQUE" in msg.upper():
+                    st.error("Ese usuario ya existe.")
+                else:
+                    st.error(f"No se pudo crear: {e}")
+
 # ----------------------------
 # Route
 # ----------------------------
 p = st.session_state.get("nav_page", "Dashboard")
+
+# Enforce permisos por página
+PAGE_PERM_ROUTE = {
+    "Dashboard": "view_dashboard",
+    "Mandantes": "view_mandantes",
+    "Contratos de Faena": "view_contratos",
+    "Faenas": "view_faenas",
+    "Trabajadores": "view_trabajadores",
+    "Documentos Empresa": "view_docs_empresa",
+    "Documentos Empresa (Faena)": "view_docs_empresa_faena",
+    "Asignar Trabajadores": "view_asignaciones",
+    "Documentos Trabajador": "view_docs_trabajador",
+    "Export (ZIP)": "view_export",
+    "Backup / Restore": "view_backup",
+    "Admin Usuarios": "manage_users",
+}
+if p in PAGE_PERM_ROUTE:
+    require_perm(PAGE_PERM_ROUTE[p])
+
 if p == "Dashboard":
     page_dashboard()
 elif p == "Mandantes":
@@ -3110,6 +3489,8 @@ elif p == "Export (ZIP)":
     page_export_zip()
 elif p == "Backup / Restore":
     page_backup_restore()
+elif p == "Admin Usuarios":
+    page_admin_usuarios()
 else:
     # Si el estado quedó con un valor inesperado, vuelve a Dashboard
     st.session_state["nav_page"] = "Dashboard"
