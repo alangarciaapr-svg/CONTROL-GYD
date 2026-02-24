@@ -1275,118 +1275,120 @@ if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
 
 with st.sidebar:
-    st.markdown("### 🧾 Control documental de faenas")
-
+    # Branding compacto
+    try:
+        st.image("https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png", width=170)
+    except Exception:
+        pass
+    st.markdown("**Control documental**")
     u = current_user()
     if u:
         st.caption(f"👤 {u['username']} · {u['role']}")
-        if st.button("Cerrar sesión", use_container_width=True):
-            auth_logout()
 
-
+    # Navegación (simple)
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
         "Mandantes": "🏢 Mandantes",
-        "Contratos de Faena": "📄 Contratos de Faena",
+        "Contratos de Faena": "📄 Contratos",
         "Faenas": "🛠️ Faenas",
         "Trabajadores": "👷 Trabajadores",
-        "Documentos Empresa": "🏛️ Documentos Empresa",
-        "Asignar Trabajadores": "🧩 Asignar Trabajadores",
-        "Documentos Trabajador": "📎 Documentos Trabajador",
-        "Export (ZIP)": "📦 Export (ZIP)",
-        "Backup / Restore": "💾 Backup / Restore",
-        "Admin Usuarios": "🔐 Admin Usuarios",
+        "Documentos Empresa": "🏛️ Docs Empresa",
+        "Documentos Empresa (Faena)": "🏛️ Docs Empresa (Faena)",
+        "Asignar Trabajadores": "🧩 Asignar",
+        "Documentos Trabajador": "📎 Docs Trabajador",
+        "Export (ZIP)": "📦 Export",
+        "Backup / Restore": "💾 Backup",
+        "Admin Usuarios": "🔐 Usuarios",
     }
 
-    st.radio("Secciones", VISIBLE_PAGES, key="nav_page", format_func=lambda x: PAGE_LABELS.get(x, x))
+    st.radio(
+        "Secciones",
+        VISIBLE_PAGES,
+        key="nav_page",
+        format_func=lambda x: PAGE_LABELS.get(x, x),
+        label_visibility="collapsed",
+    )
 
-    st.divider()
-    st.markdown("### 🔎 Contexto")
-    try:
-        _fa = fetch_df("""
-            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-            ORDER BY f.id DESC
-        """)
-    except Exception:
-        _fa = pd.DataFrame()
+    # Contexto (colapsable)
+    with st.expander("🔎 Contexto (Faena)", expanded=False):
+        try:
+            _fa = fetch_df("""
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+                ORDER BY f.id DESC
+            """)
+        except Exception:
+            _fa = pd.DataFrame()
 
-    if not _fa.empty:
-        default_id = st.session_state.get("selected_faena_id", int(_fa["id"].iloc[0]))
-        opts = _fa["id"].tolist()
-        if default_id not in opts:
-            default_id = int(opts[0])
-        idx = opts.index(default_id)
-        faena_id = st.selectbox(
-            "Faena seleccionada",
-            opts,
-            index=idx,
-            format_func=lambda x: f"{x} - {_fa[_fa['id']==x].iloc[0]['mandante']} / {_fa[_fa['id']==x].iloc[0]['nombre']} ({_fa[_fa['id']==x].iloc[0]['estado']})",
-        )
-        st.session_state["selected_faena_id"] = int(faena_id)
+        if not _fa.empty:
+            default_id = st.session_state.get("selected_faena_id", int(_fa["id"].iloc[0]))
+            opts = _fa["id"].tolist()
+            if default_id not in opts:
+                default_id = int(opts[0])
+            idx = opts.index(default_id)
+            faena_id = st.selectbox(
+                "Faena",
+                opts,
+                index=idx,
+                format_func=lambda x: f"{int(x)} · {_fa[_fa['id']==x].iloc[0]['mandante']} / {_fa[_fa['id']==x].iloc[0]['nombre']} ({_fa[_fa['id']==x].iloc[0]['estado']})",
+            )
+            st.session_state["selected_faena_id"] = int(faena_id)
 
-        cctx1, cctx2 = st.columns(2)
-        with cctx1:
-            if st.button("📎 Docs", use_container_width=True):
-                st.session_state["nav_page"] = "Documentos Trabajador"
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("📎 Docs", use_container_width=True):
+                    st.session_state["nav_page"] = "Documentos Trabajador"
+                    st.rerun()
+            with b2:
+                if st.button("📦 Export", use_container_width=True):
+                    st.session_state["nav_page"] = "Export (ZIP)"
+                    st.rerun()
+        else:
+            st.caption("(Aún no hay faenas)")
+
+    # Acciones rápidas (colapsable)
+    with st.expander("⚡ Acciones", expanded=False):
+        a1, a2 = st.columns(2)
+        with a1:
+            if st.button("Mandante", use_container_width=True):
+                st.session_state["nav_page"] = "Mandantes"
                 st.rerun()
-        with cctx2:
-            if st.button("📦 Export", use_container_width=True):
-                st.session_state["nav_page"] = "Export (ZIP)"
+            if st.button("Faena", use_container_width=True):
+                st.session_state["nav_page"] = "Faenas"
                 st.rerun()
-    else:
-        st.caption("(Aún no hay faenas para seleccionar)")
+        with a2:
+            if st.button("Trabajador", use_container_width=True):
+                st.session_state["nav_page"] = "Trabajadores"
+                st.rerun()
+            if st.button("Asignar", use_container_width=True):
+                st.session_state["nav_page"] = "Asignar Trabajadores"
+                st.rerun()
 
-    st.divider()
-    st.markdown("### ⚡ Resumen")
-    counts = get_global_counts()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Faenas", counts.get("faenas", 0))
-        st.metric("Trabajadores", counts.get("trabajadores", 0))
-    with c2:
-        st.metric("Activas", counts.get("faenas_activas", 0))
-        st.metric("Docs", counts.get("docs", 0))
+    # Respaldo (colapsable)
+    with st.expander("💾 Respaldo", expanded=False):
+        if "auto_backup_enabled" not in st.session_state:
+            st.session_state["auto_backup_enabled"] = True
+        st.checkbox("Auto-backup al guardar (app.db)", key="auto_backup_enabled")
 
-    st.divider()
-    st.markdown("### ➕ Atajos")
-    cqa1, cqa2 = st.columns(2)
-    with cqa1:
-        if st.button("Mandante", use_container_width=True):
-            st.session_state["nav_page"] = "Mandantes"
-            st.rerun()
-        if st.button("Faena", use_container_width=True):
-            st.session_state["nav_page"] = "Faenas"
-            st.rerun()
-    with cqa2:
-        if st.button("Trabajador", use_container_width=True):
-            st.session_state["nav_page"] = "Trabajadores"
-            st.rerun()
-        if st.button("Asignar", use_container_width=True):
-            st.session_state["nav_page"] = "Asignar Trabajadores"
-            st.rerun()
+        last = st.session_state.get("last_auto_backup")
+        if last and last.get("bytes"):
+            st.success("Auto-backup listo")
+            st.download_button(
+                "Descargar último auto-backup",
+                data=last["bytes"],
+                file_name=last["name"],
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+            if st.button("Limpiar aviso", use_container_width=True):
+                st.session_state.pop("last_auto_backup", None)
+                st.rerun()
 
-    st.divider()
-    st.markdown("### 💾 Respaldo")
-    if "auto_backup_enabled" not in st.session_state:
-        st.session_state["auto_backup_enabled"] = True
-    st.checkbox("Auto-backup al guardar (solo app.db)", key="auto_backup_enabled")
+        st.caption("En Streamlit Community Cloud, el disco puede perderse en reboots. Usa Backup/Restore para respaldos completos.")
 
-    last = st.session_state.get("last_auto_backup")
-    if last and last.get("bytes"):
-        st.success("Auto-backup listo")
-        st.download_button(
-            "Descargar último auto-backup (app.db)",
-            data=last["bytes"],
-            file_name=last["name"],
-            mime="application/octet-stream",
-            use_container_width=True,
-        )
-        if st.button("Limpiar aviso", use_container_width=True):
-            st.session_state.pop("last_auto_backup", None)
-            st.rerun()
-
-    st.caption("⚠️ En Streamlit Community Cloud, el disco puede perderse en reboots/redeploy. Usa Backup/Restore para respaldos completos.")
+    # Cerrar sesión al final (limpio)
+    if u and st.button("Cerrar sesión", use_container_width=True):
+        auth_logout()
 
 current_section = st.session_state.get("nav_page", "Dashboard")
 st.title(f"{APP_NAME} — {current_section}")
@@ -1397,185 +1399,192 @@ st.title(f"{APP_NAME} — {current_section}")
 # Pages
 # ----------------------------
 def page_dashboard():
-    ui_header("Dashboard", "Centro de control: pendientes, acciones rápidas y estado documental (estilo app).")
+    ui_header("Dashboard", "Compacto y accionable: semáforo, pendientes y estado al día.")
 
     counts = get_global_counts()
-    mand_n = counts.get("mandantes", 0)
-    faena_n = counts.get("faenas", 0)
-    fa_act = counts.get("faenas_activas", 0)
-    trab_n = counts.get("trabajadores", 0)
-    docs_emp = counts.get("docs_empresa", 0)
-
-    # Contexto de vista
     df_prog = faena_progress_table()
 
-    # Top KPIs (compactos)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Faenas", faena_n)
-    c2.metric("Activas", fa_act)
-    c3.metric("Trabajadores", trab_n)
-    c4.metric("Mandantes", mand_n)
-    c5.metric("Docs empresa", docs_emp)
-
-    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-    view = st.radio("Vista", ["🌐 Global", "🛠️ Faena"], horizontal=True, label_visibility="collapsed")
-
-    selected_faena_id = st.session_state.get("selected_faena_id")
-    if view == "🛠️ Faena":
-        if df_prog.empty:
-            st.info("No hay faenas para seleccionar.")
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
-
-        show = df_prog.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
-        if selected_faena_id not in show["id"].tolist():
-            selected_faena_id = int(show["id"].iloc[0])
-            st.session_state["selected_faena_id"] = selected_faena_id
-
-        faena_id = st.selectbox(
-            "Faena",
-            show["id"].tolist(),
-            index=show["id"].tolist().index(selected_faena_id),
-            format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['mandante']} / {show[show['id']==x].iloc[0]['faena_nombre']} ({show[show['id']==x].iloc[0]['estado']})",
-        )
-        st.session_state["selected_faena_id"] = int(faena_id)
-
-        row = show[show["id"] == int(faena_id)].iloc[0]
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("Cobertura docs %", int(round(float(row["cobertura_docs_pct"] or 0), 0)))
-        cc2.metric("Faltantes", int(row["faltantes_total"] or 0))
-        cc3.metric("Trabajadores", int(row["trabajadores"] or 0))
-        cc4.metric("OK", int(row["trab_ok"] or 0))
-
-        ab1, ab2, ab3 = st.columns(3)
-        with ab1:
-            if st.button("📎 Cargar docs trabajador", use_container_width=True):
-                go("Documentos Trabajador", faena_id=int(faena_id))
-        with ab2:
-            if st.button("📦 Exportar ZIP", type="primary", use_container_width=True):
-                go("Export (ZIP)", faena_id=int(faena_id))
-        with ab3:
-            if st.button("🧩 Asignar trabajadores", use_container_width=True):
-                go("Asignar Trabajadores", faena_id=int(faena_id))
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Acciones rápidas (estilo app)
-    st.markdown("### ⚡ Acciones rápidas")
-    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-    qa1, qa2, qa3, qa4 = st.columns(4)
-    with qa1:
-        if st.button("🏢 Nuevo mandante", use_container_width=True):
-            go("Mandantes")
-    with qa2:
-        if st.button("📄 Nuevo contrato", use_container_width=True):
-            go("Contratos de Faena")
-    with qa3:
-        if st.button("🛠️ Nueva faena", use_container_width=True):
-            go("Faenas")
-    with qa4:
-        if st.button("👷 Importar trabajadores", use_container_width=True):
-            go("Trabajadores")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Inbox de gestión (críticas/pendientes + CTA)
-    st.markdown("### 📥 Inbox de gestión")
-    st.caption("Lo importante primero. Tarjetas accionables para resolver rápido.")
-
     if df_prog.empty:
-        ui_tip("Aún no hay faenas. Crea una faena para empezar.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mandantes", counts.get("mandantes", 0))
+        c2.metric("Faenas", counts.get("faenas", 0))
+        c3.metric("Trabajadores", counts.get("trabajadores", 0))
+        ui_tip("Crea una **Faena** y asigna **Trabajadores** para activar el control documental.")
         return
 
-    def semaforo(r):
+    # ---- Semáforo por faena ----
+    def semaforo_row(r):
         tr = int(r.get("trabajadores", 0) or 0)
         pct = float(r.get("cobertura_docs_pct", 0) or 0)
         falt = int(r.get("faltantes_total", 0) or 0)
+
         if tr == 0:
-            return "CRITICO"
-        if falt == 0 and pct >= 100:
-            return "OK"
-        if pct >= 70:
-            return "PENDIENTE"
-        return "CRITICO"
+            level = "PENDIENTE"
+        elif falt == 0 and pct >= 100:
+            level = "OK"
+        elif pct >= 85:
+            level = "PENDIENTE"
+        else:
+            level = "CRITICO"
+
+        icon = {"OK":"🟢", "PENDIENTE":"🟡", "CRITICO":"🔴"}[level]
+        return level, icon
 
     inbox = df_prog.copy()
-    inbox["semaforo"] = inbox.apply(semaforo, axis=1)
-    inbox = inbox.rename(columns={"faena_id":"id", "faena":"faena_nombre"})
+    tmp = inbox.apply(semaforo_row, axis=1, result_type="expand")
+    inbox["semaforo"] = tmp[0]
+    inbox["icon"] = tmp[1]
+    inbox = inbox.rename(columns={"faena_id": "id", "faena": "faena_nombre"})
 
-    # Críticas y pendientes (Top 5)
-    crit = inbox[inbox["semaforo"]=="CRITICO"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(5)
-    pend = inbox[inbox["semaforo"]=="PENDIENTE"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(5)
+    # KPIs compactos
+    ok_n = int((inbox["semaforo"] == "OK").sum())
+    pen_n = int((inbox["semaforo"] == "PENDIENTE").sum())
+    cri_n = int((inbox["semaforo"] == "CRITICO").sum())
+    total = int(len(inbox))
+    pct_ok = int(round((ok_n / total) * 100, 0)) if total else 0
 
-    colA, colB = st.columns(2)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Faenas", counts.get("faenas", 0))
+    k2.metric("Activas", counts.get("faenas_activas", 0))
+    k3.metric("🟢 OK", ok_n)
+    k4.metric("🟡 Pend.", pen_n)
+    k5.metric("🔴 Crít.", cri_n)
 
-    with colA:
+    st.caption(f"Estado general: **{pct_ok}%** de faenas en OK (sin faltantes y cobertura 100%).")
+
+    tab_inbox, tab_estado, tab_insights = st.tabs(["📥 Inbox", "📋 Estado por faena", "📊 Insights"])
+
+    with tab_inbox:
+        cA, cB = st.columns(2)
+        with cA:
+            st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+            st.markdown("#### 🔴 Críticas (resolver primero)")
+            crit = inbox[inbox["semaforo"] == "CRITICO"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(8)
+            if crit.empty:
+                st.success("No hay críticas 🎉")
+            else:
+                for _, r in crit.iterrows():
+                    st.markdown(f"**{r['icon']} {int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
+                    st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)} · Trab.: {int(r['trabajadores'] or 0)}")
+                    b1, b2, b3 = st.columns(3)
+                    with b1:
+                        if st.button("📎 Docs", key=f"db_crit_docs_{int(r['id'])}", use_container_width=True):
+                            go("Documentos Trabajador", faena_id=int(r["id"]))
+                    with b2:
+                        if st.button("🏛️ Empresa", key=f"db_crit_emp_{int(r['id'])}", use_container_width=True):
+                            go("Documentos Empresa (Faena)", faena_id=int(r["id"]))
+                    with b3:
+                        if st.button("📦 Export", key=f"db_crit_exp_{int(r['id'])}", type="primary", use_container_width=True):
+                            go("Export (ZIP)", faena_id=int(r["id"]))
+                    st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with cB:
+            st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
+            st.markdown("#### 🟡 Pendientes (subir a OK)")
+            pend = inbox[inbox["semaforo"] == "PENDIENTE"].sort_values(["faltantes_total","cobertura_docs_pct"], ascending=[False, True]).head(8)
+            if pend.empty:
+                st.info("No hay pendientes.")
+            else:
+                for _, r in pend.iterrows():
+                    st.markdown(f"**{r['icon']} {int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
+                    st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)} · Trab.: {int(r['trabajadores'] or 0)}")
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("🧩 Asignar", key=f"db_pen_asg_{int(r['id'])}", use_container_width=True):
+                            go("Asignar Trabajadores", faena_id=int(r["id"]))
+                    with b2:
+                        if st.button("📎 Docs", key=f"db_pen_docs_{int(r['id'])}", use_container_width=True):
+                            go("Documentos Trabajador", faena_id=int(r["id"]))
+                    st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_estado:
         st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-        st.markdown("#### 🔴 Críticas (resolver hoy)")
-        if crit.empty:
-            st.success("No hay faenas críticas 🎉")
-        else:
-            for _, r in crit.iterrows():
-                st.markdown(f"**{int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
-                st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)} · Trabajadores: {int(r['trabajadores'] or 0)}")
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("📎 Resolver docs", key=f"cta_docs_crit_{int(r['id'])}", use_container_width=True):
-                        go("Export (ZIP)", faena_id=int(r["id"]))
-                with b2:
-                    if st.button("🧩 Asignar", key=f"cta_asg_crit_{int(r['id'])}", use_container_width=True):
-                        go("Asignar Trabajadores", faena_id=int(r["id"]))
-                st.divider()
+
+        f1, f2, f3 = st.columns([1, 1, 1])
+        with f1:
+            only_active = st.checkbox("Solo activas", value=True, key="db_only_active")
+        with f2:
+            mandantes = ["(Todos)"] + sorted(inbox["mandante"].dropna().astype(str).unique().tolist())
+            mand_sel = st.selectbox("Mandante", mandantes, key="db_mand_sel")
+        with f3:
+            q = st.text_input("Buscar faena", placeholder="Nombre…", key="db_q")
+
+        view_df = inbox.copy()
+        if only_active:
+            view_df = view_df[view_df["estado"] == "ACTIVA"]
+        if mand_sel and mand_sel != "(Todos)":
+            view_df = view_df[view_df["mandante"].astype(str) == str(mand_sel)]
+        if q:
+            view_df = view_df[view_df["faena_nombre"].astype(str).str.contains(q, case=False, na=False)]
+
+        show_cols = ["icon", "mandante", "faena_nombre", "estado", "cobertura_docs_pct", "faltantes_total", "trabajadores", "trab_ok", "id"]
+        show = view_df[show_cols].rename(columns={
+            "icon":"Semáforo",
+            "mandante":"Mandante",
+            "faena_nombre":"Faena",
+            "estado":"Estado",
+            "cobertura_docs_pct":"Cobertura %",
+            "faltantes_total":"Faltantes",
+            "trabajadores":"Trab.",
+            "trab_ok":"Trab OK",
+            "id":"ID",
+        }).copy()
+
+        order = {"🔴":0, "🟡":1, "🟢":2}
+        show["_ord"] = show["Semáforo"].map(lambda x: order.get(str(x), 99))
+        show = show.sort_values(["_ord","Faltantes","Cobertura %"], ascending=[True, False, True]).drop(columns=["_ord"])
+
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+        st.divider()
+        ids = show["ID"].tolist()
+        if ids:
+            default_id = st.session_state.get("selected_faena_id", int(ids[0]))
+            if default_id not in ids:
+                default_id = int(ids[0])
+            sel = st.selectbox(
+                "Acción rápida sobre faena",
+                ids,
+                index=ids.index(default_id),
+                format_func=lambda x: f"{int(x)} · {show[show['ID']==x].iloc[0]['Mandante']} / {show[show['ID']==x].iloc[0]['Faena']} ({show[show['ID']==x].iloc[0]['Semáforo']})",
+                key="db_sel_faena",
+            )
+            st.session_state["selected_faena_id"] = int(sel)
+
+            a1, a2, a3, a4 = st.columns(4)
+            with a1:
+                if st.button("📎 Docs Trab.", use_container_width=True):
+                    go("Documentos Trabajador", faena_id=int(sel))
+            with a2:
+                if st.button("🏛️ Docs Empresa", use_container_width=True):
+                    go("Documentos Empresa (Faena)", faena_id=int(sel))
+            with a3:
+                if st.button("🧩 Asignar", use_container_width=True):
+                    go("Asignar Trabajadores", faena_id=int(sel))
+            with a4:
+                if st.button("📦 Export", type="primary", use_container_width=True):
+                    go("Export (ZIP)", faena_id=int(sel))
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with colB:
+    with tab_insights:
         st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-        st.markdown("#### 🟡 Pendientes (subir a OK)")
-        if pend.empty:
-            st.info("No hay faenas pendientes.")
-        else:
-            for _, r in pend.iterrows():
-                st.markdown(f"**{int(r['id'])} — {r['mandante']} / {r['faena_nombre']}**")
-                st.caption(f"Cobertura: {int(round(float(r['cobertura_docs_pct'] or 0),0))}% · Faltantes: {int(r['faltantes_total'] or 0)}")
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("📎 Docs", key=f"cta_docs_pen_{int(r['id'])}", use_container_width=True):
-                        go("Documentos Trabajador", faena_id=int(r["id"]))
-                with b2:
-                    if st.button("📦 Export", key=f"cta_exp_pen_{int(r['id'])}", type="primary", use_container_width=True):
-                        go("Export (ZIP)", faena_id=int(r["id"]))
-                st.divider()
+        g1, g2 = st.columns(2)
+
+        with g1:
+            st.markdown("**Faenas por semáforo**")
+            s = inbox.groupby("semaforo")["id"].count()
+            s = s.reindex(["OK","PENDIENTE","CRITICO"]).fillna(0)
+            st.bar_chart(s)
+
+        with g2:
+            st.markdown("**Cobertura promedio por mandante**")
+            mdf = inbox.groupby("mandante")["cobertura_docs_pct"].mean().sort_values(ascending=False).rename("cobertura_promedio_%")
+            st.bar_chart(mdf)
+
         st.markdown("</div>", unsafe_allow_html=True)
-
-    # Gráficos mínimos (2 max)
-    st.markdown("### 📊 Gráficos (mínimos)")
-    st.markdown('<div class="gyd-card">', unsafe_allow_html=True)
-    g1, g2 = st.columns(2)
-
-    with g1:
-        st.markdown("**Faenas por estado**")
-        s = inbox.groupby("estado")["id"].count().rename("cantidad")
-        st.bar_chart(s)
-
-    with g2:
-        st.markdown("**Cobertura promedio por mandante**")
-        mdf = inbox.groupby("mandante")["cobertura_docs_pct"].mean().sort_values(ascending=False).rename("cobertura_promedio_%")
-        st.bar_chart(mdf)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Acceso a detalles (sin llenar de tablas)
-    st.markdown("### 🔎 Ver detalle")
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        if st.button("📋 Ver listado de faenas (semáforo)", use_container_width=True):
-            go("Faenas")
-    with d2:
-        if st.button("🏛️ Ver documentos empresa", use_container_width=True):
-            go("Documentos Empresa")
-    with d3:
-        if st.button("💾 Backup / Restore", use_container_width=True):
-            go("Backup / Restore")
-
 
 def page_mandantes():
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante. Aquí puedes crear, editar y revisar su avance.")
