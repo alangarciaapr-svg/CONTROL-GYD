@@ -18,6 +18,7 @@ import secrets
 # ----------------------------
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
 UPLOAD_ROOT = os.environ.get("APP_UPLOAD_ROOT", "uploads")
+APP_NAME = os.environ.get("APP_NAME", "Control GYD")
 
 # ----------------------------
 # Auth (usuarios/roles/permisos)
