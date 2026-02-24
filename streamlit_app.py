@@ -148,188 +148,122 @@ def require_perm(perm: str):
 
 def auth_gate_ui():
     """Pantalla de inicio: si no hay usuarios => crea admin. Si hay usuarios => login."""
-    ui_header("Inicio de sesión", "Accede con tu usuario y contraseña para usar la app.")
 
-    ensure_users_table()
-
-    if users_count() == 0:
-        st.info("Primer uso: crea el usuario ADMINISTRADOR.")
-        with st.form("form_first_admin"):
-            username = st.text_input("Usuario admin", value="admin")
-            pw1 = st.text_input("Contraseña", type="password")
-            pw2 = st.text_input("Repetir contraseña", type="password")
-            ok = st.form_submit_button("Crear administrador", type="primary")
-        if ok:
-            u = (username or "").strip()
-            if not u:
-                st.error("Usuario requerido.")
-                st.stop()
-            if not pw1 or pw1 != pw2:
-                st.error("Las contraseñas no coinciden o están vacías.")
-                st.stop()
-            salt_b64, h_b64 = hash_password(pw1)
-            perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
-            try:
-                execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                    (u, salt_b64, h_b64, "ADMIN", perms_json),
-                )
-                auto_backup_db("users_first_admin")
-                # login inmediato
-                df = fetch_df("SELECT * FROM users WHERE username=?", (u,))
-                auth_set_session(df.iloc[0].to_dict())
-                st.success("Administrador creado. Entrando a la app…")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo crear admin: {e}")
-        st.stop()
-
-    # Login normal
-    with st.form("form_login"):
-        username = st.text_input("Usuario")
-        password = st.text_input("Contraseña", type="password")
-        ok = st.form_submit_button("Ingresar", type="primary")
-    if ok:
-        u = (username or "").strip()
-        if not u or not password:
-            st.error("Usuario y contraseña son obligatorios.")
-            st.stop()
-        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
-        if df.empty:
-            st.error("Usuario no existe o está desactivado.")
-            st.stop()
-        row = df.iloc[0].to_dict()
-        if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
-            st.error("Contraseña incorrecta.")
-            st.stop()
-        auth_set_session(row)
-        st.success("Ingreso exitoso.")
-        st.rerun()
-
-    st.stop()
-
-
-# ----------------------------
-# Config
-# ----------------------------
-st.set_page_config(page_title="Control Documental Faenas", layout="wide")
-
-APP_NAME = "Control Documental de Faenas"
-DB_PATH = "app.db"
-UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
-
-ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
-DOC_OBLIGATORIOS = [
-    "REGISTRO_EPP",
-    "ENTREGA_RIOHS",
-    "IRL",
-    "CONTRATO_TRABAJO",
-    "ANEXO_CONTRATO",
-    "LIQUIDACIONES",
-    "FINIQUITO",
-]
-DOC_EMPRESA_SUGERIDOS = [
-    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
-    "CERTIFICADO_ACCIDENTABILIDAD",
-    "OTROS",
-]
-DOC_EMPRESA_REQUERIDOS = [
-    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
-    "CERTIFICADO_ACCIDENTABILIDAD",
-]
-REQ_DOCS_N = len(DOC_OBLIGATORIOS)
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def inject_css():
+    # ---- Hero / Branding ----
     st.markdown(
         """
         <style>
-        .block-container {padding-top: 1rem; padding-bottom: 2rem;}
-        /* Metric cards */
-        div[data-testid="stMetric"]{
-            padding: 14px 14px 10px 14px;
-            border: 1px solid rgba(0,0,0,0.08);
-            border-radius: 16px;
+        .auth-wrap {
+            max-width: 980px;
+            margin: 0 auto;
         }
-        /* Dataframes */
-        div[data-testid="stDataFrame"]{
-            border: 1px solid rgba(0,0,0,0.08);
-            border-radius: 14px;
-            overflow: hidden;
+        .auth-card {
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 18px;
+            padding: 18px 18px 6px 18px;
+            background: rgba(15, 23, 42, 0.25);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.18);
         }
-        /* Expander */
-        details[data-testid="stExpander"]{
-            border: 1px solid rgba(0,0,0,0.08);
-            border-radius: 14px;
-            padding: 6px 10px;
+        .auth-title {
+            font-size: 28px;
+            font-weight: 800;
+            line-height: 1.1;
+            margin: 6px 0 4px 0;
         }
-        
-/* Buttons */
-div.stButton > button {
-    border-radius: 14px !important;
-    padding-top: 0.55rem !important;
-    padding-bottom: 0.55rem !important;
-}
-/* Sidebar spacing */
-section[data-testid="stSidebar"] .block-container {padding-top: 1rem;}
-
-        
-/* iOS-like look & feel */
-html, body, [class*="css"]  {
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-}
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-section[data-testid="stSidebar"] { border-right: 1px solid rgba(49,51,63,0.12); }
-section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
-
-/* Cards */
-.gyd-card {
-    background: rgba(255,255,255,0.72);
-    border: 1px solid rgba(49,51,63,0.10);
-    border-radius: 18px;
-    padding: 14px 16px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.06);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    margin-bottom: 12px;
-}
-.gyd-muted { opacity: 0.75; }
-
-/* Buttons */
-div.stButton > button, div.stDownloadButton > button {
-    border-radius: 16px !important;
-    padding: 0.62rem 0.9rem !important;
-}
-
-/* Tabs */
-button[data-baseweb="tab"] {
-    border-radius: 14px;
-    margin-right: 6px;
-    padding-left: 14px;
-    padding-right: 14px;
-}
-
-/* Dataframe container */
-[data-testid="stDataFrame"] {
-    border-radius: 16px;
-    border: 1px solid rgba(49,51,63,0.10);
-    overflow: hidden;
-}
-
-/* Metric cards */
-[data-testid="stMetric"] {
-    border: 1px solid rgba(49,51,63,0.10);
-    border-radius: 16px;
-    padding: 10px 12px;
-}
-
+        .auth-sub {
+            opacity: 0.85;
+            margin: 0 0 10px 0;
+        }
+        .auth-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            opacity: 0.9;
+            border: 1px solid rgba(255,255,255,0.12);
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
+
+    cL, cR = st.columns([1.1, 1], gap="large")
+    with cL:
+        st.image("https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png", width=260)
+        st.markdown('<div class="auth-title">Control documental de faenas</div>', unsafe_allow_html=True)
+        st.markdown('<div class="auth-sub">Accede con tu usuario y contraseña para gestionar mandantes, faenas, trabajadores y exportaciones.</div>', unsafe_allow_html=True)
+        st.markdown('<span class="auth-badge">🔒 Acceso seguro · Roles y poderes</span>', unsafe_allow_html=True)
+        st.markdown("")
+        st.caption("Consejo: si trabajas con varios usuarios, usa el rol **OPERADOR** o **LECTOR** y ajusta poderes según el mandante.")
+
+    with cR:
+        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+
+        ensure_users_table()
+
+        if users_count() == 0:
+            st.info("Primer uso: crea el usuario **ADMINISTRADOR**.")
+            with st.form("form_first_admin"):
+                username = st.text_input("Usuario admin", value="admin", help="Ej: admin")
+                pw1 = st.text_input("Contraseña", type="password", help="Mínimo recomendado: 8+ caracteres.")
+                pw2 = st.text_input("Repetir contraseña", type="password")
+                ok = st.form_submit_button("Crear administrador", type="primary", use_container_width=True)
+            if ok:
+                u = (username or "").strip()
+                if not u:
+                    st.error("Usuario requerido.")
+                    st.stop()
+                if not pw1 or pw1 != pw2:
+                    st.error("Las contraseñas no coinciden o están vacías.")
+                    st.stop()
+                salt_b64, h_b64 = hash_password(pw1)
+                perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
+                try:
+                    execute(
+                        "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                        (u, salt_b64, h_b64, "ADMIN", perms_json),
+                    )
+                    auto_backup_db("users_first_admin")
+                    # login inmediato
+                    df = fetch_df("SELECT * FROM users WHERE username=?", (u,))
+                    auth_set_session(df.iloc[0].to_dict())
+                    st.success("Administrador creado. Entrando a la app…")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo crear admin: {e}")
+            st.markdown("</div>", unsafe_allow_html=True)  # auth-card
+            st.markdown("</div>", unsafe_allow_html=True)  # auth-wrap
+            st.stop()
+
+        st.markdown("### Iniciar sesión")
+        with st.form("form_login"):
+            username = st.text_input("Usuario", placeholder="ej: operador1")
+            password = st.text_input("Contraseña", type="password")
+            ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+        if ok:
+            u = (username or "").strip()
+            if not u or not password:
+                st.error("Usuario y contraseña son obligatorios.")
+                st.stop()
+            df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+            if df.empty:
+                st.error("Usuario no existe o está desactivado.")
+                st.stop()
+            row = df.iloc[0].to_dict()
+            if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
+                st.error("Contraseña incorrecta.")
+                st.stop()
+            auth_set_session(row)
+            st.success("Ingreso exitoso.")
+            st.rerun()
+
+        st.caption("¿Olvidaste tu contraseña? Pide al **ADMIN** que la reinicie desde **Admin Usuarios**.")
+        st.markdown("</div>", unsafe_allow_html=True)  # auth-card
+
+    st.markdown("</div>", unsafe_allow_html=True)  # auth-wrap
+    st.stop()
 
 def ui_header(title: str, desc: str = ""):
     st.markdown(
