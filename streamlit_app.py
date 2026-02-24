@@ -10,6 +10,15 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+import json
+import secrets
+
+# ----------------------------
+# Paths (DB + uploads)
+# ----------------------------
+DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
+UPLOAD_ROOT = os.environ.get("APP_UPLOAD_ROOT", "uploads")
+
 # ----------------------------
 # Auth (usuarios/roles/permisos)
 # ----------------------------
