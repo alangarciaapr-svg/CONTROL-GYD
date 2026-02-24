@@ -461,7 +461,6 @@ def _b64e(b: bytes) -> str:
 def _b64d(s: str) -> bytes:
     return base64.b64decode((s or "").encode("utf-8"))
 
-    ensure_users_table()
 def hash_password(password: str, salt_b64: str | None = None) -> tuple[str, str]:
     if not password:
         raise ValueError("Password vacío")
@@ -514,6 +513,17 @@ def users_count() -> int:
         return int(df["n"].iloc[0]) if not df.empty else 0
     except Exception:
         return 0
+
+def admins_count(active_only: bool = True) -> int:
+    try:
+        if active_only:
+            df = fetch_df("SELECT COUNT(*) AS n FROM users WHERE role='ADMIN' AND is_active=1")
+        else:
+            df = fetch_df("SELECT COUNT(*) AS n FROM users WHERE role='ADMIN'")
+        return int(df["n"].iloc[0]) if not df.empty else 0
+    except Exception:
+        return 0
+
 
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
@@ -3379,6 +3389,15 @@ def page_admin_usuarios():
 
         if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
             try:
+                # Seguridad: no permitir que un ADMIN pierda el poder de administrar usuarios
+                if (new_role or "").upper() == "ADMIN":
+                    new_perms["manage_users"] = True
+
+                # Evita desactivar al último ADMIN activo
+                if (row.get("role") or "").upper() == "ADMIN" and (new_role or "").upper() == "ADMIN" and (not active) and admins_count(active_only=True) <= 1:
+                    st.error("No puedes desactivar al último ADMIN activo.")
+                    st.stop()
+
                 execute(
                     "UPDATE users SET role=?, perms_json=?, is_active=?, updated_at=datetime('now') WHERE id=?",
                     (new_role, json.dumps(new_perms), 1 if active else 0, int(uid)),
@@ -3406,6 +3425,10 @@ def page_admin_usuarios():
             if cu and int(cu["id"]) == int(uid):
                 st.error("No puedes eliminar tu propio usuario.")
                 st.stop()
+            # Evita eliminar al último ADMIN activo
+            if (row.get("role") or "").upper() == "ADMIN" and admins_count(active_only=True) <= 1:
+                st.error("No puedes eliminar al último ADMIN activo.")
+                st.stop()
             try:
                 execute("DELETE FROM users WHERE id=?", (int(uid),))
                 auto_backup_db("users_delete")
@@ -3431,6 +3454,10 @@ def page_admin_usuarios():
             ok = st.form_submit_button("Crear usuario", type="primary", use_container_width=True)
 
         if ok:
+            # Seguridad: si creas un ADMIN, asegúrate de que conserve el poder de administrar usuarios
+            if (role or "").upper() == "ADMIN":
+                perms["manage_users"] = True
+
             u = (username or "").strip()
             if not u:
                 st.error("Usuario requerido.")
