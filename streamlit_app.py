@@ -285,6 +285,33 @@ def ui_header(title: str, desc: str = ""):
         unsafe_allow_html=True,
     )
 
+
+def inject_css():
+    # Estilos base para tarjetas y textos de apoyo (UI minimalista y consistente)
+    st.markdown(
+        '''
+        <style>
+        .gyd-card{
+            border:1px solid rgba(255,255,255,0.08);
+            border-radius:16px;
+            padding:14px 14px 12px 14px;
+            background: rgba(15, 23, 42, 0.20);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+            margin-bottom: 12px;
+        }
+        .gyd-muted{
+            opacity:0.82;
+            font-size:0.92rem;
+        }
+        /* Ajustes suaves para que se vea más "app" */
+        div[data-testid="stSidebar"] .stRadio > label{
+            margin-bottom: 6px;
+        }
+        </style>
+        ''',
+        unsafe_allow_html=True,
+    )
+
 def ui_tip(text: str):
     st.info(text, icon="ℹ️")
 
