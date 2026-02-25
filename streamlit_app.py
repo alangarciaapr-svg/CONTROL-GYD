@@ -3023,13 +3023,42 @@ def page_documentos_trabajador():
 
     st.divider()
     st.markdown("#### 🔎 Ver / Descargar")
+
+    # Evita IndexError cuando no hay docs o cuando la selección quedó “pegada” de otro trabajador
+    if docs.empty or ("id" not in docs.columns):
+        st.info("(sin documentos para descargar)")
+        return
+
+    ids = docs["id"].tolist()
+    if not ids:
+        st.info("(sin documentos para descargar)")
+        return
+
+    # Si el valor guardado en session_state no existe en esta lista, resetea al primero
+    cur = st.session_state.get("trab_pick_doc", None)
+    if cur not in ids:
+        st.session_state["trab_pick_doc"] = ids[0]
+
+    def _fmt_doc(x):
+        try:
+            r = docs.loc[docs["id"] == x].iloc[0]
+            return f"{r.get('doc_tipo','DOC')} — {r.get('nombre_archivo','archivo')}"
+        except Exception:
+            return f"ID {x}"
+
     pick_id = st.selectbox(
         "Documento",
-        docs["id"].tolist(),
-        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+        ids,
+        format_func=_fmt_doc,
         key="trab_pick_doc",
     )
-    row = docs[docs["id"] == pick_id].iloc[0]
+
+    sel = docs.loc[docs["id"] == pick_id]
+    if sel.empty:
+        st.warning("El documento seleccionado ya no está disponible en la lista. Vuelve a seleccionar.")
+        return
+
+    row = sel.iloc[0]
     fpath = row.get("file_path", "")
     fname = row.get("nombre_archivo", "documento")
     if not fpath or not os.path.exists(fpath):
