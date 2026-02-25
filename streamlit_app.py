@@ -552,7 +552,7 @@ def require_perm(perm: str):
         st.stop()
 
 def auth_gate_ui():
-    """Pantalla de inicio: si no hay usuarios => crea admin. Si hay usuarios => login."""
+    """Pantalla de inicio: login con roles. Si la base está vacía, crea ADMIN por defecto."""
 
     st.markdown(
         """
@@ -569,40 +569,46 @@ def auth_gate_ui():
 
     st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
     cL, cR = st.columns([1.1, 1], gap="large")
+
     with cL:
-        st.image(LOGIN_LOGO_URL, width=260)
+        try:
+            st.image("https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png", width=260)
+        except Exception:
+            pass
         st.markdown('<div class="auth-title">Control documental de faenas</div>', unsafe_allow_html=True)
         st.markdown('<div class="auth-sub">Accede con tu usuario y contraseña para gestionar mandantes, faenas, trabajadores y exportaciones.</div>', unsafe_allow_html=True)
         st.markdown('<span class="auth-badge">🔒 Acceso seguro · Roles y poderes</span>', unsafe_allow_html=True)
+        st.markdown("")
+        st.caption("Consejo: para usuarios que solo revisan, usa rol **LECTOR**. Para operación diaria, **OPERADOR**.")
 
     with cR:
         st.markdown('<div class="auth-card">', unsafe_allow_html=True)
 
+        # Asegura tabla users
         ensure_users_table()
 
+        # Seed automático del ADMIN por defecto si la tabla está vacía
+        if users_count() == 0:
+            DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+            DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            try:
+                salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
+                perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
+                execute(
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "ADMIN", perms_json),
+                )
+                auto_backup_db("users_seed_default_admin")
+            except Exception:
+                # Si ya existe o hay algún problema, continuamos hacia login
+                pass
 
-if users_count() == 0:
-    # Seed automático del ADMIN por defecto (para evitar pedir creación en cada reset)
-    DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-    DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
-
-    try:
-        salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
-        perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
-        execute(
-            "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-            (DEFAULT_ADMIN_USER, salt_b64, h_b64, "ADMIN", perms_json),
-        )
-        auto_backup_db("users_seed_default_admin")
-        st.success("Administrador por defecto creado. Inicia sesión para continuar.")
-    except Exception:
-        # Si ya existe o hay algún error, continuamos igual hacia el login
-        pass
         st.markdown("### Iniciar sesión")
         with st.form("form_login"):
-            username = st.text_input("Usuario", placeholder="ej: operador1")
+            username = st.text_input("Usuario", placeholder="ej: a.garcia")
             password = st.text_input("Contraseña", type="password")
             ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+
         if ok:
             u = (username or "").strip()
             if not u or not password:
@@ -620,7 +626,7 @@ if users_count() == 0:
             st.success("Ingreso exitoso.")
             st.rerun()
 
-        st.caption("¿Olvidaste tu contraseña? Pide al **ADMIN** que la reinicie desde **Admin Usuarios**.")
+        st.caption("¿Olvidaste tu contraseña? Pide al **ADMIN** que la reinicie desde **Usuarios**.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
