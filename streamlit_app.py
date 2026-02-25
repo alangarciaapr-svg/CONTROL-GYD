@@ -580,39 +580,24 @@ def auth_gate_ui():
 
         ensure_users_table()
 
-        if users_count() == 0:
-            st.info("Primer uso: crea el usuario **ADMINISTRADOR**.")
-            with st.form("form_first_admin"):
-                username = st.text_input("Usuario admin", value="admin")
-                pw1 = st.text_input("Contraseña", type="password")
-                pw2 = st.text_input("Repetir contraseña", type="password")
-                ok = st.form_submit_button("Crear administrador", type="primary", use_container_width=True)
-            if ok:
-                u = (username or "").strip()
-                if not u:
-                    st.error("Usuario requerido.")
-                    st.stop()
-                if not pw1 or pw1 != pw2:
-                    st.error("Las contraseñas no coinciden o están vacías.")
-                    st.stop()
-                salt_b64, h_b64 = hash_password(pw1)
-                perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
-                try:
-                    execute(
-                        "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                        (u, salt_b64, h_b64, "ADMIN", perms_json),
-                    )
-                    auto_backup_db("users_first_admin")
-                    df = fetch_df("SELECT * FROM users WHERE username=?", (u,))
-                    auth_set_session(df.iloc[0].to_dict())
-                    st.success("Administrador creado. Entrando a la app…")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo crear admin: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
 
+if users_count() == 0:
+    # Seed automático del ADMIN por defecto (para evitar pedir creación en cada reset)
+    DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+    DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+
+    try:
+        salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
+        perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
+        execute(
+            "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+            (DEFAULT_ADMIN_USER, salt_b64, h_b64, "ADMIN", perms_json),
+        )
+        auto_backup_db("users_seed_default_admin")
+        st.success("Administrador por defecto creado. Inicia sesión para continuar.")
+    except Exception:
+        # Si ya existe o hay algún error, continuamos igual hacia el login
+        pass
         st.markdown("### Iniciar sesión")
         with st.form("form_login"):
             username = st.text_input("Usuario", placeholder="ej: operador1")
