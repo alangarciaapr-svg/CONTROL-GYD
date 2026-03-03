@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
 import requests
+from urllib.parse import quote
 import json
 import secrets
 
@@ -70,6 +71,7 @@ DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
 STORAGE_URL = (_get_cfg("SUPABASE_URL", "") or "").rstrip("/")
 STORAGE_BUCKET = str(_get_cfg("SUPABASE_STORAGE_BUCKET", "docs") or "docs")
 STORAGE_KEY = str(_get_cfg("SUPABASE_SERVICE_ROLE_KEY", _get_cfg("SUPABASE_ANON_KEY", "")) or "").strip()
+STORAGE_ANON_KEY = str(_get_cfg("SUPABASE_ANON_KEY", "") or "").strip()
 
 def _is_jwt(token: str) -> bool:
     t = (token or "").strip()
@@ -78,10 +80,16 @@ def _is_jwt(token: str) -> bool:
 def storage_enabled() -> bool:
     return bool(STORAGE_URL and STORAGE_BUCKET and STORAGE_KEY and _is_jwt(STORAGE_KEY))
 
+def _encode_storage_path(op: str) -> str:
+    # Encode each segment to avoid errores por espacios/acentos/#/etc.
+    op = (op or "").lstrip("/")
+    return "/".join(quote(seg, safe="-_.~") for seg in op.split("/"))
+
 def _storage_headers(content_type: str | None = None, upsert: bool = False):
     if not storage_enabled():
         raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-    h = {"Authorization": f"Bearer {STORAGE_KEY}", "apikey": STORAGE_KEY}
+    apikey = STORAGE_ANON_KEY if (STORAGE_ANON_KEY and _is_jwt(STORAGE_ANON_KEY)) else STORAGE_KEY
+    h = {"Authorization": f"Bearer {STORAGE_KEY}", "apikey": apikey}
     if content_type:
         h["Content-Type"] = content_type
     if upsert:
@@ -89,30 +97,59 @@ def _storage_headers(content_type: str | None = None, upsert: bool = False):
     return h
 
 def storage_upload(object_path: str, data: bytes, content_type: str = "application/octet-stream", upsert: bool = True):
-    op = (object_path or "").lstrip("/")
+    op = _encode_storage_path(object_path)
     url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
     r = requests.put(url, headers=_storage_headers(content_type=content_type, upsert=upsert), data=data)
     if r.status_code in (200, 201):
         return True
-    raise RuntimeError(f"Storage upload failed ({r.status_code}): {(r.text or '')[:200]}")
+    # Mensaje corto (Streamlit puede redaccionar detalles)
+    raise RuntimeError(
+        f"Storage upload failed (HTTP {r.status_code}). "
+        "Causas típicas: SUPABASE_SERVICE_ROLE_KEY incorrecta, bucket equivocado, "
+        "o nombre de archivo con caracteres especiales (ya codificado). "
+        "Revisa en Manage app → Logs el detalle del response."
+    )
 
 def storage_download(object_path: str) -> bytes:
-    op = (object_path or "").lstrip("/")
+    op = _encode_storage_path(object_path)
     url = f"{STORAGE_URL}/storage/v1/object/authenticated/{STORAGE_BUCKET}/{op}"
     r = requests.get(url, headers=_storage_headers())
     if r.status_code == 200:
         return r.content
     if r.status_code == 404:
         raise FileNotFoundError("Archivo no encontrado en Storage.")
-    raise RuntimeError(f"Storage download failed ({r.status_code}): {(r.text or '')[:200]}")
+    raise RuntimeError(
+        f"Storage download failed (HTTP {r.status_code}). "
+        "Revisa en Manage app → Logs el detalle."
+    )
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
-    # Mantiene guardado local (compatibilidad) + sube a Storage (online).
+    # Guarda local (compatibilidad) + intenta subir a Storage (online).
     local_path = save_file(folder_parts, file_name, file_bytes)
     object_path = "/".join([str(x).strip("/").replace("\\","/") for x in folder_parts] + [file_name])
+
     bucket = STORAGE_BUCKET if storage_enabled() else None
     if storage_enabled():
-        storage_upload(object_path, file_bytes, content_type=content_type, upsert=True)
+        try:
+            storage_upload(object_path, file_bytes, content_type=content_type, upsert=True)
+        except Exception as e:
+            # No romper el flujo: deja el archivo local, pero informa.
+            bucket = None
+            object_path = None
+            try:
+                st.warning(
+                    "No se pudo subir el archivo a Supabase Storage. "
+                    "El documento quedó solo en almacenamiento local (puede perderse si Streamlit reinicia). "
+                    "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_STORAGE_BUCKET "
+                    "y en Manage app → Logs el motivo exacto."
+                )
+            except Exception:
+                pass
+    else:
+        # Storage no configurado: queda local
+        bucket = None
+        object_path = None
+
     return local_path, bucket, object_path
 
 def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
