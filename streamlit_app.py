@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+import requests
 import json
 import secrets
 
@@ -63,6 +64,65 @@ def _qmark_to_pct(sql: str) -> str:
 
 PG_DSN = _normalize_pg_dsn(_get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", "")))
 DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+# ----------------------------
+# Supabase Storage (documentos online)
+# ----------------------------
+STORAGE_URL = (_get_cfg("SUPABASE_URL", "") or "").rstrip("/")
+STORAGE_BUCKET = str(_get_cfg("SUPABASE_STORAGE_BUCKET", "docs") or "docs")
+STORAGE_KEY = str(_get_cfg("SUPABASE_SERVICE_ROLE_KEY", _get_cfg("SUPABASE_ANON_KEY", "")) or "").strip()
+
+def _is_jwt(token: str) -> bool:
+    t = (token or "").strip()
+    return (t.startswith("eyJ") and t.count(".") >= 2 and " " not in t)
+
+def storage_enabled() -> bool:
+    return bool(STORAGE_URL and STORAGE_BUCKET and STORAGE_KEY and _is_jwt(STORAGE_KEY))
+
+def _storage_headers(content_type: str | None = None, upsert: bool = False):
+    if not storage_enabled():
+        raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
+    h = {"Authorization": f"Bearer {STORAGE_KEY}", "apikey": STORAGE_KEY}
+    if content_type:
+        h["Content-Type"] = content_type
+    if upsert:
+        h["x-upsert"] = "true"
+    return h
+
+def storage_upload(object_path: str, data: bytes, content_type: str = "application/octet-stream", upsert: bool = True):
+    op = (object_path or "").lstrip("/")
+    url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
+    r = requests.put(url, headers=_storage_headers(content_type=content_type, upsert=upsert), data=data)
+    if r.status_code in (200, 201):
+        return True
+    raise RuntimeError(f"Storage upload failed ({r.status_code}): {(r.text or '')[:200]}")
+
+def storage_download(object_path: str) -> bytes:
+    op = (object_path or "").lstrip("/")
+    url = f"{STORAGE_URL}/storage/v1/object/authenticated/{STORAGE_BUCKET}/{op}"
+    r = requests.get(url, headers=_storage_headers())
+    if r.status_code == 200:
+        return r.content
+    if r.status_code == 404:
+        raise FileNotFoundError("Archivo no encontrado en Storage.")
+    raise RuntimeError(f"Storage download failed ({r.status_code}): {(r.text or '')[:200]}")
+
+def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
+    # Mantiene guardado local (compatibilidad) + sube a Storage (online).
+    local_path = save_file(folder_parts, file_name, file_bytes)
+    object_path = "/".join([str(x).strip("/").replace("\\","/") for x in folder_parts] + [file_name])
+    bucket = STORAGE_BUCKET if storage_enabled() else None
+    if storage_enabled():
+        storage_upload(object_path, file_bytes, content_type=content_type, upsert=True)
+    return local_path, bucket, object_path
+
+def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
+    if object_path and storage_enabled():
+        return storage_download(object_path)
+    if file_path and os.path.exists(str(file_path)):
+        with open(str(file_path), "rb") as fp:
+            return fp.read()
+    raise FileNotFoundError("Archivo no disponible (ni Storage ni disco local).")
+
 
 
 ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
@@ -302,6 +362,7 @@ def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
 def init_db():
     if DB_BACKEND == "postgres":
         ensure_users_table()
+        ensure_storage_columns_postgres()
         return
     with conn() as c:
         c.execute("PRAGMA foreign_keys = ON;")
@@ -581,6 +642,31 @@ def ensure_users_table():
     )
     execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
+def ensure_storage_columns_postgres():
+    if DB_BACKEND != "postgres":
+        return
+    stmts = [
+        "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS faena_anexos ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS faena_anexos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS contratos_faena ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS contratos_faena ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS export_historial ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS export_historial ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS export_historial_mes ADD COLUMN IF NOT EXISTS bucket TEXT;",
+        "ALTER TABLE IF EXISTS export_historial_mes ADD COLUMN IF NOT EXISTS object_path TEXT;",
+    ]
+    for s in stmts:
+        try:
+            execute(s)
+        except Exception:
+            pass
+
 def users_count() -> int:
     try:
         df = fetch_df("SELECT COUNT(*) AS n FROM users")
@@ -724,6 +810,27 @@ def execute(q: str, params=()):
     with conn() as c:
         c.execute(q, params)
         c.commit()
+
+def execute_rowcount(q: str, params=()):
+    # Igual que execute(), pero devuelve rowcount (útil para UPDATE condicional)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
 
 def executemany(q: str, seq_params):
     if DB_BACKEND == "postgres":
@@ -1867,16 +1974,18 @@ def page_contratos_faena():
                 st.stop()
             try:
                 file_path = None
+                bucket = None
+                object_path = None
                 sha = None
                 created_at = datetime.utcnow().isoformat(timespec="seconds")
                 if archivo is not None:
                     b = archivo.getvalue()
-                    file_path = save_file(["contratos_faena", mandante_id], archivo.name, b)
+                    file_path, bucket, object_path = save_file_online(["contratos_faena", mandante_id], archivo.name, b, content_type=getattr(archivo, "type", None) or "application/octet-stream")
                     sha = sha256_bytes(b)
 
                 execute(
-                    "INSERT INTO contratos_faena(mandante_id, nombre, fecha_inicio, fecha_termino, file_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                    (int(mandante_id), nombre.strip(), str(fi) if fi else None, str(ft) if ft else None, file_path, sha, created_at),
+                    "INSERT INTO contratos_faena(mandante_id, nombre, fecha_inicio, fecha_termino, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (int(mandante_id), nombre.strip(), str(fi) if fi else None, str(ft) if ft else None, file_path, bucket, object_path, sha, created_at),
                 )
                 st.success("Contrato de faena creado.")
                 auto_backup_db("contrato_faena")
@@ -1886,7 +1995,7 @@ def page_contratos_faena():
 
     with tab2:
         df = fetch_df('''
-            SELECT cf.id, cf.mandante_id, m.nombre AS mandante, cf.nombre, cf.fecha_inicio, cf.fecha_termino, cf.file_path,
+            SELECT cf.id, cf.mandante_id, m.nombre AS mandante, cf.nombre, cf.fecha_inicio, cf.fecha_termino, cf.file_path, cf.bucket, cf.object_path,
                    CASE WHEN cf.file_path IS NULL THEN '(sin archivo)' ELSE 'OK' END AS archivo
             FROM contratos_faena cf
             JOIN mandantes m ON m.id=cf.mandante_id
@@ -1949,11 +2058,11 @@ def page_contratos_faena():
                     st.error("Debes subir un archivo primero.")
                     st.stop()
                 b = up.getvalue()
-                file_path = save_file(["contratos_faena", "id", contrato_id], up.name, b)
+                file_path, bucket, object_path = save_file_online(["contratos_faena", "id", contrato_id], up.name, b, content_type=getattr(up, "type", None) or "application/octet-stream")
                 sha = sha256_bytes(b)
                 execute(
-                    "UPDATE contratos_faena SET file_path=?, sha256=?, created_at=? WHERE id=?",
-                    (file_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
+                    "UPDATE contratos_faena SET file_path=?, bucket=?, object_path=?, sha256=?, created_at=? WHERE id=?",
+                    (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
                 )
                 st.success("Archivo actualizado.")
                 auto_backup_db("contrato_archivo")
@@ -1961,16 +2070,18 @@ def page_contratos_faena():
         with cfa2:
             # descarga si existe
             current_path = row.get("file_path")
-            if current_path and os.path.exists(str(current_path)):
-                with open(str(current_path), "rb") as fp:
-                    st.download_button(
-                        "Descargar archivo actual",
-                        data=fp.read(),
-                        file_name=os.path.basename(str(current_path)),
-                        mime="application/octet-stream",
-                        use_container_width=True,
-                    )
-            else:
+            current_bucket = row.get("bucket", None)
+            current_object = row.get("object_path", None)
+            try:
+                bcur = load_file_anywhere(str(current_path) if current_path else None, current_bucket, current_object)
+                st.download_button(
+                    "Descargar archivo actual",
+                    data=bcur,
+                    file_name=os.path.basename(str(current_path)) if current_path else "contrato",
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                )
+            except Exception:
                 st.button("Descargar archivo actual", disabled=True, use_container_width=True)
 
         st.divider()
@@ -2152,11 +2263,11 @@ def page_faenas():
                 st.error("Debes subir un archivo primero.")
                 st.stop()
             b = up.getvalue()
-            file_path = save_file(["faenas", faena_id, "anexos"], up.name, b)
+            file_path, bucket, object_path = save_file_online(["faenas", faena_id, "anexos"], up.name, b, content_type=getattr(up, "type", None) or "application/octet-stream")
             sha = sha256_bytes(b)
             execute(
-                "INSERT INTO faena_anexos(faena_id, nombre, file_path, sha256, created_at) VALUES(?,?,?,?,?)",
-                (int(faena_id), up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO faena_anexos(faena_id, nombre, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
+                (int(faena_id), up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             st.success("Anexo guardado.")
             auto_backup_db("anexo_faena")
@@ -2789,7 +2900,7 @@ def page_documentos_empresa():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
 
-    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, created_at FROM empresa_documentos ORDER BY id DESC")
+    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
     tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
 
@@ -2823,11 +2934,11 @@ def page_documentos_empresa():
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
             folder = ["empresa", safe_name(doc_tipo)]
-            file_path = save_file(folder, up.name, b)
+            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
             sha = sha256_bytes(b)
             execute(
-                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, sha256, created_at) VALUES(?,?,?,?,?)",
-                (doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
+                (doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             st.success("Documento empresa guardado.")
             auto_backup_db("doc_empresa")
@@ -2857,22 +2968,23 @@ def page_documentos_empresa():
             )
             row = docs[docs["id"] == pick_id].iloc[0]
             fpath = row.get("file_path", "")
+            bucket = row.get("bucket", None)
+            object_path = row.get("object_path", None)
             fname = row.get("nombre_archivo", "documento")
-            if not fpath or not os.path.exists(fpath):
-                st.warning(
-                    "El archivo no está disponible en disco (posible reboot/redeploy). "
-                    "Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo."
-                )
-            else:
-                with open(fpath, "rb") as fp:
-                    b = fp.read()
+            try:
+                b = load_file_anywhere(fpath, bucket, object_path)
                 st.download_button(
-                    "Descargar",
+                    "Descargar documento",
                     data=b,
                     file_name=fname,
                     mime="application/octet-stream",
                     use_container_width=True,
                     key="emp_dl_btn",
+                )
+            except Exception:
+                st.warning(
+                    "El archivo no está disponible (Storage/disco). "
+                    "Verifica configuración de Storage o vuelve a cargar el documento."
                 )
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
@@ -2900,7 +3012,7 @@ def page_documentos_empresa_faena():
     st.session_state["selected_faena_id"] = int(faena_id)
 
     docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id DESC",
+        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id DESC",
         (int(faena_id),),
     )
     tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
@@ -2937,12 +3049,12 @@ def page_documentos_empresa_faena():
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
             folder = ["faenas", faena_id, "empresa", safe_name(doc_tipo)]
-            file_path = save_file(folder, up.name, b)
+            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
             sha = sha256_bytes(b)
 
             execute(
-                "INSERT INTO faena_empresa_documentos(faena_id, doc_tipo, nombre_archivo, file_path, sha256, created_at) VALUES(?,?,?,?,?,?)",
-                (int(faena_id), doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO faena_empresa_documentos(faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (int(faena_id), doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             st.success("Documento guardado (empresa por faena).")
             auto_backup_db("doc_empresa_faena")
@@ -2966,13 +3078,24 @@ def page_documentos_empresa_faena():
     )
     row = docs[docs["id"] == pick_id].iloc[0]
     fpath = row.get("file_path", "")
+    bucket = row.get("bucket", None)
+    object_path = row.get("object_path", None)
     fname = row.get("nombre_archivo", "documento")
-    if not fpath or not os.path.exists(fpath):
-        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
-    else:
-        with open(fpath, "rb") as fp:
-            b = fp.read()
-        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="empf_dl_btn")
+    try:
+        b = load_file_anywhere(fpath, bucket, object_path)
+        st.download_button(
+            "Descargar documento",
+            data=b,
+            file_name=fname,
+            mime="application/octet-stream",
+            use_container_width=True,
+            key="empf_dl_btn",
+        )
+    except Exception:
+        st.warning(
+            "El archivo no está disponible (Storage/disco). "
+            "Verifica configuración de Storage o vuelve a cargar el documento."
+        )
 
 def page_documentos_trabajador():
     ui_header(
@@ -3053,7 +3176,7 @@ def page_documentos_trabajador():
 
     # Estado documental del trabajador (global: se reutiliza entre faenas)
     docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
+        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
         (int(tid),),
     )
     tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
@@ -3094,13 +3217,50 @@ def page_documentos_trabajador():
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             b = up.getvalue()
             folder = ["trabajadores", tid, safe_name(doc_tipo)]
-            file_path = save_file(folder, up.name, b)
+            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
             sha = sha256_bytes(b)
 
-            execute(
-                "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, sha256, created_at) VALUES(?,?,?,?,?,?)",
-                (int(tid), doc_tipo, up.name, file_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
-            )
+            try:
+
+                execute(
+
+                    "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
+
+                    (int(tid), doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+
+                )
+
+            except Exception:
+
+                # Manejo de duplicados (UniqueViolation): actualiza el registro existente sin romper la app
+
+                if DB_BACKEND == "postgres":
+
+                    rc = execute_rowcount(
+
+                        "UPDATE trabajador_documentos SET file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
+
+                        "WHERE trabajador_id=? AND doc_tipo=? AND nombre_archivo=?",
+
+                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo, up.name),
+
+                    )
+
+                    if rc == 0:
+
+                        execute_rowcount(
+
+                            "UPDATE trabajador_documentos SET nombre_archivo=?, file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
+
+                            "WHERE trabajador_id=? AND doc_tipo=?",
+
+                            (up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo),
+
+                        )
+
+                else:
+
+                    raise
             st.success("Documento guardado.")
             auto_backup_db("doc_trabajador")
             st.rerun()
@@ -3151,17 +3311,52 @@ def page_documentos_trabajador():
         return
 
     row = sel.iloc[0]
+
     fpath = row.get("file_path", "")
+
+    bucket = row.get("bucket", None)
+
+    object_path = row.get("object_path", None)
+
     fname = row.get("nombre_archivo", "documento")
-    if not fpath or not os.path.exists(fpath):
-        st.warning("El archivo no está disponible en disco (posible reboot/redeploy). Si necesitas conservarlo, usa Backup/Restore o vuelve a cargarlo.")
-    else:
-        with open(fpath, "rb") as fp:
-            b = fp.read()
-        st.download_button("Descargar documento", data=b, file_name=fname, mime="application/octet-stream", use_container_width=True, key="trab_dl_btn")
+
+    try:
+
+        b = load_file_anywhere(fpath, bucket, object_path)
+
+        st.download_button(
+
+            "Descargar documento",
+
+            data=b,
+
+            file_name=fname,
+
+            mime="application/octet-stream",
+
+            use_container_width=True,
+
+            key="trab_dl_btn",
+
+        )
+
+    except Exception:
+
+        st.warning(
+
+            "El archivo no está disponible (Storage/disco). "
+
+            "Verifica configuración de Storage o vuelve a cargar el documento."
+
+        )
 
 def page_export_zip():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
+def _get_bytes(file_path, bucket, object_path):
+    try:
+        return load_file_anywhere(file_path, bucket, object_path)
+    except Exception:
+        return None
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
@@ -3292,7 +3487,7 @@ def page_export_zip():
             st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
 
         with tab3:
-            hist = fetch_df("SELECT id, file_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
+            hist = fetch_df("SELECT id, file_path, bucket, object_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
             if hist.empty:
                 st.info("(sin exportaciones guardadas aún)")
             else:
