@@ -5,12 +5,18 @@ import zipfile
 import hashlib
 import base64
 import sqlite3
+
+# Postgres (Supabase)
+try:
+    import psycopg
+except Exception:
+    psycopg = None
+
 import shutil
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
-import requests
 import json
 import secrets
 
@@ -22,6 +28,42 @@ st.set_page_config(page_title="Control Documental Faenas", layout="wide")
 APP_NAME = "Control Documental de Faenas"
 DB_PATH = "app.db"
 UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
+# ----------------------------
+# Database backend selector (SQLite local vs Supabase Postgres)
+# ----------------------------
+
+def _get_cfg(name: str, default=None):
+    v = os.environ.get(name)
+    if v is not None and str(v).strip() != "":
+        return v
+    try:
+        if name in st.secrets:
+            return st.secrets.get(name)
+    except Exception:
+        pass
+    return default
+
+def _normalize_pg_dsn(dsn: str) -> str:
+    dsn = (dsn or "").strip()
+    if not dsn:
+        return dsn
+    if "sslmode=" not in dsn:
+        joiner = "&" if "?" in dsn else "?"
+        dsn = dsn + f"{joiner}sslmode=require"
+    return dsn
+
+def _qmark_to_pct(sql: str) -> str:
+    # Convert SQLite '?' placeholders to psycopg '%s' (only outside single quotes)
+    if "?" not in sql:
+        return sql
+    parts = sql.split("'")
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].replace("?", "%s")
+    return "'".join(parts)
+
+PG_DSN = _normalize_pg_dsn(_get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", "")))
+DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+
 
 ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
 DOC_OBLIGATORIOS = [
@@ -234,6 +276,13 @@ def ensure_dirs():
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
 def conn():
+    # Postgres (Supabase) if configured; otherwise SQLite local.
+    if DB_BACKEND == "postgres":
+        if psycopg is None:
+            raise RuntimeError("psycopg no está instalado, pero DB_BACKEND=postgres.")
+        if not PG_DSN:
+            raise RuntimeError("Falta SUPABASE_DB_URL (o PG_DSN) en Secrets/ENV.")
+        return psycopg.connect(PG_DSN)
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         c.execute("PRAGMA foreign_keys = ON;")
@@ -242,6 +291,8 @@ def conn():
     return c
 
 def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
+    if DB_BACKEND == "postgres":
+        return
     info = c.execute(f"PRAGMA table_info({table});").fetchall()
     existing = {row[1] for row in info}
     for col, coltype in cols_sql.items():
@@ -249,6 +300,9 @@ def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
 
 def init_db():
+    if DB_BACKEND == "postgres":
+        ensure_users_table()
+        return
     with conn() as c:
         c.execute("PRAGMA foreign_keys = ON;")
 
@@ -491,6 +545,25 @@ def perms_from_row(role: str, perms_json: str | None):
     return perms
 
 def ensure_users_table():
+    if DB_BACKEND == "postgres":
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                salt_b64 TEXT NOT NULL,
+                pass_hash_b64 TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'OPERADOR',
+                perms_json TEXT,
+                is_active BIGINT NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        return
+
     execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -634,15 +707,31 @@ def auth_gate_ui():
     st.stop()
 
 def fetch_df(q: str, params=()):
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
     with conn() as c:
         return pd.read_sql_query(q, c, params=params)
 
 def execute(q: str, params=()):
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
     with conn() as c:
         c.execute(q, params)
         c.commit()
 
 def executemany(q: str, seq_params):
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.executemany(q2, seq_params)
+            c.commit()
+            return
     with conn() as c:
         c.executemany(q, seq_params)
         c.commit()
@@ -1087,107 +1176,6 @@ def make_backup_zip_bytes():
     return buff.getvalue()
 
 
-# ----------------------------
-# Cloud Backup (Supabase Storage)
-# ----------------------------
-
-def _cfg(name: str, default=None):
-    # 1) environment variables
-    v = os.environ.get(name)
-    if v is not None and str(v).strip() != "":
-        return v
-    # 2) streamlit secrets
-    try:
-        if name in st.secrets:
-            return st.secrets.get(name)
-    except Exception:
-        pass
-    return default
-
-def cloud_enabled() -> bool:
-    return bool(_cfg("SUPABASE_URL") and _cfg("SUPABASE_SERVICE_ROLE_KEY") and _cfg("SUPABASE_STORAGE_BUCKET", "docs"))
-
-def cloud_bucket() -> str:
-    return str(_cfg("SUPABASE_STORAGE_BUCKET", "docs"))
-
-def cloud_prefix() -> str:
-    return str(_cfg("SUPABASE_BACKUP_PREFIX", "cloud_backups"))
-
-def _sb_headers():
-    key = _cfg("SUPABASE_SERVICE_ROLE_KEY")
-    return {
-        "Authorization": f"Bearer {key}",
-        "apikey": key,
-    }
-
-def cloud_upload_object(path: str, content: bytes, content_type: str = "application/octet-stream", upsert: bool = True):
-    base = _cfg("SUPABASE_URL").rstrip("/")
-    bucket = cloud_bucket()
-    # Endpoint REST de Storage (upload). Si POST falla, probamos PUT.
-    url = f"{base}/storage/v1/object/{bucket}/{path}"
-    headers = _sb_headers()
-    headers["Content-Type"] = content_type
-    if upsert:
-        headers["x-upsert"] = "true"
-
-    r = requests.post(url, headers=headers, data=content)
-    if r.status_code in (200, 201):
-        return True
-    # algunos despliegues aceptan PUT
-    r2 = requests.put(url, headers=headers, data=content)
-    if r2.status_code in (200, 201):
-        return True
-
-    raise RuntimeError(f"Upload failed ({r.status_code}/{r2.status_code}): {r.text[:200]}")
-
-def cloud_download_object_authenticated(path: str) -> bytes:
-    # Descarga para buckets privados via endpoint authenticated + Authorization header
-    # Doc: https://[project_id].supabase.co/storage/v1/object/authenticated/[bucket]/[asset-name]
-    base = _cfg("SUPABASE_URL").rstrip("/")
-    bucket = cloud_bucket()
-    url = f"{base}/storage/v1/object/authenticated/{bucket}/{path}"
-    r = requests.get(url, headers=_sb_headers())
-    if r.status_code == 200:
-        return r.content
-    if r.status_code == 404:
-        raise FileNotFoundError("No existe backup en la nube (404).")
-    raise RuntimeError(f"Download failed ({r.status_code}): {r.text[:200]}")
-
-def cloud_upload_backup_zip(zip_bytes: bytes, tag: str = "auto"):
-    prefix = cloud_prefix().strip("/")
-
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    name = f"{prefix}/backup_{ts}_{safe_name(tag)}.zip"
-    latest = f"{prefix}/latest.zip"
-
-    cloud_upload_object(name, zip_bytes, content_type="application/zip", upsert=True)
-    cloud_upload_object(latest, zip_bytes, content_type="application/zip", upsert=True)
-
-    # Guarda puntero en session_state para mostrarlo en UI
-    st.session_state["cloud_backup_last"] = {"path": latest, "when": ts, "bytes": len(zip_bytes)}
-
-def cloud_restore_latest():
-    prefix = cloud_prefix().strip("/")
-    latest = f"{prefix}/latest.zip"
-    b = cloud_download_object_authenticated(latest)
-    restore_from_backup_zip(b)
-    return True
-
-def cloud_bootstrap_restore_if_needed():
-    # Si no existe DB o está vacía, intenta restaurar automáticamente desde la nube.
-    if not cloud_enabled():
-        return False
-    try:
-        if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 4096:
-            return False
-    except Exception:
-        pass
-    try:
-        cloud_restore_latest()
-        return True
-    except Exception:
-        return False
-
 def restore_from_backup_zip(uploaded_bytes: bytes):
     """Restaura backup completo. Soporta formato actual (backup/app.db) y formatos antiguos si contienen algún .db."""
     tmp = f"_restore_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
@@ -1277,6 +1265,8 @@ def cleanup_old_auto_backups(keep_last: int = 20):
         pass
 
 def auto_backup_db(tag: str = "auto"):
+    if DB_BACKEND == "postgres":
+        return
     """Backup automático SOLO de la base (app.db). El manual sigue siendo ZIP completo."""
     try:
         if not st.session_state.get("auto_backup_enabled", True):
@@ -1297,16 +1287,6 @@ def auto_backup_db(tag: str = "auto"):
         cleanup_old_auto_backups(keep_last=20)
 
         st.session_state["last_auto_backup"] = {"name": fname, "bytes": db_bytes, "created_at": datetime.utcnow().isoformat(timespec="seconds")}
-
-        # Cloud backup automático (DB + documentos) a Supabase Storage
-        try:
-            if st.session_state.get("auto_backup_enabled", True) and cloud_enabled():
-                zip_bytes = make_backup_zip_bytes()
-                cloud_upload_backup_zip(zip_bytes, tag=tag or "auto")
-        except Exception:
-            # No interrumpir el flujo por errores de red
-            pass
-
     except Exception:
         pass
 
@@ -1324,7 +1304,6 @@ def go(page: str, faena_id=None):
 # Init
 # ----------------------------
 ensure_dirs()
-cloud_bootstrap_restore_if_needed()
 init_db()
 
 inject_css()
@@ -3462,39 +3441,6 @@ def page_backup_restore():
             st.download_button("Descargar Backup", data=b, file_name=f"backup_control_faenas_{ts}.zip", mime="application/zip", use_container_width=True)
             st.success("Backup listo para descargar.")
 
-
-st.divider()
-st.markdown("### ☁️ Backup en la Nube (Supabase Storage)")
-if not cloud_enabled():
-    st.info(
-        "Para activar nube, configura en Streamlit Secrets: "
-        "`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` (ej: docs)."
-    )
-else:
-    st.success(f"Nube activa: bucket **{cloud_bucket()}** / carpeta **{cloud_prefix()}**")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Subir Backup completo a la nube ahora", use_container_width=True):
-            try:
-                b2 = make_backup_zip_bytes()
-                cloud_upload_backup_zip(b2, tag="manual")
-                st.success("Backup subido a la nube (latest.zip).")
-            except Exception as e:
-                st.error(f"No se pudo subir: {e}")
-
-    with c2:
-        if st.button("Restaurar desde nube (latest)", type="primary", use_container_width=True):
-            try:
-                cloud_restore_latest()
-                st.success("Restaurado desde nube. La app se reiniciará.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo restaurar: {e}")
-
-    last = st.session_state.get("cloud_backup_last")
-    if last:
-        st.caption(f"Último cloud-backup: {last.get('when')} · {last.get('bytes')} bytes · {last.get('path')}")
         st.divider()
         st.markdown("### 2) Restaurar Backup completo")
         up = st.file_uploader("Sube backup ZIP", type=["zip"], key="up_backup_zip")
