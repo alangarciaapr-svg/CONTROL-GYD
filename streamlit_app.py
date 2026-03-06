@@ -101,13 +101,24 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
     r = requests.put(url, headers=_storage_headers(content_type=content_type, upsert=upsert), data=data)
     if r.status_code in (200, 201):
+        try:
+            st.session_state.pop("storage_last_error", None)
+        except Exception:
+            pass
         return True
-    # Mensaje corto (Streamlit puede redaccionar detalles)
+
+    try:
+        st.session_state["storage_last_error"] = {
+            "status": int(r.status_code),
+            "body": (r.text or "")[:500],
+            "url": url[:200],
+        }
+    except Exception:
+        pass
+
     raise RuntimeError(
         f"Storage upload failed (HTTP {r.status_code}). "
-        "Causas típicas: SUPABASE_SERVICE_ROLE_KEY incorrecta, bucket equivocado, "
-        "o nombre de archivo con caracteres especiales (ya codificado). "
-        "Revisa en Manage app → Logs el detalle del response."
+        "Ve a Backup/Restore → Diagnóstico Storage o Manage app → Logs."
     )
 
 def storage_download(object_path: str) -> bytes:
@@ -137,11 +148,14 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
             bucket = None
             object_path = None
             try:
+                last = st.session_state.get("storage_last_error", {})
+                sc = last.get("status")
+                extra = f" (HTTP {sc})" if sc else ""
                 st.warning(
-                    "No se pudo subir el archivo a Supabase Storage. "
+                    "No se pudo subir el archivo a Supabase Storage" + extra + ". "
                     "El documento quedó solo en almacenamiento local (puede perderse si Streamlit reinicia). "
-                    "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_STORAGE_BUCKET "
-                    "y en Manage app → Logs el motivo exacto."
+                    "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (opcional) y SUPABASE_STORAGE_BUCKET. "
+                    "En Backup/Restore verás un diagnóstico, o revisa Manage app → Logs."
                 )
             except Exception:
                 pass
@@ -3666,14 +3680,25 @@ def page_backup_restore():
                     st.error(f"No se pudo restaurar app.db: {e}")
 
     with tab3:
-        st.markdown("### 1) Descargar Backup completo")
-        if st.button("Generar Backup ZIP (DB + documentos)", type="primary", use_container_width=True):
-            b = make_backup_zip_bytes()
-            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            st.download_button("Descargar Backup", data=b, file_name=f"backup_control_faenas_{ts}.zip", mime="application/zip", use_container_width=True)
-            st.success("Backup listo para descargar.")
 
         st.divider()
+        st.markdown("### 🧪 Diagnóstico Storage (solo admin)")
+        if not storage_enabled():
+            st.info("Storage no está activo. Revisa Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET. (Opcional: SUPABASE_ANON_KEY)")
+        else:
+            st.success(f"Storage activo: bucket **{STORAGE_BUCKET}**")
+            last = st.session_state.get("storage_last_error")
+            if last:
+                st.warning(f"Último error Storage: HTTP {last.get('status')} · {str(last.get('body',''))[:120]}")
+                with st.expander("Ver detalle último error"):
+                    st.write(last)
+            if st.button("Probar subida Storage (archivo de prueba)", use_container_width=True):
+                try:
+                    test_path = f"_diagnostico/test_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+                    storage_upload(test_path, b"ok", content_type="text/plain", upsert=True)
+                    st.success(f"Subida OK: {test_path}")
+                except Exception as e:
+                    st.error(f"Falló prueba: {e}")
         st.markdown("### 2) Restaurar Backup completo")
         up = st.file_uploader("Sube backup ZIP", type=["zip"], key="up_backup_zip")
         if st.button("Restaurar ahora", type="primary", use_container_width=True):
