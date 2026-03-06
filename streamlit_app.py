@@ -70,7 +70,7 @@ DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
 # ----------------------------
 STORAGE_URL = (_get_cfg("SUPABASE_URL", "") or "").rstrip("/")
 STORAGE_BUCKET = str(_get_cfg("SUPABASE_STORAGE_BUCKET", "docs") or "docs")
-STORAGE_KEY = str(_get_cfg("SUPABASE_SERVICE_ROLE_KEY", _get_cfg("SUPABASE_ANON_KEY", "")) or "").strip()
+STORAGE_SERVICE_KEY = str(_get_cfg("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 STORAGE_ANON_KEY = str(_get_cfg("SUPABASE_ANON_KEY", "") or "").strip()
 
 def _is_jwt(token: str) -> bool:
@@ -78,7 +78,7 @@ def _is_jwt(token: str) -> bool:
     return (t.startswith("eyJ") and t.count(".") >= 2 and " " not in t)
 
 def storage_enabled() -> bool:
-    return bool(STORAGE_URL and STORAGE_BUCKET and STORAGE_KEY and _is_jwt(STORAGE_KEY))
+    return bool(STORAGE_URL and STORAGE_BUCKET and STORAGE_SERVICE_KEY and _is_jwt(STORAGE_SERVICE_KEY))
 
 def _encode_storage_path(op: str) -> str:
     # Encode each segment to avoid errores por espacios/acentos/#/etc.
@@ -88,8 +88,8 @@ def _encode_storage_path(op: str) -> str:
 def _storage_headers(content_type: str | None = None, upsert: bool = False):
     if not storage_enabled():
         raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-    apikey = STORAGE_ANON_KEY if (STORAGE_ANON_KEY and _is_jwt(STORAGE_ANON_KEY)) else STORAGE_KEY
-    h = {"Authorization": f"Bearer {STORAGE_KEY}", "apikey": apikey}
+    apikey = STORAGE_ANON_KEY if (STORAGE_ANON_KEY and _is_jwt(STORAGE_ANON_KEY)) else STORAGE_SERVICE_KEY
+    h = {"Authorization": f"Bearer {STORAGE_SERVICE_KEY}", "apikey": apikey}
     if content_type:
         h["Content-Type"] = content_type
     if upsert:
@@ -116,10 +116,7 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     except Exception:
         pass
 
-    raise RuntimeError(
-        f"Storage upload failed (HTTP {r.status_code}). "
-        "Ve a Backup/Restore → Diagnóstico Storage o Manage app → Logs."
-    )
+    raise RuntimeError(f"Storage upload failed (HTTP {r.status_code}): {(r.text or '')[:200]}")
 
 def storage_download(object_path: str) -> bytes:
     op = _encode_storage_path(object_path)
