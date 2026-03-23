@@ -72,6 +72,7 @@ STORAGE_URL = (_get_cfg("SUPABASE_URL", "") or "").rstrip("/")
 STORAGE_BUCKET = str(_get_cfg("SUPABASE_STORAGE_BUCKET", "docs") or "docs")
 STORAGE_SERVICE_KEY = str(_get_cfg("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 STORAGE_ANON_KEY = str(_get_cfg("SUPABASE_ANON_KEY", "") or "").strip()
+STORAGE_TIMEOUT = 30
 
 def _is_jwt(token: str) -> bool:
     t = (token or "").strip()
@@ -83,53 +84,168 @@ def storage_enabled() -> bool:
 def _encode_storage_path(op: str) -> str:
     # Encode each segment to avoid errores por espacios/acentos/#/etc.
     op = (op or "").lstrip("/")
-    return "/".join(quote(seg, safe="-_.~") for seg in op.split("/"))
+    return "/".join(quote(seg, safe="-_.~") for seg in op.split("/") if seg != "")
 
-def _storage_headers(content_type: str | None = None, upsert: bool = False):
+def _storage_headers(content_type: str | None = None, upsert: bool = False, for_multipart: bool = False):
     if not storage_enabled():
         raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-    apikey = STORAGE_ANON_KEY if (STORAGE_ANON_KEY and _is_jwt(STORAGE_ANON_KEY)) else STORAGE_SERVICE_KEY
-    h = {"Authorization": f"Bearer {STORAGE_SERVICE_KEY}", "apikey": apikey}
-    if content_type:
+    # Para llamadas server-side conviene usar service_role tanto en Authorization como en apikey.
+    # Si el gateway valida el apikey primero, mezclar anon + service_role puede generar rechazos.
+    apikey = STORAGE_SERVICE_KEY if _is_jwt(STORAGE_SERVICE_KEY) else (STORAGE_ANON_KEY if _is_jwt(STORAGE_ANON_KEY) else "")
+    h = {
+        "Authorization": f"Bearer {STORAGE_SERVICE_KEY}",
+        "apikey": apikey,
+        "Accept": "application/json",
+    }
+    if content_type and not for_multipart:
         h["Content-Type"] = content_type
     if upsert:
         h["x-upsert"] = "true"
     return h
 
-def storage_upload(object_path: str, data: bytes, content_type: str = "application/octet-stream", upsert: bool = True):
-    op = _encode_storage_path(object_path)
-    url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
-    r = requests.put(url, headers=_storage_headers(content_type=content_type, upsert=upsert), data=data)
-    if r.status_code in (200, 201):
-        try:
-            st.session_state.pop("storage_last_error", None)
-        except Exception:
-            pass
-        return True
-
+def _storage_set_last_error(resp=None, url: str | None = None, method: str | None = None, exc: Exception | None = None):
     try:
-        st.session_state["storage_last_error"] = {
-            "status": int(r.status_code),
-            "body": (r.text or "")[:500],
-            "url": url[:200],
-        }
+        payload = {}
+        if resp is not None:
+            payload.update({
+                "status": int(getattr(resp, "status_code", 0) or 0),
+                "body": (getattr(resp, "text", "") or "")[:1000],
+            })
+        if url:
+            payload["url"] = str(url)[:250]
+        if method:
+            payload["method"] = method
+        if exc is not None:
+            payload["exception"] = str(exc)[:300]
+        st.session_state["storage_last_error"] = payload
     except Exception:
         pass
 
-    raise RuntimeError(f"Storage upload failed (HTTP {r.status_code}): {(r.text or '')[:200]}")
+def _storage_clear_last_error():
+    try:
+        st.session_state.pop("storage_last_error", None)
+    except Exception:
+        pass
+
+def _storage_should_try_put(resp) -> bool:
+    if resp is None:
+        return False
+    if int(getattr(resp, "status_code", 0) or 0) in (400, 409):
+        body = ((getattr(resp, "text", "") or "") + " " + str(getattr(resp, "reason", "") or "")).lower()
+        markers = [
+            "already exists",
+            "asset already exists",
+            "duplicate",
+            "conflict",
+            "exists",
+        ]
+        return any(m in body for m in markers)
+    return False
+
+def storage_upload(object_path: str, data: bytes, content_type: str = "application/octet-stream", upsert: bool = True):
+    op = _encode_storage_path(object_path)
+    if not op:
+        raise RuntimeError("Ruta de Storage inválida.")
+    url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
+
+    attempts = []
+
+    # 1) POST con cuerpo binario: endpoint oficial para subir objeto nuevo.
+    try:
+        resp = requests.post(
+            url,
+            headers=_storage_headers(content_type=content_type, upsert=upsert),
+            data=data,
+            timeout=STORAGE_TIMEOUT,
+        )
+        attempts.append(("POST-binary", resp))
+        if resp.status_code in (200, 201):
+            _storage_clear_last_error()
+            return True
+    except Exception as e:
+        _storage_set_last_error(url=url, method="POST-binary", exc=e)
+        attempts.append(("POST-binary", e))
+
+    # 2) Fallback multipart/form-data: el flujo estándar de Supabase Storage usa multipart/form-data.
+    try:
+        resp = requests.post(
+            url,
+            headers=_storage_headers(upsert=upsert, for_multipart=True),
+            files={"file": (os.path.basename(object_path) or "archivo.bin", data, content_type)},
+            timeout=STORAGE_TIMEOUT,
+        )
+        attempts.append(("POST-multipart", resp))
+        if resp.status_code in (200, 201):
+            _storage_clear_last_error()
+            return True
+    except Exception as e:
+        _storage_set_last_error(url=url, method="POST-multipart", exc=e)
+        attempts.append(("POST-multipart", e))
+
+    # 3) Fallback PUT: útil cuando el backend interpreta upsert como replace/update de clave existente.
+    try:
+        should_try = upsert
+        for _name, item in attempts:
+            if hasattr(item, "status_code") and _storage_should_try_put(item):
+                should_try = True
+                break
+        if should_try:
+            resp = requests.put(
+                url,
+                headers=_storage_headers(content_type=content_type, upsert=upsert),
+                data=data,
+                timeout=STORAGE_TIMEOUT,
+            )
+            attempts.append(("PUT-binary", resp))
+            if resp.status_code in (200, 201):
+                _storage_clear_last_error()
+                return True
+    except Exception as e:
+        _storage_set_last_error(url=url, method="PUT-binary", exc=e)
+        attempts.append(("PUT-binary", e))
+
+    last_resp = next((item for _name, item in reversed(attempts) if hasattr(item, "status_code")), None)
+    if last_resp is not None:
+        _storage_set_last_error(last_resp, url=url, method="storage_upload")
+        raise RuntimeError(f"Storage upload failed (HTTP {last_resp.status_code}): {(last_resp.text or '')[:300]}")
+
+    last_exc = next((item for _name, item in reversed(attempts) if isinstance(item, Exception)), None)
+    _storage_set_last_error(url=url, method="storage_upload", exc=last_exc)
+    raise RuntimeError(f"Storage upload failed: {last_exc}")
 
 def storage_download(object_path: str) -> bytes:
     op = _encode_storage_path(object_path)
-    url = f"{STORAGE_URL}/storage/v1/object/authenticated/{STORAGE_BUCKET}/{op}"
-    r = requests.get(url, headers=_storage_headers())
-    if r.status_code == 200:
-        return r.content
-    if r.status_code == 404:
+    urls = [
+        f"{STORAGE_URL}/storage/v1/object/authenticated/{STORAGE_BUCKET}/{op}",
+        f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}",
+    ]
+    last_resp = None
+    last_exc = None
+    for idx, url in enumerate(urls, start=1):
+        try:
+            resp = requests.get(url, headers=_storage_headers(), timeout=STORAGE_TIMEOUT)
+        except Exception as e:
+            last_exc = e
+            _storage_set_last_error(url=url, method="storage_download", exc=e)
+            continue
+        if resp.status_code == 200:
+            _storage_clear_last_error()
+            return resp.content
+        if resp.status_code == 404:
+            last_resp = resp
+            continue
+        # Si el endpoint authenticated falla por bucket público o gateway, intenta el otro antes de abortar.
+        last_resp = resp
+    if last_resp is not None and last_resp.status_code == 404:
         raise FileNotFoundError("Archivo no encontrado en Storage.")
-    raise RuntimeError(
-        f"Storage download failed (HTTP {r.status_code}). "
-        "Revisa en Manage app → Logs el detalle."
-    )
+    if last_resp is not None:
+        _storage_set_last_error(last_resp, url=urls[-1], method="storage_download")
+        raise RuntimeError(
+            f"Storage download failed (HTTP {last_resp.status_code}): {(last_resp.text or '')[:300]}"
+        )
+    if last_exc is not None:
+        raise RuntimeError(f"Storage download failed: {last_exc}")
+    raise RuntimeError("Storage download failed: sin respuesta del servidor.")
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
@@ -165,7 +281,11 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
 
 def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
     if object_path and storage_enabled():
-        return storage_download(object_path)
+        try:
+            return storage_download(object_path)
+        except Exception:
+            # Fallback local para no romper la app si Storage falla temporalmente.
+            pass
     if file_path and os.path.exists(str(file_path)):
         with open(str(file_path), "rb") as fp:
             return fp.read()
@@ -407,8 +527,176 @@ def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
         if col not in existing:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
 
+def cursor_execute(cur, q: str, params=()):
+    if DB_BACKEND == "postgres":
+        q = _qmark_to_pct(q).replace("datetime('now')", "now()")
+    return cur.execute(q, params)
+
+
+def ensure_core_tables_postgres():
+    if DB_BACKEND != "postgres":
+        return
+    stmts = [
+        """
+        CREATE TABLE IF NOT EXISTS mandantes (
+            id BIGSERIAL PRIMARY KEY,
+            nombre TEXT NOT NULL UNIQUE
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS contratos_faena (
+            id BIGSERIAL PRIMARY KEY,
+            mandante_id BIGINT NOT NULL REFERENCES mandantes(id) ON DELETE RESTRICT,
+            nombre TEXT NOT NULL,
+            fecha_inicio TEXT,
+            fecha_termino TEXT,
+            file_path TEXT,
+            sha256 TEXT,
+            created_at TEXT,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS faenas (
+            id BIGSERIAL PRIMARY KEY,
+            mandante_id BIGINT NOT NULL REFERENCES mandantes(id) ON DELETE RESTRICT,
+            contrato_faena_id BIGINT REFERENCES contratos_faena(id) ON DELETE SET NULL,
+            nombre TEXT NOT NULL,
+            ubicacion TEXT DEFAULT '',
+            fecha_inicio TEXT NOT NULL,
+            fecha_termino TEXT,
+            estado TEXT NOT NULL DEFAULT 'ACTIVA' CHECK (estado IN ('ACTIVA','TERMINADA'))
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS faena_anexos (
+            id BIGSERIAL PRIMARY KEY,
+            faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
+            nombre TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS trabajadores (
+            id BIGSERIAL PRIMARY KEY,
+            rut TEXT NOT NULL UNIQUE,
+            nombres TEXT NOT NULL,
+            apellidos TEXT NOT NULL,
+            cargo TEXT DEFAULT '',
+            centro_costo TEXT,
+            email TEXT,
+            fecha_contrato TEXT,
+            vigencia_examen TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS asignaciones (
+            id BIGSERIAL PRIMARY KEY,
+            faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
+            trabajador_id BIGINT NOT NULL REFERENCES trabajadores(id) ON DELETE CASCADE,
+            cargo_faena TEXT DEFAULT '',
+            fecha_ingreso TEXT NOT NULL,
+            fecha_egreso TEXT,
+            estado TEXT NOT NULL DEFAULT 'ACTIVA' CHECK (estado IN ('ACTIVA','CERRADA')),
+            UNIQUE(faena_id, trabajador_id)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS trabajador_documentos (
+            id BIGSERIAL PRIMARY KEY,
+            trabajador_id BIGINT NOT NULL REFERENCES trabajadores(id) ON DELETE CASCADE,
+            doc_tipo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS empresa_documentos (
+            id BIGSERIAL PRIMARY KEY,
+            doc_tipo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS faena_empresa_documentos (
+            id BIGSERIAL PRIMARY KEY,
+            faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
+            doc_tipo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS export_historial (
+            id BIGSERIAL PRIMARY KEY,
+            faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS export_historial_mes (
+            id BIGSERIAL PRIMARY KEY,
+            year_month TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            sha256 TEXT,
+            size_bytes BIGINT,
+            created_at TEXT NOT NULL,
+            bucket TEXT,
+            object_path TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS auto_backup_historial (
+            id BIGSERIAL PRIMARY KEY,
+            tag TEXT,
+            file_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """,
+    ]
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_contratos_faena_mandante_id ON contratos_faena(mandante_id);",
+        "CREATE INDEX IF NOT EXISTS idx_faenas_mandante_id ON faenas(mandante_id);",
+        "CREATE INDEX IF NOT EXISTS idx_faenas_contrato_id ON faenas(contrato_faena_id);",
+        "CREATE INDEX IF NOT EXISTS idx_faena_anexos_faena_id ON faena_anexos(faena_id);",
+        "CREATE INDEX IF NOT EXISTS idx_asignaciones_faena_id ON asignaciones(faena_id);",
+        "CREATE INDEX IF NOT EXISTS idx_asignaciones_trabajador_id ON asignaciones(trabajador_id);",
+        "CREATE INDEX IF NOT EXISTS idx_trabajador_documentos_trabajador_id ON trabajador_documentos(trabajador_id);",
+        "CREATE INDEX IF NOT EXISTS idx_faena_empresa_documentos_faena_id ON faena_empresa_documentos(faena_id);",
+        "CREATE INDEX IF NOT EXISTS idx_export_historial_faena_id ON export_historial(faena_id);",
+    ]
+    for s in stmts + indexes:
+        execute(s)
+
+
 def init_db():
     if DB_BACKEND == "postgres":
+        ensure_core_tables_postgres()
         ensure_users_table()
         ensure_storage_columns_postgres()
         return
@@ -1032,7 +1320,8 @@ def export_zip_for_faena(
     doc_types_trabajador=None,
 ):
     faena = fetch_df('''
-        SELECT f.*, m.nombre AS mandante_nombre, cf.nombre AS contrato_nombre, cf.file_path AS contrato_path
+        SELECT f.*, m.nombre AS mandante_nombre, cf.nombre AS contrato_nombre,
+               cf.file_path AS contrato_path, cf.bucket AS contrato_bucket, cf.object_path AS contrato_object_path
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
         LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
@@ -1081,20 +1370,20 @@ def export_zip_for_faena(
     z.writestr("99_Index_Pendientes.txt", "\\n".join(idx))
 
     # 00_Contrato_Faena
-    if include_contrato and f.get("contrato_path") and os.path.exists(f["contrato_path"]):
-        fname = os.path.basename(f["contrato_path"])
-        with open(f["contrato_path"], "rb") as fp:
-            z.writestr(f"00_Contrato_Faena/{fname}", fp.read())
+    if include_contrato:
+        contrato_bytes = _get_bytes(f.get("contrato_path"), f.get("contrato_bucket"), f.get("contrato_object_path"))
+        if contrato_bytes:
+            fname = os.path.basename(str(f.get("contrato_path") or f.get("contrato_object_path") or "contrato_faena"))
+            z.writestr(f"00_Contrato_Faena/{fname}", contrato_bytes)
 
     # 01_Anexos_Faena
     if include_anexos:
         anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (faena_id,))
         for _, a in anexos.iterrows():
-            src = a["file_path"]
-            if src and os.path.exists(src):
-                fname = os.path.basename(src)
-                with open(src, "rb") as fp:
-                    z.writestr(f"01_Anexos_Faena/{fname}", fp.read())
+            b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
+            if b:
+                fname = os.path.basename(str(a.get("file_path") or a.get("object_path") or a.get("nombre") or "anexo"))
+                z.writestr(f"01_Anexos_Faena/{fname}", b)
 
     # 02_Documentos_Empresa (global)
     if include_global_empresa_docs:
@@ -1102,12 +1391,11 @@ def export_zip_for_faena(
         for _, d in edocs.iterrows():
             if _set_emp_glob is not None and str(d.get("doc_tipo", "")) not in _set_emp_glob:
                 continue
-            src = d["file_path"]
-            if src and os.path.exists(src):
-                fname = os.path.basename(src)
+            b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+            if b:
+                fname = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa"))
                 tipo = safe_name(d["doc_tipo"])
-                with open(src, "rb") as fp:
-                    z.writestr(f"02_Documentos_Empresa/{tipo}/{fname}", fp.read())
+                z.writestr(f"02_Documentos_Empresa/{tipo}/{fname}", b)
 
     # 02_Documentos_Empresa_Faena (por faena)
     if include_empresa_faena:
@@ -1115,12 +1403,11 @@ def export_zip_for_faena(
         for _, d in fedocs.iterrows():
             if _set_emp_faena is not None and str(d.get("doc_tipo", "")) not in _set_emp_faena:
                 continue
-            src = d["file_path"]
-            if src and os.path.exists(src):
-                fname = os.path.basename(src)
+            b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+            if b:
+                fname = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa_faena"))
                 tipo = safe_name(d["doc_tipo"])
-                with open(src, "rb") as fp:
-                    z.writestr(f"02_Documentos_Empresa_Faena/{tipo}/{fname}", fp.read())
+                z.writestr(f"02_Documentos_Empresa_Faena/{tipo}/{fname}", b)
 
     # 03_Trabajadores
     if include_trabajadores:
@@ -1139,12 +1426,11 @@ def export_zip_for_faena(
             for _, d in tdocs.iterrows():
                 if _set_trab is not None and str(d.get("doc_tipo", "")) not in _set_trab:
                     continue
-                src = d["file_path"]
-                if src and os.path.exists(src):
-                    fname = os.path.basename(src)
+                b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+                if b:
+                    fname = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_trabajador"))
                     tipo = safe_name(d["doc_tipo"])
-                    with open(src, "rb") as fp:
-                        z.writestr(f"03_Trabajadores/{tdir}/{tipo}/{fname}", fp.read())
+                    z.writestr(f"03_Trabajadores/{tdir}/{tipo}/{fname}", b)
 
     z.close()
     buff.seek(0)
@@ -1153,12 +1439,12 @@ def export_zip_for_faena(
 def persist_export_mes(year_month: str, zip_bytes: bytes):
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     fname = f"mes_{year_month}_{ts}.zip"
-    path = save_file(["exports", "mes"], fname, zip_bytes)
+    path, bucket, object_path = save_file_online(["exports", "mes"], fname, zip_bytes, content_type="application/zip")
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
-        (str(year_month), path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial_mes(year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
+        (str(year_month), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -1193,12 +1479,11 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
     if include_global_empresa_docs:
         edocs = fetch_df("SELECT * FROM empresa_documentos ORDER BY id")
         for _, d in edocs.iterrows():
-            src = d["file_path"]
-            if src and os.path.exists(src):
-                fname = os.path.basename(src)
+            b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+            if b:
+                fname = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa"))
                 tipo = safe_name(d["doc_tipo"])
-                with open(src, "rb") as fp:
-                    z.writestr(f"{ym}/00_Documentos_Empresa_Global/{tipo}/{fname}", fp.read())
+                z.writestr(f"{ym}/00_Documentos_Empresa_Global/{tipo}/{fname}", b)
 
     # Cada faena dentro de carpeta
     for _, fr in faenas.iterrows():
@@ -1209,7 +1494,8 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
         # Reutiliza export estándar, pero con prefijo y sin repetir docs empresa global
         faena = fetch_df(
             '''
-            SELECT f.*, m.nombre AS mandante_nombre, cf.nombre AS contrato_nombre, cf.file_path AS contrato_path
+            SELECT f.*, m.nombre AS mandante_nombre, cf.nombre AS contrato_nombre,
+               cf.file_path AS contrato_path, cf.bucket AS contrato_bucket, cf.object_path AS contrato_object_path
             FROM faenas f
             JOIN mandantes m ON m.id=f.mandante_id
             LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
@@ -1250,29 +1536,27 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
         z.writestr(f"{prefix}/99_Index_Pendientes.txt", "\n".join(idx2))
 
         # 00 contrato
-        if f.get("contrato_path") and os.path.exists(f["contrato_path"]):
-            fn = os.path.basename(f["contrato_path"])
-            with open(f["contrato_path"], "rb") as fp:
-                z.writestr(f"{prefix}/00_Contrato_Faena/{fn}", fp.read())
+        contrato_bytes = _get_bytes(f.get("contrato_path"), f.get("contrato_bucket"), f.get("contrato_object_path"))
+        if contrato_bytes:
+            fn = os.path.basename(str(f.get("contrato_path") or f.get("contrato_object_path") or "contrato_faena"))
+            z.writestr(f"{prefix}/00_Contrato_Faena/{fn}", contrato_bytes)
 
         # 01 anexos
         anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (fid,))
         for _, a in anexos.iterrows():
-            src = a["file_path"]
-            if src and os.path.exists(src):
-                fn = os.path.basename(src)
-                with open(src, "rb") as fp:
-                    z.writestr(f"{prefix}/01_Anexos_Faena/{fn}", fp.read())
+            b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
+            if b:
+                fn = os.path.basename(str(a.get("file_path") or a.get("object_path") or a.get("nombre") or "anexo"))
+                z.writestr(f"{prefix}/01_Anexos_Faena/{fn}", b)
 
         # 02 empresa por faena
         fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id", (fid,))
         for _, d in fedocs.iterrows():
-            src = d["file_path"]
-            if src and os.path.exists(src):
-                fn = os.path.basename(src)
+            b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+            if b:
+                fn = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa_faena"))
                 tipo = safe_name(d["doc_tipo"])
-                with open(src, "rb") as fp:
-                    z.writestr(f"{prefix}/02_Documentos_Empresa_Faena/{tipo}/{fn}", fp.read())
+                z.writestr(f"{prefix}/02_Documentos_Empresa_Faena/{tipo}/{fn}", b)
 
         # 03 trabajadores
         asign = fetch_df(
@@ -1290,12 +1574,11 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
             tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
             for _, d in tdocs.iterrows():
-                src = d["file_path"]
-                if src and os.path.exists(src):
-                    fn = os.path.basename(src)
+                b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
+                if b:
+                    fn = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_trabajador"))
                     tipo = safe_name(d["doc_tipo"])
-                    with open(src, "rb") as fp:
-                        z.writestr(f"{prefix}/03_Trabajadores/{tdir}/{tipo}/{fn}", fp.read())
+                    z.writestr(f"{prefix}/03_Trabajadores/{tdir}/{tipo}/{fn}", b)
 
     z.close()
     buff.seek(0)
@@ -1304,12 +1587,12 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
 def persist_export(faena_id: int, zip_bytes: bytes, faena_nombre: str):
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     fname = f"faena_{faena_id}_{safe_name(faena_nombre)}_{ts}.zip"
-    path = save_file(["exports", f"faena_{faena_id}"], fname, zip_bytes)
+    path, bucket, object_path = save_file_online(["exports", f"faena_{faena_id}"], fname, zip_bytes, content_type="application/zip")
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
-        (int(faena_id), path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial(faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
+        (int(faena_id), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -1413,9 +1696,8 @@ def cleanup_old_auto_backups(keep_last: int = 20):
                     pass
         if not to_delete.empty:
             ids = tuple(int(x) for x in to_delete["id"].tolist())
-            with conn() as c:
-                c.execute("DELETE FROM auto_backup_historial WHERE id IN (%s)" % ",".join(["?"]*len(ids)), ids)
-                c.commit()
+            placeholders = ",".join(["?"] * len(ids))
+            execute(f"DELETE FROM auto_backup_historial WHERE id IN ({placeholders})", ids)
     except Exception:
         pass
 
@@ -2481,7 +2763,6 @@ def page_trabajadores():
                             return str(v)
 
                         with conn() as c:
-                            c.execute("PRAGMA foreign_keys = ON;")
                             for _, r in df.iterrows():
                                 rows += 1
                                 rut = clean_rut(str(r.get("rut", "") or ""))
@@ -2502,7 +2783,8 @@ def page_trabajadores():
                                 vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
-                                    c.execute(
+                                    cursor_execute(
+                                        c,
                                         '''
                                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                                         VALUES(?,?,?,?,?,?,?,?)
@@ -2526,7 +2808,8 @@ def page_trabajadores():
                                     if rut in existing_set:
                                         skipped += 1
                                         continue
-                                    c.execute(
+                                    cursor_execute(
+                                        c,
                                         '''
                                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                                         VALUES(?,?,?,?,?,?,?,?)
@@ -2745,7 +3028,7 @@ def page_asignar_trabajadores():
                 for tid in seleccion:
                     params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
                 executemany(
-                    "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
                     params,
                 )
                 st.success("Trabajadores asignados.")
@@ -2799,7 +3082,6 @@ def page_asignar_trabajadores():
                             return str(v)
 
                         with conn() as c:
-                            c.execute("PRAGMA foreign_keys = ON;")
                             for _, r in df.iterrows():
                                 rows += 1
                                 rut = clean_rut(str(r.get("rut", "") or ""))
@@ -2820,7 +3102,8 @@ def page_asignar_trabajadores():
                                 vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
-                                    c.execute(
+                                    cursor_execute(
+                                        c,
                                         '''
                                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                                         VALUES(?,?,?,?,?,?,?,?)
@@ -2843,7 +3126,8 @@ def page_asignar_trabajadores():
                                     if rut in rut_to_id:
                                         skipped += 1
                                         continue
-                                    c.execute(
+                                    cursor_execute(
+                                        c,
                                         '''
                                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                                         VALUES(?,?,?,?,?,?,?,?)
@@ -2854,14 +3138,15 @@ def page_asignar_trabajadores():
 
                                 # obtener id del trabajador
                                 if rut not in rut_to_id:
-                                    rid = c.execute("SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
+                                    rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
                                     if rid:
                                         rut_to_id[rut] = int(rid[0])
 
                                 tid = rut_to_id.get(rut)
                                 if tid:
-                                    c.execute(
-                                        "INSERT OR IGNORE INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?)",
+                                    cursor_execute(
+                                        c,
+                                        "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
                                         (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
                                     assigned += 1
@@ -3398,13 +3683,16 @@ def page_documentos_trabajador():
 
         )
 
-def page_export_zip():
-    ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
 def _get_bytes(file_path, bucket, object_path):
     try:
         return load_file_anywhere(file_path, bucket, object_path)
     except Exception:
         return None
+
+
+def page_export_zip():
+    ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
+
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
@@ -3441,15 +3729,12 @@ def _get_bytes(file_path, bucket, object_path):
                 else:
                     st.success(f"{k} — OK")
 
-
         st.divider()
         st.write("**Documentos empresa (por faena):**")
         if miss_emp:
             st.error("Faltan: " + ", ".join(miss_emp))
         else:
             st.success("OK (requeridos completos).")
-
-
 
     with tab2:
         st.markdown("### 📦 Selecciona qué incluir en el ZIP")
@@ -3467,7 +3752,6 @@ def _get_bytes(file_path, bucket, object_path):
         st.divider()
         st.markdown("#### (Opcional) Filtrar por tipo de documento")
 
-        # Tipos disponibles
         emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
         emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
 
@@ -3534,82 +3818,86 @@ def _get_bytes(file_path, bucket, object_path):
         with colx2:
             st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
 
-        with tab3:
-            hist = fetch_df("SELECT id, file_path, bucket, object_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
-            if hist.empty:
-                st.info("(sin exportaciones guardadas aún)")
+    with tab3:
+        hist = fetch_df(
+            "SELECT id, file_path, bucket, object_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC",
+            (int(faena_id),),
+        )
+        if hist.empty:
+            st.info("(sin exportaciones guardadas aún)")
+        else:
+            show = hist.copy()
+            show["archivo"] = show.apply(lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"export_{int(r['id'])}.zip")), axis=1)
+            show["size_kb"] = (show["size_bytes"] / 1024).round(1)
+            st.dataframe(show[["id", "archivo", "size_kb", "created_at"]], use_container_width=True, hide_index=True)
+
+            exp_id = st.selectbox("Elegir export para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['archivo']}")
+            row = show[show["id"] == exp_id].iloc[0]
+            b = _get_bytes(row.get("file_path"), row.get("bucket"), row.get("object_path"))
+            if b:
+                out_name = os.path.basename(str(row.get("file_path") or row.get("object_path") or f"export_{int(exp_id)}.zip"))
+                st.download_button("Descargar export seleccionado", data=b, file_name=out_name, mime="application/zip", use_container_width=True)
             else:
-                show = hist.copy()
-                show["archivo"] = show["file_path"].apply(lambda p: os.path.basename(p))
-                show["size_kb"] = (show["size_bytes"] / 1024).round(1)
-                st.dataframe(show[["id", "archivo", "size_kb", "created_at"]], use_container_width=True, hide_index=True)
+                st.warning("El archivo no está disponible ni en Storage ni en disco local.")
 
-                exp_id = st.selectbox("Elegir export para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['archivo']}")
-                row = show[show["id"] == exp_id].iloc[0]
-                p = row["file_path"]
-                if os.path.exists(p):
-                    with open(p, "rb") as f:
-                        b = f.read()
-                    st.download_button("Descargar export seleccionado", data=b, file_name=os.path.basename(p), mime="application/zip", use_container_width=True)
-                else:
-                    st.warning("El archivo no está en disco (posible reboot/redeploy). Usa Backup/Restore para conservarlo.")
+    with tab4:
+        st.markdown("Genera un ZIP con **todas las faenas** cuyo **inicio** cae dentro de un mes (YYYY-MM).")
+        fa = fetch_df("SELECT DISTINCT substr(fecha_inicio,1,7) AS ym FROM faenas WHERE fecha_inicio IS NOT NULL AND TRIM(fecha_inicio)<>'' ORDER BY ym DESC")
+        ym_opts = fa["ym"].tolist() if not fa.empty else []
+        if not ym_opts:
+            st.info("No hay fechas de inicio registradas para exportar por mes.")
+        else:
+            ym = st.selectbox("Mes", ym_opts, key="exp_mes_pick")
+            include_global = st.checkbox("Incluir documentos empresa globales (una vez)", value=True, key="exp_mes_inc_global")
 
+            lst = fetch_df('''
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
+                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+                WHERE substr(f.fecha_inicio,1,7)=?
+                ORDER BY f.id DESC
+            ''', (ym,))
+            st.caption(f"Faenas incluidas: {len(lst)}")
+            st.dataframe(lst[["id","mandante","nombre","estado","fecha_inicio"]], use_container_width=True, hide_index=True)
 
-        with tab4:
-            st.markdown("Genera un ZIP con **todas las faenas** cuyo **inicio** cae dentro de un mes (YYYY-MM).")
-            fa = fetch_df("SELECT DISTINCT substr(fecha_inicio,1,7) AS ym FROM faenas WHERE fecha_inicio IS NOT NULL AND TRIM(fecha_inicio)<>'' ORDER BY ym DESC")
-            ym_opts = fa["ym"].tolist() if not fa.empty else []
-            if not ym_opts:
-                st.info("No hay fechas de inicio registradas para exportar por mes.")
+            colm1, colm2 = st.columns([1,1])
+            with colm1:
+                if st.button("Generar ZIP mensual y guardar", type="primary", use_container_width=True):
+                    try:
+                        y, m = ym.split("-")
+                        zip_bytes, name = export_zip_for_mes(int(y), int(m), include_global_empresa_docs=include_global)
+                        path = persist_export_mes(ym, zip_bytes)
+                        st.success(f"ZIP mensual generado: {os.path.basename(path)}")
+                        auto_backup_db("export_mes")
+                        st.download_button("Descargar ZIP mensual (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
+                    except Exception as e:
+                        st.error(f"No se pudo generar ZIP mensual: {e}")
+            with colm2:
+                st.caption("Se guarda en historial mensual (si no hay reboot). Para conservar, usa Backup / Restore.")
+
+        st.divider()
+        st.markdown("#### 🗂️ Historial mensual")
+        histm = fetch_df("SELECT id, year_month, file_path, bucket, object_path, size_bytes, created_at FROM export_historial_mes ORDER BY id DESC")
+        if histm.empty:
+            st.info("(sin exportaciones mensuales guardadas aún)")
+        else:
+            show = histm.copy()
+            show["archivo"] = show.apply(lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"export_mes_{int(r['id'])}.zip")), axis=1)
+            show["size_kb"] = (show["size_bytes"] / 1024).round(1)
+            st.dataframe(show[["id","year_month","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
+
+            exp_id = st.selectbox(
+                "Elegir export mensual para descargar",
+                show["id"].tolist(),
+                format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['year_month']} / {show[show['id']==x].iloc[0]['archivo']}",
+                key="pick_hist_mes",
+            )
+            row = show[show["id"] == exp_id].iloc[0]
+            b = _get_bytes(row.get("file_path"), row.get("bucket"), row.get("object_path"))
+            if b:
+                out_name = os.path.basename(str(row.get("file_path") or row.get("object_path") or f"export_mes_{int(exp_id)}.zip"))
+                st.download_button("Descargar export mensual seleccionado", data=b, file_name=out_name, mime="application/zip", use_container_width=True)
             else:
-                ym = st.selectbox("Mes", ym_opts, key="exp_mes_pick")
-                include_global = st.checkbox("Incluir documentos empresa globales (una vez)", value=True, key="exp_mes_inc_global")
-
-                # Mostrar faenas incluidas
-                lst = fetch_df('''
-                    SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
-                    FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-                    WHERE substr(f.fecha_inicio,1,7)=?
-                    ORDER BY f.id DESC
-                ''', (ym,))
-                st.caption(f"Faenas incluidas: {len(lst)}")
-                st.dataframe(lst[["id","mandante","nombre","estado","fecha_inicio"]], use_container_width=True, hide_index=True)
-
-                colm1, colm2 = st.columns([1,1])
-                with colm1:
-                    if st.button("Generar ZIP mensual y guardar", type="primary", use_container_width=True):
-                        try:
-                            y, m = ym.split("-")
-                            zip_bytes, name = export_zip_for_mes(int(y), int(m), include_global_empresa_docs=include_global)
-                            path = persist_export_mes(ym, zip_bytes)
-                            st.success(f"ZIP mensual generado: {os.path.basename(path)}")
-                            auto_backup_db("export_mes")
-                            st.download_button("Descargar ZIP mensual (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
-                        except Exception as e:
-                            st.error(f"No se pudo generar ZIP mensual: {e}")
-                with colm2:
-                    st.caption("Se guarda en historial mensual (si no hay reboot). Para conservar, usa Backup / Restore.")
-
-            st.divider()
-            st.markdown("#### 🗂️ Historial mensual")
-            histm = fetch_df("SELECT id, year_month, file_path, size_bytes, created_at FROM export_historial_mes ORDER BY id DESC")
-            if histm.empty:
-                st.info("(sin exportaciones mensuales guardadas aún)")
-            else:
-                show = histm.copy()
-                show["archivo"] = show["file_path"].apply(lambda p: os.path.basename(p))
-                show["size_kb"] = (show["size_bytes"] / 1024).round(1)
-                st.dataframe(show[["id","year_month","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
-
-                exp_id = st.selectbox("Elegir export mensual para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['year_month']} / {show[show['id']==x].iloc[0]['archivo']}", key="pick_hist_mes")
-                row = show[show["id"] == exp_id].iloc[0]
-                p = row["file_path"]
-                if os.path.exists(p):
-                    with open(p, "rb") as f:
-                        b = f.read()
-                    st.download_button("Descargar export mensual seleccionado", data=b, file_name=os.path.basename(p), mime="application/zip", use_container_width=True)
-                else:
-                    st.warning("El archivo no está en disco (posible reboot/redeploy). Usa Backup/Restore para conservarlo.")
+                st.warning("El archivo no está disponible ni en Storage ni en disco local.")
 
 def page_backup_restore():
     ui_header("Backup / Restore", "Respalda la base y documentos para evitar pérdidas en Streamlit Community Cloud.")
@@ -3617,10 +3905,17 @@ def page_backup_restore():
         "En Streamlit Community Cloud, los archivos locales (incluyendo SQLite y uploads) pueden perderse en reboots/redeploy. "
         "Este módulo te permite descargar un **Backup ZIP** con la base y documentos, y luego restaurarlo."
     )
+    if DB_BACKEND == "postgres":
+        st.info(
+            "Modo actual: **Postgres/Supabase**. La base online es la fuente de verdad; por eso las opciones sobre **app.db** quedan solo como compatibilidad local heredada. "
+            "Usa principalmente el diagnóstico de Storage y las exportaciones/documentos online."
+        )
 
     tab1, tab2, tab3 = st.tabs(["⚡ Auto-backups", "🗄️ Base (app.db)", "📦 Backup completo (ZIP)"])
 
     with tab1:
+        if DB_BACKEND == "postgres":
+            st.info("En modo Postgres los auto-backups locales de **app.db** no son la fuente principal y no se generan automáticamente.")
         st.caption("Auto-backups generados al guardar (solo app.db). Se guardan localmente y conviene descargarlos.")
         hist = fetch_df("SELECT id, tag, file_path, size_bytes, created_at FROM auto_backup_historial ORDER BY id DESC")
         if hist.empty:
@@ -3646,6 +3941,8 @@ def page_backup_restore():
                 st.warning("El archivo no está en disco (posible reboot/redeploy).")
 
     with tab2:
+        if DB_BACKEND == "postgres":
+            st.info("Esta pestaña aplica solo a respaldo/restauración de **SQLite local (app.db)**. En Supabase la persistencia real vive en Postgres.")
         coldb1, coldb2 = st.columns([1, 1])
 
         with coldb1:
