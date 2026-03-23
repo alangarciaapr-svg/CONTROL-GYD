@@ -46,13 +46,42 @@ def _get_cfg(name: str, default=None):
     return default
 
 def _normalize_pg_dsn(dsn: str) -> str:
-    dsn = (dsn or "").strip()
+    dsn = (dsn or "").strip().strip("'").strip('\"')
     if not dsn:
         return dsn
+    dsn = dsn.replace("\n", "").replace("\r", "")
+    if dsn.startswith("postgres://"):
+        dsn = "postgresql://" + dsn[len("postgres://"):]
     if "sslmode=" not in dsn:
         joiner = "&" if "?" in dsn else "?"
         dsn = dsn + f"{joiner}sslmode=require"
+    if "connect_timeout=" not in dsn:
+        joiner = "&" if "?" in dsn else "?"
+        dsn = dsn + f"{joiner}connect_timeout=10"
     return dsn
+
+def _build_pg_dsn_from_parts() -> str:
+    host = str(_get_cfg("SUPABASE_DB_HOST", _get_cfg("PGHOST", "")) or "").strip().strip("'").strip('\"')
+    port = str(_get_cfg("SUPABASE_DB_PORT", _get_cfg("PGPORT", "5432")) or "5432").strip()
+    dbname = str(_get_cfg("SUPABASE_DB_NAME", _get_cfg("PGDATABASE", "postgres")) or "postgres").strip().strip("'").strip('\"')
+    user = str(_get_cfg("SUPABASE_DB_USER", _get_cfg("PGUSER", "")) or "").strip().strip("'").strip('\"')
+    password = str(_get_cfg("SUPABASE_DB_PASSWORD", _get_cfg("PGPASSWORD", "")) or "").strip().strip("'").strip('\"')
+    if not (host and user and password):
+        return ""
+    parts = [
+        f"host={host}",
+        f"port={port or '5432'}",
+        f"dbname={dbname or 'postgres'}",
+        f"user={user}",
+        f"password={password}",
+        "sslmode=require",
+        "connect_timeout=10",
+    ]
+    return " ".join(parts)
+
+raw_pg_dsn = _get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", ""))
+PG_DSN = _normalize_pg_dsn(raw_pg_dsn) or _build_pg_dsn_from_parts()
+DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
 
 def _qmark_to_pct(sql: str) -> str:
     # Convert SQLite '?' placeholders to psycopg '%s' (only outside single quotes)
@@ -510,7 +539,15 @@ def conn():
             raise RuntimeError("psycopg no está instalado, pero DB_BACKEND=postgres.")
         if not PG_DSN:
             raise RuntimeError("Falta SUPABASE_DB_URL (o PG_DSN) en Secrets/ENV.")
-        return psycopg.connect(PG_DSN)
+        try:
+            return psycopg.connect(PG_DSN)
+        except Exception as e:
+            msg = str(e).strip() or e.__class__.__name__
+            raise RuntimeError(
+                "No se pudo conectar a Postgres/Supabase. "
+                f"Detalle: {msg}. "
+                "Revisa SUPABASE_DB_URL o usa secretos separados SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_NAME, SUPABASE_DB_USER y SUPABASE_DB_PASSWORD."
+            ) from e
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         c.execute("PRAGMA foreign_keys = ON;")
@@ -678,6 +715,19 @@ def ensure_core_tables_postgres():
             created_at TEXT NOT NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            salt_b64 TEXT NOT NULL,
+            pass_hash_b64 TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'OPERADOR',
+            perms_json TEXT,
+            is_active BIGINT NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
     ]
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_contratos_faena_mandante_id ON contratos_faena(mandante_id);",
@@ -689,15 +739,17 @@ def ensure_core_tables_postgres():
         "CREATE INDEX IF NOT EXISTS idx_trabajador_documentos_trabajador_id ON trabajador_documentos(trabajador_id);",
         "CREATE INDEX IF NOT EXISTS idx_faena_empresa_documentos_faena_id ON faena_empresa_documentos(faena_id);",
         "CREATE INDEX IF NOT EXISTS idx_export_historial_faena_id ON export_historial(faena_id);",
+        "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);",
     ]
-    for s in stmts + indexes:
-        execute(s)
+    with conn() as c:
+        for s in stmts + indexes:
+            c.execute(s)
+        c.commit()
 
 
 def init_db():
     if DB_BACKEND == "postgres":
         ensure_core_tables_postgres()
-        ensure_users_table()
         ensure_storage_columns_postgres()
         return
     with conn() as c:
@@ -1737,11 +1789,30 @@ def go(page: str, faena_id=None):
         st.session_state["nav_request_faena_id"] = int(faena_id)
     st.rerun()
 
+def show_bootstrap_error(exc: Exception):
+    st.error("No se pudo iniciar la app por un problema de conexión a Postgres/Supabase.")
+    st.code(str(exc))
+    st.markdown("""
+Revisa estos puntos en **Secrets** de Streamlit Cloud:
+- `SUPABASE_DB_URL` sin comillas extras ni saltos de línea.
+- O bien usa secretos separados: `SUPABASE_DB_HOST`, `SUPABASE_DB_PORT`, `SUPABASE_DB_NAME`, `SUPABASE_DB_USER`, `SUPABASE_DB_PASSWORD`.
+- El puerto del pooler suele ser **6543** y requiere `sslmode=require`.
+- Verifica que la contraseña no esté truncada.
+- Si cambiaste la contraseña en Supabase, actualiza también Streamlit Cloud.
+""")
+    st.stop()
+
+def bootstrap_app():
+    ensure_dirs()
+    try:
+        init_db()
+    except Exception as e:
+        show_bootstrap_error(e)
+
 # ----------------------------
 # Init
 # ----------------------------
-ensure_dirs()
-init_db()
+bootstrap_app()
 
 inject_css()
 
