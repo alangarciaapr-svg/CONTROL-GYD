@@ -182,8 +182,6 @@ def _qmark_to_pct(sql: str) -> str:
         parts[i] = parts[i].replace("?", "%s")
     return "'".join(parts)
 
-PG_DSN = _normalize_pg_dsn(_get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", "")))
-DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
 # ----------------------------
 # Supabase Storage (documentos online)
 # ----------------------------
@@ -1054,6 +1052,7 @@ def init_db():
         );
         ''')
 
+        ensure_storage_columns_sqlite(c)
         c.commit()
 
 # ----------------------------
@@ -1191,6 +1190,25 @@ def ensure_storage_columns_postgres():
     for s in stmts:
         try:
             execute(s)
+        except Exception:
+            pass
+
+
+def ensure_storage_columns_sqlite(c):
+    if DB_BACKEND == "postgres":
+        return
+    targets = {
+        "contratos_faena": {"bucket": "TEXT", "object_path": "TEXT"},
+        "faena_anexos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "trabajador_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "faena_empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "export_historial": {"bucket": "TEXT", "object_path": "TEXT"},
+        "export_historial_mes": {"bucket": "TEXT", "object_path": "TEXT"},
+    }
+    for table, cols in targets.items():
+        try:
+            migrate_add_columns_if_missing(c, table, cols)
         except Exception:
             pass
 
