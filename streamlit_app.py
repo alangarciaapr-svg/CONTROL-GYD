@@ -21,6 +21,7 @@ import requests
 from urllib.parse import quote
 import json
 import secrets
+import unicodedata
 
 # ----------------------------
 # Config
@@ -30,6 +31,13 @@ st.set_page_config(page_title="Control Documental Faenas", layout="wide")
 APP_NAME = "Control Documental de Faenas"
 DB_PATH = "app.db"
 UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
+
+
+# Fingerprints/cache helpers
+def _fingerprint(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
+
+PG_DSN_FINGERPRINT = "none"
 # ----------------------------
 # Database backend selector (SQLite local vs Supabase Postgres)
 # ----------------------------
@@ -81,7 +89,89 @@ def _build_pg_dsn_from_parts() -> str:
 
 raw_pg_dsn = _get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", ""))
 PG_DSN = _normalize_pg_dsn(raw_pg_dsn) or _build_pg_dsn_from_parts()
+PG_DSN_FINGERPRINT = _fingerprint(PG_DSN) if PG_DSN else "none"
 DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+
+@st.cache_resource(show_spinner=False)
+def get_http_session():
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_brand_logo_bytes(url: str):
+    if not url:
+        return None
+    try:
+        resp = get_http_session().get(url, timeout=8)
+        if resp.status_code == 200:
+            return resp.content
+    except Exception:
+        return None
+    return None
+
+def storage_safe_segment(value: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    raw = raw.split("/")[-1]
+    raw = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    if "." in raw:
+        stem, ext = raw.rsplit(".", 1)
+        ext = "." + re.sub(r"[^A-Za-z0-9]+", "", ext)[:12]
+    else:
+        stem, ext = raw, ""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "archivo"
+    stem = stem[:120]
+    return f"{stem}{ext}"
+
+def _storage_object_path(folder_parts, file_name: str) -> str:
+    safe_parts = []
+    for part in (folder_parts or []):
+        part_txt = str(part or "").strip().replace("\\", "/")
+        for chunk in [c for c in part_txt.split("/") if c]:
+            safe_parts.append(storage_safe_segment(chunk))
+    safe_parts.append(storage_safe_segment(file_name))
+    return "/".join(safe_parts)
+
+def _cacheable_params(params):
+    if params is None:
+        return tuple()
+    if isinstance(params, dict):
+        return tuple(sorted((str(k), _cacheable_params(v)) for k, v in params.items()))
+    if isinstance(params, (list, tuple, set)):
+        return tuple(_cacheable_params(x) for x in params)
+    if isinstance(params, (str, int, float, bool, bytes, type(None))):
+        return params
+    return str(params)
+
+
+def clear_app_caches():
+    try:
+        _cached_fetch_df.clear()
+    except Exception:
+        pass
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_fetch_df(db_backend: str, dsn_fingerprint: str, q: str, params_cache):
+    params = tuple(params_cache) if isinstance(params_cache, tuple) else params_cache
+    if db_backend == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+def _is_select_query(q: str) -> bool:
+    txt = re.sub(r"/\*.*?\*/", " ", q or "", flags=re.S)
+    txt = re.sub(r"--.*?$", " ", txt, flags=re.M).strip().lower()
+    return txt.startswith("select") or txt.startswith("with")
+
+@st.cache_resource(show_spinner=False)
+def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
+    ensure_dirs()
+    init_db()
+    return True
 
 def _qmark_to_pct(sql: str) -> str:
     # Convert SQLite '?' placeholders to psycopg '%s' (only outside single quotes)
@@ -107,8 +197,12 @@ def _is_jwt(token: str) -> bool:
     t = (token or "").strip()
     return (t.startswith("eyJ") and t.count(".") >= 2 and " " not in t)
 
+def _is_secret_key(token: str) -> bool:
+    t = (token or "").strip()
+    return t.startswith("sb_secret_") or t.startswith("sb_publishable_")
+
 def storage_enabled() -> bool:
-    return bool(STORAGE_URL and STORAGE_BUCKET and STORAGE_SERVICE_KEY and _is_jwt(STORAGE_SERVICE_KEY))
+    return bool(STORAGE_URL and STORAGE_BUCKET and (STORAGE_SERVICE_KEY or STORAGE_ANON_KEY))
 
 def _encode_storage_path(op: str) -> str:
     # Encode each segment to avoid errores por espacios/acentos/#/etc.
@@ -118,14 +212,18 @@ def _encode_storage_path(op: str) -> str:
 def _storage_headers(content_type: str | None = None, upsert: bool = False, for_multipart: bool = False):
     if not storage_enabled():
         raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-    # Para llamadas server-side conviene usar service_role tanto en Authorization como en apikey.
-    # Si el gateway valida el apikey primero, mezclar anon + service_role puede generar rechazos.
-    apikey = STORAGE_SERVICE_KEY if _is_jwt(STORAGE_SERVICE_KEY) else (STORAGE_ANON_KEY if _is_jwt(STORAGE_ANON_KEY) else "")
+    raw_service = (STORAGE_SERVICE_KEY or "").strip()
+    raw_anon = (STORAGE_ANON_KEY or "").strip()
+    key = raw_service or raw_anon
     h = {
-        "Authorization": f"Bearer {STORAGE_SERVICE_KEY}",
-        "apikey": apikey,
         "Accept": "application/json",
     }
+    if _is_jwt(key):
+        h["Authorization"] = f"Bearer {key}"
+        h["apikey"] = key
+    else:
+        # Las secret/publishable keys modernas van en apikey y no como Bearer JWT.
+        h["apikey"] = key
     if content_type and not for_multipart:
         h["Content-Type"] = content_type
     if upsert:
@@ -156,6 +254,22 @@ def _storage_clear_last_error():
     except Exception:
         pass
 
+def _storage_error_summary(resp=None):
+    if resp is None:
+        return ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            code = str(body.get("code") or "").strip()
+            msg = str(body.get("message") or body.get("error") or "").strip()
+            if code and msg:
+                return f"{code}: {msg}"
+            if msg:
+                return msg
+    except Exception:
+        pass
+    return (getattr(resp, "text", "") or "").strip()[:300]
+
 def _storage_should_try_put(resp) -> bool:
     if resp is None:
         return False
@@ -178,26 +292,11 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
 
     attempts = []
+    http = get_http_session()
 
-    # 1) POST con cuerpo binario: endpoint oficial para subir objeto nuevo.
+    # 1) POST multipart/form-data: Supabase lo documenta como el flujo estándar para subidas pequeñas.
     try:
-        resp = requests.post(
-            url,
-            headers=_storage_headers(content_type=content_type, upsert=upsert),
-            data=data,
-            timeout=STORAGE_TIMEOUT,
-        )
-        attempts.append(("POST-binary", resp))
-        if resp.status_code in (200, 201):
-            _storage_clear_last_error()
-            return True
-    except Exception as e:
-        _storage_set_last_error(url=url, method="POST-binary", exc=e)
-        attempts.append(("POST-binary", e))
-
-    # 2) Fallback multipart/form-data: el flujo estándar de Supabase Storage usa multipart/form-data.
-    try:
-        resp = requests.post(
+        resp = http.post(
             url,
             headers=_storage_headers(upsert=upsert, for_multipart=True),
             files={"file": (os.path.basename(object_path) or "archivo.bin", data, content_type)},
@@ -211,15 +310,31 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
         _storage_set_last_error(url=url, method="POST-multipart", exc=e)
         attempts.append(("POST-multipart", e))
 
-    # 3) Fallback PUT: útil cuando el backend interpreta upsert como replace/update de clave existente.
+    # 2) Fallback POST binario.
     try:
-        should_try = upsert
+        resp = http.post(
+            url,
+            headers=_storage_headers(content_type=content_type, upsert=upsert),
+            data=data,
+            timeout=STORAGE_TIMEOUT,
+        )
+        attempts.append(("POST-binary", resp))
+        if resp.status_code in (200, 201):
+            _storage_clear_last_error()
+            return True
+    except Exception as e:
+        _storage_set_last_error(url=url, method="POST-binary", exc=e)
+        attempts.append(("POST-binary", e))
+
+    # 3) Fallback PUT para reemplazo/upsert.
+    try:
+        should_try = bool(upsert)
         for _name, item in attempts:
             if hasattr(item, "status_code") and _storage_should_try_put(item):
                 should_try = True
                 break
         if should_try:
-            resp = requests.put(
+            resp = http.put(
                 url,
                 headers=_storage_headers(content_type=content_type, upsert=upsert),
                 data=data,
@@ -236,7 +351,7 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     last_resp = next((item for _name, item in reversed(attempts) if hasattr(item, "status_code")), None)
     if last_resp is not None:
         _storage_set_last_error(last_resp, url=url, method="storage_upload")
-        raise RuntimeError(f"Storage upload failed (HTTP {last_resp.status_code}): {(last_resp.text or '')[:300]}")
+        raise RuntimeError(f"Storage upload failed (HTTP {last_resp.status_code}): {_storage_error_summary(last_resp)}")
 
     last_exc = next((item for _name, item in reversed(attempts) if isinstance(item, Exception)), None)
     _storage_set_last_error(url=url, method="storage_upload", exc=last_exc)
@@ -252,7 +367,7 @@ def storage_download(object_path: str) -> bytes:
     last_exc = None
     for idx, url in enumerate(urls, start=1):
         try:
-            resp = requests.get(url, headers=_storage_headers(), timeout=STORAGE_TIMEOUT)
+            resp = get_http_session().get(url, headers=_storage_headers(), timeout=STORAGE_TIMEOUT)
         except Exception as e:
             last_exc = e
             _storage_set_last_error(url=url, method="storage_download", exc=e)
@@ -270,7 +385,7 @@ def storage_download(object_path: str) -> bytes:
     if last_resp is not None:
         _storage_set_last_error(last_resp, url=urls[-1], method="storage_download")
         raise RuntimeError(
-            f"Storage download failed (HTTP {last_resp.status_code}): {(last_resp.text or '')[:300]}"
+            f"Storage download failed (HTTP {last_resp.status_code}): {_storage_error_summary(last_resp)}"
         )
     if last_exc is not None:
         raise RuntimeError(f"Storage download failed: {last_exc}")
@@ -293,9 +408,11 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
                 last = st.session_state.get("storage_last_error", {})
                 sc = last.get("status")
                 extra = f" (HTTP {sc})" if sc else ""
+                detail = str(last.get("body") or last.get("exception") or "").strip()[:220]
+                hint = f" Detalle: {detail}." if detail else ""
                 st.warning(
                     "No se pudo subir el archivo a Supabase Storage" + extra + ". "
-                    "El documento quedó solo en almacenamiento local (puede perderse si Streamlit reinicia). "
+                    "El documento quedó solo en almacenamiento local (puede perderse si Streamlit reinicia)." + hint + " "
                     "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (opcional) y SUPABASE_STORAGE_BUCKET. "
                     "En Backup/Restore verás un diagnóstico, o revisa Manage app → Logs."
                 )
@@ -471,26 +588,47 @@ def fetch_assigned_workers(faena_id: int):
 
 def get_global_counts():
     """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
-    out = {}
-    pairs = [
-        ("mandantes", "SELECT COUNT(*) AS n FROM mandantes"),
-        ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena"),
-        ("faenas", "SELECT COUNT(*) AS n FROM faenas"),
-        ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'"),
-        ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
-        ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
-        ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
-        ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos"),
-        ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos"),
-        ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
-        ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes"),
-    ]
-    for key, sql in pairs:
-        try:
-            out[key] = int(fetch_df(sql)["n"].iloc[0])
-        except Exception:
-            out[key] = 0
-    return out
+    try:
+        row = fetch_df(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM mandantes) AS mandantes,
+                (SELECT COUNT(*) FROM contratos_faena) AS contratos_faena,
+                (SELECT COUNT(*) FROM faenas) AS faenas,
+                (SELECT COUNT(*) FROM faenas WHERE estado='ACTIVA') AS faenas_activas,
+                (SELECT COUNT(*) FROM trabajadores) AS trabajadores,
+                (SELECT COUNT(*) FROM asignaciones) AS asignaciones,
+                (SELECT COUNT(*) FROM trabajador_documentos) AS docs,
+                (SELECT COUNT(*) FROM empresa_documentos) AS docs_empresa,
+                (SELECT COUNT(*) FROM faena_empresa_documentos) AS docs_empresa_faena,
+                (SELECT COUNT(*) FROM export_historial) AS exports,
+                (SELECT COUNT(*) FROM export_historial_mes) AS exports_mes
+            """
+        )
+        if row.empty:
+            return {}
+        return {k: int(row.iloc[0].get(k, 0) or 0) for k in row.columns}
+    except Exception:
+        out = {}
+        pairs = [
+            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes"),
+            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena"),
+            ("faenas", "SELECT COUNT(*) AS n FROM faenas"),
+            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'"),
+            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
+            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
+            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
+            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos"),
+            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos"),
+            ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
+            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes"),
+        ]
+        for key, sql in pairs:
+            try:
+                out[key] = int(fetch_df(sql)["n"].iloc[0])
+            except Exception:
+                out[key] = 0
+        return out
 
 def norm_col(s: str) -> str:
     s = (s or "").strip().lower()
@@ -924,6 +1062,7 @@ def init_db():
 
 AUTH_ITERATIONS = 200_000
 LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png"
+LOGIN_LOGO_BYTES = get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 DEFAULT_PERMS = {
     "view_dashboard": True,
@@ -1120,7 +1259,7 @@ def auth_gate_ui():
 
     with cL:
         try:
-            st.image("https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png", width=260)
+            st.image(LOGIN_LOGO_BYTES or LOGIN_LOGO_URL, width=260)
         except Exception:
             pass
         st.markdown('<div class="auth-title">Control documental de faenas</div>', unsafe_allow_html=True)
@@ -1181,6 +1320,9 @@ def auth_gate_ui():
     st.stop()
 
 def fetch_df(q: str, params=()):
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1189,6 +1331,7 @@ def fetch_df(q: str, params=()):
         return pd.read_sql_query(q, c, params=params)
 
 def execute(q: str, params=()):
+    clear_app_caches()
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1201,6 +1344,7 @@ def execute(q: str, params=()):
 
 def execute_rowcount(q: str, params=()):
     # Igual que execute(), pero devuelve rowcount (útil para UPDATE condicional)
+    clear_app_caches()
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1219,8 +1363,8 @@ def execute_rowcount(q: str, params=()):
             return 0
 
 
-
 def executemany(q: str, seq_params):
+    clear_app_caches()
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1803,9 +1947,8 @@ Revisa estos puntos en **Secrets** de Streamlit Cloud:
     st.stop()
 
 def bootstrap_app():
-    ensure_dirs()
     try:
-        init_db()
+        _bootstrap_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     except Exception as e:
         show_bootstrap_error(e)
 
@@ -1868,7 +2011,7 @@ if st.session_state.get("nav_page") not in VISIBLE_PAGES:
 with st.sidebar:
     # Branding compacto
     try:
-        st.image("https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png", width=170)
+        st.image(LOGIN_LOGO_BYTES or LOGIN_LOGO_URL, width=170)
     except Exception:
         pass
     st.markdown("**Control documental**")
