@@ -31,6 +31,11 @@ st.set_page_config(page_title="Control Documental Faenas", layout="wide")
 APP_NAME = "Control Documental de Faenas"
 DB_PATH = "app.db"
 UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
+MAX_UPLOAD_FILE_BYTES = 1 * 1024 * 1024
+UPLOAD_HELP_TEXT = (
+    "Máximo por archivo: 1 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
+    "Si aun así excede el límite, redúcelo antes de subirlo. Sugerencia: puedes comprimirlo en iLovePDF."
+)
 
 
 # Fingerprints/cache helpers
@@ -388,6 +393,92 @@ def storage_download(object_path: str) -> bytes:
     if last_exc is not None:
         raise RuntimeError(f"Storage download failed: {last_exc}")
     raise RuntimeError("Storage download failed: sin respuesta del servidor.")
+
+
+def storage_delete(object_path: str):
+    op = _encode_storage_path(object_path)
+    if not op:
+        return False
+    url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
+    try:
+        resp = get_http_session().delete(url, headers=_storage_headers(), timeout=STORAGE_TIMEOUT)
+    except Exception as e:
+        _storage_set_last_error(url=url, method="storage_delete", exc=e)
+        raise RuntimeError(f"Storage delete failed: {e}")
+
+    if resp.status_code in (200, 204, 404):
+        _storage_clear_last_error()
+        return True
+
+    _storage_set_last_error(resp, url=url, method="storage_delete")
+    raise RuntimeError(f"Storage delete failed (HTTP {resp.status_code}): {_storage_error_summary(resp)}")
+
+def human_file_size(num_bytes: int) -> str:
+    size = float(max(int(num_bytes or 0), 0))
+    units = ["B", "KB", "MB", "GB"]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} GB"
+
+
+def render_upload_help():
+    st.caption("💡 " + UPLOAD_HELP_TEXT)
+
+
+def _zip_single_file_bytes(file_name: str, file_bytes: bytes) -> tuple[str, bytes]:
+    zip_name = str(file_name or "archivo").strip() or "archivo"
+    if not zip_name.lower().endswith('.zip'):
+        zip_name = f"{zip_name}.zip"
+    inner_name = str(file_name or "archivo").strip() or "archivo"
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.writestr(inner_name, file_bytes)
+    return zip_name, mem.getvalue()
+
+
+def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str | None = None, size_limit: int = MAX_UPLOAD_FILE_BYTES):
+    raw_name = str(file_name or "archivo").strip() or "archivo"
+    raw_bytes = bytes(file_bytes or b"")
+    raw_type = content_type or "application/octet-stream"
+    raw_size = len(raw_bytes)
+    payload = {
+        "file_name": raw_name,
+        "file_bytes": raw_bytes,
+        "content_type": raw_type,
+        "original_name": raw_name,
+        "original_size": raw_size,
+        "stored_size": raw_size,
+        "compressed": False,
+        "compression_note": None,
+    }
+    if raw_size <= int(size_limit):
+        return payload
+
+    zip_name, zip_bytes = _zip_single_file_bytes(raw_name, raw_bytes)
+    zip_size = len(zip_bytes)
+    if zip_size <= int(size_limit):
+        payload.update({
+            "file_name": zip_name,
+            "file_bytes": zip_bytes,
+            "content_type": "application/zip",
+            "stored_size": zip_size,
+            "compressed": True,
+            "compression_note": (
+                f"El archivo superaba 1 MB y se guardará comprimido como {zip_name} "
+                f"({human_file_size(raw_size)} → {human_file_size(zip_size)})."
+            ),
+        })
+        return payload
+
+    st.error(
+        f"El límite de carga por archivo es de 1 MB. El archivo pesa {human_file_size(raw_size)} y "
+        f"aun comprimido queda en {human_file_size(zip_size)}. Reduce el tamaño antes de cargarlo. "
+        f"Sugerencia: puedes comprimirlo en iLovePDF."
+    )
+    st.stop()
+
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
@@ -1401,6 +1492,103 @@ def save_file(folder_parts, file_name: str, file_bytes: bytes):
     with open(path, "wb") as f:
         f.write(file_bytes)
     return path
+
+FILE_REF_TABLES = [
+    "contratos_faena",
+    "faena_anexos",
+    "trabajador_documentos",
+    "empresa_documentos",
+    "faena_empresa_documentos",
+    "export_historial",
+    "export_historial_mes",
+]
+DOCUMENT_TABLES = {
+    "empresa_documentos": "documento empresa",
+    "faena_empresa_documentos": "documento empresa por faena",
+    "trabajador_documentos": "documento trabajador",
+}
+
+
+def _local_delete_file(file_path: str | None):
+    path = str(file_path or "").strip()
+    if not path:
+        return False
+    if os.path.exists(path):
+        os.remove(path)
+        return True
+    return False
+
+
+def _count_file_references(file_path: str | None, bucket: str | None, object_path: str | None, *, exclude_table: str | None = None, exclude_id: int | None = None) -> int:
+    total = 0
+    for tbl in FILE_REF_TABLES:
+        where = []
+        params = []
+        if object_path:
+            where.append("object_path=?")
+            params.append(str(object_path))
+            if bucket:
+                where.append("bucket=?")
+                params.append(str(bucket))
+        elif file_path:
+            where.append("file_path=?")
+            params.append(str(file_path))
+        else:
+            continue
+        if exclude_table == tbl and exclude_id is not None:
+            where.append("id<>?")
+            params.append(int(exclude_id))
+        q = f"SELECT COUNT(*) AS n FROM {tbl} WHERE " + " AND ".join(where)
+        df = fetch_df(q, tuple(params))
+        if not df.empty:
+            total += int(df.iloc[0]["n"] or 0)
+    return int(total)
+
+
+def cleanup_file_assets(file_path: str | None, bucket: str | None, object_path: str | None):
+    issues = []
+    if object_path and storage_enabled():
+        try:
+            storage_delete(str(object_path))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            issues.append(f"Storage: {e}")
+    try:
+        _local_delete_file(file_path)
+    except Exception as e:
+        issues.append(f"Local: {e}")
+    return issues
+
+
+def delete_uploaded_document_record(table_name: str, row_id: int):
+    if table_name not in DOCUMENT_TABLES:
+        raise ValueError("Tabla no permitida para eliminación.")
+    df = fetch_df(
+        f"SELECT id, nombre_archivo, file_path, bucket, object_path FROM {table_name} WHERE id=?",
+        (int(row_id),),
+    )
+    if df.empty:
+        raise FileNotFoundError("El documento ya no existe en la base de datos.")
+    row = df.iloc[0]
+    file_path = row.get("file_path", None)
+    bucket = row.get("bucket", None)
+    object_path = row.get("object_path", None)
+    file_name = row.get("nombre_archivo", "documento")
+
+    refs = _count_file_references(file_path, bucket, object_path, exclude_table=table_name, exclude_id=int(row_id))
+    execute(f"DELETE FROM {table_name} WHERE id=?", (int(row_id),))
+
+    cleanup_issues = []
+    if refs == 0:
+        cleanup_issues = cleanup_file_assets(file_path, bucket, object_path)
+
+    return {
+        "file_name": file_name,
+        "cleanup_issues": cleanup_issues,
+        "shared_refs": refs,
+    }
+
 
 def trabajador_folder(apellidos: str, nombres: str, rut: str) -> str:
     return f"{safe_name(apellidos)}_{safe_name(nombres)}_{safe_name(rut)}"
@@ -2528,6 +2716,7 @@ def page_contratos_faena():
             fi = st.date_input("Fecha inicio (opcional)", value=None)
             ft = st.date_input("Fecha término (opcional)", value=None)
             archivo = st.file_uploader("Archivo contrato (opcional)", key="up_contrato_faena", type=None)
+            render_upload_help()
             ok = st.form_submit_button("Guardar contrato de faena", type="primary")
 
         if ok:
@@ -2541,9 +2730,11 @@ def page_contratos_faena():
                 sha = None
                 created_at = datetime.utcnow().isoformat(timespec="seconds")
                 if archivo is not None:
-                    b = archivo.getvalue()
-                    file_path, bucket, object_path = save_file_online(["contratos_faena", mandante_id], archivo.name, b, content_type=getattr(archivo, "type", None) or "application/octet-stream")
-                    sha = sha256_bytes(b)
+                    payload = prepare_upload_payload(archivo.name, archivo.getvalue(), getattr(archivo, "type", None) or "application/octet-stream")
+                    file_path, bucket, object_path = save_file_online(["contratos_faena", mandante_id], payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+                    sha = sha256_bytes(payload["file_bytes"])
+                    if payload["compressed"] and payload.get("compression_note"):
+                        st.info(payload["compression_note"])
 
                 execute(
                     "INSERT INTO contratos_faena(mandante_id, nombre, fecha_inicio, fecha_termino, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -2613,15 +2804,18 @@ def page_contratos_faena():
         st.markdown("### 📎 Archivo del contrato")
 
         up = st.file_uploader("Subir / reemplazar archivo", key="up_contrato_existente", type=None)
+        render_upload_help()
         cfa1, cfa2 = st.columns([1, 1])
         with cfa1:
             if st.button("Guardar archivo", type="primary", use_container_width=True):
                 if up is None:
                     st.error("Debes subir un archivo primero.")
                     st.stop()
-                b = up.getvalue()
-                file_path, bucket, object_path = save_file_online(["contratos_faena", "id", contrato_id], up.name, b, content_type=getattr(up, "type", None) or "application/octet-stream")
-                sha = sha256_bytes(b)
+                payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, "type", None) or "application/octet-stream")
+                file_path, bucket, object_path = save_file_online(["contratos_faena", "id", contrato_id], payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+                sha = sha256_bytes(payload["file_bytes"])
+                if payload["compressed"] and payload.get("compression_note"):
+                    st.info(payload["compression_note"])
                 execute(
                     "UPDATE contratos_faena SET file_path=?, bucket=?, object_path=?, sha256=?, created_at=? WHERE id=?",
                     (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(contrato_id)),
@@ -2820,17 +3014,20 @@ def page_faenas():
 
         st.markdown("### Subir anexo")
         up = st.file_uploader("Archivo anexo", key="up_anexo_faena", type=None)
+        render_upload_help()
         if st.button("Guardar anexo", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo primero.")
                 st.stop()
-            b = up.getvalue()
-            file_path, bucket, object_path = save_file_online(["faenas", faena_id, "anexos"], up.name, b, content_type=getattr(up, "type", None) or "application/octet-stream")
-            sha = sha256_bytes(b)
+            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, "type", None) or "application/octet-stream")
+            file_path, bucket, object_path = save_file_online(["faenas", faena_id, "anexos"], payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+            sha = sha256_bytes(payload["file_bytes"])
             execute(
                 "INSERT INTO faena_anexos(faena_id, nombre, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (int(faena_id), up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                (int(faena_id), payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
+            if payload["compressed"] and payload.get("compression_note"):
+                st.info(payload["compression_note"])
             st.success("Anexo guardado.")
             auto_backup_db("anexo_faena")
             st.rerun()
@@ -3492,19 +3689,22 @@ def page_documentos_empresa():
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
 
         up = st.file_uploader("Archivo", key="up_doc_empresa", type=None)
+        render_upload_help()
         if st.button("Guardar documento empresa", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo.")
                 st.stop()
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            b = up.getvalue()
+            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
             folder = ["empresa", safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
-            sha = sha256_bytes(b)
+            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+            sha = sha256_bytes(payload["file_bytes"])
             execute(
                 "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                (doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
+            if payload["compressed"] and payload.get("compression_note"):
+                st.info(payload["compression_note"])
             st.success("Documento empresa guardado.")
             auto_backup_db("doc_empresa")
             st.rerun()
@@ -3524,7 +3724,7 @@ def page_documentos_empresa():
             st.dataframe(show, use_container_width=True, hide_index=True)
 
             st.divider()
-            st.markdown("#### ⬇️ Descargar documento")
+            st.markdown("#### 🔎 Gestionar documento")
             pick_id = st.selectbox(
                 "Documento",
                 docs["id"].tolist(),
@@ -3551,6 +3751,23 @@ def page_documentos_empresa():
                     "El archivo no está disponible (Storage/disco). "
                     "Verifica configuración de Storage o vuelve a cargar el documento."
                 )
+
+            confirm_del = st.checkbox(
+                "Confirmo que quiero eliminar este documento cargado.",
+                key="emp_del_confirm",
+            )
+            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="emp_del_btn"):
+                if not confirm_del:
+                    st.error("Debes confirmar la eliminación.")
+                    st.stop()
+                result = delete_uploaded_document_record("empresa_documentos", int(pick_id))
+                if result["shared_refs"]:
+                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
+                elif result["cleanup_issues"]:
+                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                st.success(f"Documento eliminado: {result['file_name']}")
+                auto_backup_db("doc_empresa_delete")
+                st.rerun()
 def page_documentos_empresa_faena():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
 
@@ -3606,21 +3823,24 @@ def page_documentos_empresa_faena():
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación, Permiso, Seguro adicional", key="emp_faena_otro")
 
         up = st.file_uploader("Archivo", key="up_doc_emp_faena", type=None)
+        render_upload_help()
         if st.button("Guardar documento (empresa por faena)", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo primero.")
                 st.stop()
 
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            b = up.getvalue()
+            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
             folder = ["faenas", faena_id, "empresa", safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
-            sha = sha256_bytes(b)
+            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+            sha = sha256_bytes(payload["file_bytes"])
 
             execute(
                 "INSERT INTO faena_empresa_documentos(faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (int(faena_id), doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                (int(faena_id), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
+            if payload["compressed"] and payload.get("compression_note"):
+                st.info(payload["compression_note"])
             st.success("Documento guardado (empresa por faena).")
             auto_backup_db("doc_empresa_faena")
             st.rerun()
@@ -3633,34 +3853,51 @@ def page_documentos_empresa_faena():
             show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.markdown("#### 🔎 Ver / Descargar")
-    pick_id = st.selectbox(
-        "Documento",
-        docs["id"].tolist(),
-        format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-        key="empf_pick_doc",
-    )
-    row = docs[docs["id"] == pick_id].iloc[0]
-    fpath = row.get("file_path", "")
-    bucket = row.get("bucket", None)
-    object_path = row.get("object_path", None)
-    fname = row.get("nombre_archivo", "documento")
-    try:
-        b = load_file_anywhere(fpath, bucket, object_path)
-        st.download_button(
-            "Descargar documento",
-            data=b,
-            file_name=fname,
-            mime="application/octet-stream",
-            use_container_width=True,
-            key="empf_dl_btn",
-        )
-    except Exception:
-        st.warning(
-            "El archivo no está disponible (Storage/disco). "
-            "Verifica configuración de Storage o vuelve a cargar el documento."
-        )
+            st.divider()
+            st.markdown("#### 🔎 Gestionar documento")
+            pick_id = st.selectbox(
+                "Documento",
+                docs["id"].tolist(),
+                format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+                key="empf_pick_doc",
+            )
+            row = docs[docs["id"] == pick_id].iloc[0]
+            fpath = row.get("file_path", "")
+            bucket = row.get("bucket", None)
+            object_path = row.get("object_path", None)
+            fname = row.get("nombre_archivo", "documento")
+            try:
+                b = load_file_anywhere(fpath, bucket, object_path)
+                st.download_button(
+                    "Descargar documento",
+                    data=b,
+                    file_name=fname,
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                    key="empf_dl_btn",
+                )
+            except Exception:
+                st.warning(
+                    "El archivo no está disponible (Storage/disco). "
+                    "Verifica configuración de Storage o vuelve a cargar el documento."
+                )
+
+            confirm_del = st.checkbox(
+                "Confirmo que quiero eliminar este documento cargado.",
+                key="empf_del_confirm",
+            )
+            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="empf_del_btn"):
+                if not confirm_del:
+                    st.error("Debes confirmar la eliminación.")
+                    st.stop()
+                result = delete_uploaded_document_record("faena_empresa_documentos", int(pick_id))
+                if result["shared_refs"]:
+                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
+                elif result["cleanup_issues"]:
+                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                st.success(f"Documento eliminado: {result['file_name']}")
+                auto_backup_db("doc_empresa_faena_delete")
+                st.rerun()
 
 def page_documentos_trabajador():
     ui_header(
@@ -3774,16 +4011,19 @@ def page_documentos_trabajador():
             )
 
         up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
+        render_upload_help()
         if st.button("Guardar documento", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo primero.")
                 st.stop()
 
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            b = up.getvalue()
+            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
             folder = ["trabajadores", tid, safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, up.name, b, content_type=getattr(up, 'type', None) or 'application/octet-stream')
-            sha = sha256_bytes(b)
+            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
+            sha = sha256_bytes(payload["file_bytes"])
+            if payload["compressed"] and payload.get("compression_note"):
+                st.info(payload["compression_note"])
 
             try:
 
@@ -3791,7 +4031,7 @@ def page_documentos_trabajador():
 
                     "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
 
-                    (int(tid), doc_tipo, up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                    (int(tid), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
 
                 )
 
@@ -3807,7 +4047,7 @@ def page_documentos_trabajador():
 
                         "WHERE trabajador_id=? AND doc_tipo=? AND nombre_archivo=?",
 
-                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo, up.name),
+                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo, payload["file_name"]),
 
                     )
 
@@ -3819,7 +4059,7 @@ def page_documentos_trabajador():
 
                             "WHERE trabajador_id=? AND doc_tipo=?",
 
-                            (up.name, file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo),
+                            (payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo),
 
                         )
 
@@ -3838,82 +4078,71 @@ def page_documentos_trabajador():
             show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.markdown("#### 🔎 Ver / Descargar")
+            st.divider()
+            st.markdown("#### 🔎 Gestionar documento")
 
-    # Evita IndexError cuando no hay docs o cuando la selección quedó “pegada” de otro trabajador
-    if docs.empty or ("id" not in docs.columns):
-        st.info("(sin documentos para descargar)")
-        return
+            ids = docs["id"].tolist()
+            cur = st.session_state.get("trab_pick_doc", None)
+            if cur not in ids:
+                st.session_state["trab_pick_doc"] = ids[0]
 
-    ids = docs["id"].tolist()
-    if not ids:
-        st.info("(sin documentos para descargar)")
-        return
+            def _fmt_doc(x):
+                try:
+                    r = docs.loc[docs["id"] == x].iloc[0]
+                    return f"{r.get('doc_tipo','DOC')} — {r.get('nombre_archivo','archivo')}"
+                except Exception:
+                    return f"ID {x}"
 
-    # Si el valor guardado en session_state no existe en esta lista, resetea al primero
-    cur = st.session_state.get("trab_pick_doc", None)
-    if cur not in ids:
-        st.session_state["trab_pick_doc"] = ids[0]
+            pick_id = st.selectbox(
+                "Documento",
+                ids,
+                format_func=_fmt_doc,
+                key="trab_pick_doc",
+            )
 
-    def _fmt_doc(x):
-        try:
-            r = docs.loc[docs["id"] == x].iloc[0]
-            return f"{r.get('doc_tipo','DOC')} — {r.get('nombre_archivo','archivo')}"
-        except Exception:
-            return f"ID {x}"
+            sel = docs.loc[docs["id"] == pick_id]
+            if sel.empty:
+                st.warning("El documento seleccionado ya no está disponible en la lista. Vuelve a seleccionar.")
+                return
 
-    pick_id = st.selectbox(
-        "Documento",
-        ids,
-        format_func=_fmt_doc,
-        key="trab_pick_doc",
-    )
+            row = sel.iloc[0]
+            fpath = row.get("file_path", "")
+            bucket = row.get("bucket", None)
+            object_path = row.get("object_path", None)
+            fname = row.get("nombre_archivo", "documento")
 
-    sel = docs.loc[docs["id"] == pick_id]
-    if sel.empty:
-        st.warning("El documento seleccionado ya no está disponible en la lista. Vuelve a seleccionar.")
-        return
+            try:
+                b = load_file_anywhere(fpath, bucket, object_path)
+                st.download_button(
+                    "Descargar documento",
+                    data=b,
+                    file_name=fname,
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                    key="trab_dl_btn",
+                )
+            except Exception:
+                st.warning(
+                    "El archivo no está disponible (Storage/disco). "
+                    "Verifica configuración de Storage o vuelve a cargar el documento."
+                )
 
-    row = sel.iloc[0]
-
-    fpath = row.get("file_path", "")
-
-    bucket = row.get("bucket", None)
-
-    object_path = row.get("object_path", None)
-
-    fname = row.get("nombre_archivo", "documento")
-
-    try:
-
-        b = load_file_anywhere(fpath, bucket, object_path)
-
-        st.download_button(
-
-            "Descargar documento",
-
-            data=b,
-
-            file_name=fname,
-
-            mime="application/octet-stream",
-
-            use_container_width=True,
-
-            key="trab_dl_btn",
-
-        )
-
-    except Exception:
-
-        st.warning(
-
-            "El archivo no está disponible (Storage/disco). "
-
-            "Verifica configuración de Storage o vuelve a cargar el documento."
-
-        )
+            confirm_del = st.checkbox(
+                "Confirmo que quiero eliminar este documento cargado.",
+                key="trab_del_confirm",
+            )
+            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="trab_del_btn"):
+                if not confirm_del:
+                    st.error("Debes confirmar la eliminación.")
+                    st.stop()
+                result = delete_uploaded_document_record("trabajador_documentos", int(pick_id))
+                if result["shared_refs"]:
+                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
+                elif result["cleanup_issues"]:
+                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                st.success(f"Documento eliminado: {result['file_name']}")
+                auto_backup_db("doc_trabajador_delete")
+                st.rerun()
 
 def _get_bytes(file_path, bucket, object_path):
     try:
