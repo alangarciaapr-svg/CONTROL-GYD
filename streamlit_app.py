@@ -529,14 +529,17 @@ def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: s
 
 
 ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
+DOC_TIPO_LABELS = {
+    "CONTRATO_TRABAJO": "CONTRATO",
+    "REGISTRO_EPP": "REGISTRO DE EPP",
+    "ENTREGA_RIOHS": "REGISTRO ENTREGA DE RIOHS",
+    "IRL": "IRL",
+}
 DOC_OBLIGATORIOS = [
+    "CONTRATO_TRABAJO",
     "REGISTRO_EPP",
     "ENTREGA_RIOHS",
     "IRL",
-    "CONTRATO_TRABAJO",
-    "ANEXO_CONTRATO",
-    "LIQUIDACIONES",
-    "FINIQUITO",
 ]
 DOC_EMPRESA_SUGERIDOS = [
     "CERTIFICADO_CUMPLIMIENTO_LABORAL",
@@ -552,6 +555,14 @@ REQ_DOCS_N = len(DOC_OBLIGATORIOS)
 # ----------------------------
 # Helpers
 # ----------------------------
+def doc_tipo_label(value: str) -> str:
+    return DOC_TIPO_LABELS.get(str(value), str(value))
+
+
+def doc_tipo_join(values) -> str:
+    return ", ".join(doc_tipo_label(v) for v in values)
+
+
 def inject_css():
     st.markdown(
         """
@@ -3987,7 +3998,7 @@ def page_documentos_trabajador():
                 st.metric("Trabajadores OK", f"{ok}/{total}")
                 for k, missing in pend.items():
                     if missing:
-                        st.error(f"{k} — faltan: {', '.join(missing)}")
+                        st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
                     else:
                         st.success(f"{k} — OK")
     else:
@@ -4017,7 +4028,7 @@ def page_documentos_trabajador():
     col3.metric("Faltan", len(faltan))
 
     if faltan:
-        st.warning("Faltan obligatorios: " + ", ".join(faltan))
+        st.warning("Faltan obligatorios: " + doc_tipo_join(faltan))
     else:
         st.success("Trabajador completo (obligatorios OK).")
 
@@ -4025,11 +4036,11 @@ def page_documentos_trabajador():
 
     with tab1:
         st.caption("Tipos obligatorios configurados:")
-        st.code("\n".join(DOC_OBLIGATORIOS))
+        st.code("\n".join(doc_tipo_label(d) for d in DOC_OBLIGATORIOS))
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick")
+            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input(
                 "Si eliges OTRO, escribe el nombre",
@@ -4213,7 +4224,7 @@ def page_export_zip():
         else:
             for k, missing in pend.items():
                 if missing:
-                    st.error(f"{k} — faltan: {', '.join(missing)}")
+                    st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
                 else:
                     st.success(f"{k} — OK")
 
@@ -5379,7 +5390,7 @@ def page_documentos_trabajador():
                 st.metric("Trabajadores OK", f"{ok}/{total}")
                 for k, missing in pend.items():
                     if missing:
-                        st.error(f"{k} — faltan: {', '.join(missing)}")
+                        st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
                     else:
                         st.success(f"{k} — OK")
     else:
@@ -5409,7 +5420,7 @@ def page_documentos_trabajador():
     col3.metric("Faltan", len(faltan))
 
     if faltan:
-        st.warning("Faltan obligatorios: " + ", ".join(faltan))
+        st.warning("Faltan obligatorios: " + doc_tipo_join(faltan))
     else:
         st.success("Trabajador completo (obligatorios OK).")
 
@@ -5417,11 +5428,11 @@ def page_documentos_trabajador():
 
     with tab1:
         st.caption("Tipos obligatorios configurados:")
-        st.code("\n".join(DOC_OBLIGATORIOS))
+        st.code("\n".join(doc_tipo_label(d) for d in DOC_OBLIGATORIOS))
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick")
+            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input(
                 "Si eliges OTRO, escribe el nombre",
@@ -5605,7 +5616,7 @@ def page_export_zip():
         else:
             for k, missing in pend.items():
                 if missing:
-                    st.error(f"{k} — faltan: {', '.join(missing)}")
+                    st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
                 else:
                     st.success(f"{k} — OK")
 
