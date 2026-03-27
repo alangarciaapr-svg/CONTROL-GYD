@@ -552,6 +552,16 @@ DOC_EMPRESA_REQUERIDOS = [
 ]
 REQ_DOCS_N = len(DOC_OBLIGATORIOS)
 
+ASSIGNACION_INSERT_SQL = """
+INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado)
+SELECT ?,?,?,?,?,?
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM asignaciones
+    WHERE faena_id=? AND trabajador_id=?
+)
+"""
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -3494,9 +3504,9 @@ def page_asignar_trabajadores():
                     st.stop()
                 params = []
                 for tid in seleccion:
-                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
+                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)))
                 executemany(
-                    "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
+                    ASSIGNACION_INSERT_SQL,
                     params,
                 )
                 st.success("Trabajadores asignados.")
@@ -3614,8 +3624,8 @@ def page_asignar_trabajadores():
                                 if tid:
                                     cursor_execute(
                                         c,
-                                        "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                        ASSIGNACION_INSERT_SQL,
+                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)),
                                     )
                                     assigned += 1
 
@@ -4886,9 +4896,9 @@ def page_asignar_trabajadores():
                     st.stop()
                 params = []
                 for tid in seleccion:
-                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"))
+                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)))
                 executemany(
-                    "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
+                    ASSIGNACION_INSERT_SQL,
                     params,
                 )
                 st.success("Trabajadores asignados.")
@@ -5006,8 +5016,8 @@ def page_asignar_trabajadores():
                                 if tid:
                                     cursor_execute(
                                         c,
-                                        "INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado) VALUES(?,?,?,?,?,?) ON CONFLICT(faena_id, trabajador_id) DO NOTHING",
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                        ASSIGNACION_INSERT_SQL,
+                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)),
                                     )
                                     assigned += 1
 
