@@ -1488,7 +1488,8 @@ def executemany(q: str, seq_params):
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
-            c.executemany(q2, seq_params)
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
             c.commit()
             return
     with conn() as c:
