@@ -31,9 +31,9 @@ st.set_page_config(page_title="Control Documental Faenas", layout="wide")
 APP_NAME = "Control Documental de Faenas"
 DB_PATH = "app.db"
 UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
-MAX_UPLOAD_FILE_BYTES = 1 * 1024 * 1024
+MAX_UPLOAD_FILE_BYTES = int(1.5 * 1024 * 1024)
 UPLOAD_HELP_TEXT = (
-    "Máximo por archivo: 1 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
+    "Máximo por archivo: 1,5 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
     "Si aun así excede el límite, redúcelo antes de subirlo. Sugerencia: puedes comprimirlo en iLovePDF."
 )
 
@@ -466,14 +466,14 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
             "stored_size": zip_size,
             "compressed": True,
             "compression_note": (
-                f"El archivo superaba 1 MB y se guardará comprimido como {zip_name} "
+                f"El archivo superaba 1,5 MB y se guardará comprimido como {zip_name} "
                 f"({human_file_size(raw_size)} → {human_file_size(zip_size)})."
             ),
         })
         return payload
 
     st.error(
-        f"El límite de carga por archivo es de 1 MB. El archivo pesa {human_file_size(raw_size)} y "
+        f"El límite de carga por archivo es de 1,5 MB. El archivo pesa {human_file_size(raw_size)} y "
         f"aun comprimido queda en {human_file_size(zip_size)}. Reduce el tamaño antes de cargarlo. "
         f"Sugerencia: puedes comprimirlo en iLovePDF."
     )
