@@ -554,12 +554,8 @@ REQ_DOCS_N = len(DOC_OBLIGATORIOS)
 
 ASSIGNACION_INSERT_SQL = """
 INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado)
-SELECT ?,?,?,?,?,?
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM asignaciones
-    WHERE faena_id=? AND trabajador_id=?
-)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT DO NOTHING
 """
 
 # ----------------------------
@@ -3502,14 +3498,28 @@ def page_asignar_trabajadores():
                 if len(seleccion) == 0:
                     st.error("Selecciona al menos un trabajador para asignar.")
                     st.stop()
-                params = []
-                for tid in seleccion:
-                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)))
-                executemany(
-                    ASSIGNACION_INSERT_SQL,
-                    params,
-                )
-                st.success("Trabajadores asignados.")
+                inserted_count = 0
+                skipped_count = 0
+                with conn() as c:
+                    for tid in seleccion:
+                        cur = cursor_execute(
+                            c,
+                            ASSIGNACION_INSERT_SQL,
+                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                        )
+                        try:
+                            rc = int(cur.rowcount or 0)
+                        except Exception:
+                            rc = 0
+                        if rc > 0:
+                            inserted_count += 1
+                        else:
+                            skipped_count += 1
+                    c.commit()
+                msg = f"Trabajadores asignados: {inserted_count}."
+                if skipped_count:
+                    msg += f" Omitidos por ya existir: {skipped_count}."
+                st.success(msg)
                 auto_backup_db("asignacion")
                 st.rerun()
 
@@ -3622,12 +3632,15 @@ def page_asignar_trabajadores():
 
                                 tid = rut_to_id.get(rut)
                                 if tid:
-                                    cursor_execute(
+                                    cur_asg = cursor_execute(
                                         c,
                                         ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)),
+                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
-                                    assigned += 1
+                                    try:
+                                        assigned += int(cur_asg.rowcount or 0)
+                                    except Exception:
+                                        pass
 
                             c.commit()
 
@@ -4894,14 +4907,28 @@ def page_asignar_trabajadores():
                 if len(seleccion) == 0:
                     st.error("Selecciona al menos un trabajador para asignar.")
                     st.stop()
-                params = []
-                for tid in seleccion:
-                    params.append((int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)))
-                executemany(
-                    ASSIGNACION_INSERT_SQL,
-                    params,
-                )
-                st.success("Trabajadores asignados.")
+                inserted_count = 0
+                skipped_count = 0
+                with conn() as c:
+                    for tid in seleccion:
+                        cur = cursor_execute(
+                            c,
+                            ASSIGNACION_INSERT_SQL,
+                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                        )
+                        try:
+                            rc = int(cur.rowcount or 0)
+                        except Exception:
+                            rc = 0
+                        if rc > 0:
+                            inserted_count += 1
+                        else:
+                            skipped_count += 1
+                    c.commit()
+                msg = f"Trabajadores asignados: {inserted_count}."
+                if skipped_count:
+                    msg += f" Omitidos por ya existir: {skipped_count}."
+                st.success(msg)
                 auto_backup_db("asignacion")
                 st.rerun()
 
@@ -5014,12 +5041,15 @@ def page_asignar_trabajadores():
 
                                 tid = rut_to_id.get(rut)
                                 if tid:
-                                    cursor_execute(
+                                    cur_asg = cursor_execute(
                                         c,
                                         ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA", int(faena_id), int(tid)),
+                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
-                                    assigned += 1
+                                    try:
+                                        assigned += int(cur_asg.rowcount or 0)
+                                    except Exception:
+                                        pass
 
                             c.commit()
 
