@@ -873,8 +873,9 @@ def _format_rut_session_value(key: str):
 
 
 def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None):
-    formatted_value = format_rut_chileno(value)
-    if key not in st.session_state:
+    current_value = st.session_state.get(key, value)
+    formatted_value = format_rut_chileno(current_value)
+    if st.session_state.get(key) != formatted_value:
         st.session_state[key] = formatted_value
     return st.text_input(
         label,
@@ -887,6 +888,32 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
 
 
 @st.cache_data(show_spinner=False)
+def _reset_trabajador_create_state():
+    defaults = {
+        "trabajador_create_rut": "",
+        "trabajador_create_nombres": "",
+        "trabajador_create_apellidos": "",
+        "trabajador_create_cargo": "",
+        "trabajador_create_cc": "",
+        "trabajador_create_email": "",
+        "trabajador_create_fc": None,
+        "trabajador_create_ve": None,
+    }
+    for _k, _v in defaults.items():
+        st.session_state[_k] = _v
+
+
+def _apply_pending_trabajador_create_reset():
+    if st.session_state.pop("_trabajador_create_reset_pending", False):
+        _reset_trabajador_create_state()
+
+
+def _show_pending_trabajador_create_flash():
+    msg = st.session_state.pop("_trabajador_create_flash", None)
+    if msg:
+        st.success(msg)
+
+
 def build_trabajadores_template_xlsx() -> bytes:
     ejemplo = pd.DataFrame([
         {
@@ -3693,6 +3720,8 @@ def _page_trabajadores_impl():
         t_create, t_edit = st.tabs(["➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
 
         with t_create:
+            _apply_pending_trabajador_create_reset()
+            _show_pending_trabajador_create_flash()
             st.caption("El RUT se formatea automáticamente al estilo chileno: XX.XXX.XXX-X")
             rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
             nombres = st.text_input("Nombres", placeholder="Juan", key="trabajador_create_nombres")
@@ -3705,18 +3734,19 @@ def _page_trabajadores_impl():
             ok = st.button("Guardar trabajador", type="primary", key="trabajador_create_btn")
 
             if ok:
-                if not (rut.strip() and nombres.strip() and apellidos.strip()):
+                rut_norm = clean_rut(rut)
+                nombres_v = nombres.strip()
+                apellidos_v = apellidos.strip()
+                cargo_v = cargo.strip()
+                centro_costo_v = centro_costo.strip()
+                email_v = email.strip()
+                fecha_contrato_v = str(fecha_contrato) if fecha_contrato else None
+                vigencia_examen_v = str(vigencia_examen) if vigencia_examen else None
+
+                if not (rut_norm.strip() and nombres_v and apellidos_v):
                     st.error("Debes completar RUT, Nombres y Apellidos.")
                     st.stop()
                 try:
-                    rut_norm = clean_rut(rut)
-                    nombres_v = nombres.strip()
-                    apellidos_v = apellidos.strip()
-                    cargo_v = cargo.strip()
-                    centro_costo_v = centro_costo.strip()
-                    email_v = email.strip()
-                    fecha_contrato_v = str(fecha_contrato) if fecha_contrato else None
-                    vigencia_examen_v = str(vigencia_examen) if vigencia_examen else None
                     with conn() as c:
                         _action, _tid = _trabajador_insert_or_update(
                             c,
@@ -3732,15 +3762,8 @@ def _page_trabajadores_impl():
                             existing_id=None,
                         )
                         c.commit()
-                    st.session_state["trabajador_create_rut"] = ""
-                    st.session_state["trabajador_create_nombres"] = ""
-                    st.session_state["trabajador_create_apellidos"] = ""
-                    st.session_state["trabajador_create_cargo"] = ""
-                    st.session_state["trabajador_create_cc"] = ""
-                    st.session_state["trabajador_create_email"] = ""
-                    st.session_state["trabajador_create_fc"] = None
-                    st.session_state["trabajador_create_ve"] = None
-                    st.success("Trabajador guardado.")
+                    st.session_state["_trabajador_create_reset_pending"] = True
+                    st.session_state["_trabajador_create_flash"] = "Trabajador guardado."
                     auto_backup_db("trabajador")
                     st.rerun()
                 except Exception as e:
