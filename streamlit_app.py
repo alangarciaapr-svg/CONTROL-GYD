@@ -708,22 +708,39 @@ def safe_name(s: str) -> str:
 
 
 
-def fetch_assigned_workers(faena_id: int):
-    """Devuelve dataframe de trabajadores asignados a una faena.
+def fetch_df_uncached(q: str, params=()):
+    """SELECT sin cache para flujos que deben reflejar cambios inmediatamente."""
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
 
-    Tolera asignaciones antiguas con estado NULL/vacío y solo excluye las cerradas.
+
+def fetch_assigned_workers(faena_id: int, fresh: bool = True):
+    """Devuelve trabajadores asignados a una faena.
+
+    Usa lectura sin cache por defecto para evitar que Documentos Trabajador
+    muestre una lista antigua justo después de asignar personal.
+    Tolera estados NULL/vacíos/minúsculas y solo excluye asignaciones cerradas.
     """
-    return fetch_df(
-        '''
-        SELECT t.id, t.rut, t.apellidos, t.nombres, COALESCE(a.cargo_faena,'') AS cargo_faena, COALESCE(t.cargo,'') AS cargo
+    q = '''
+        SELECT DISTINCT
+               t.id,
+               t.rut,
+               t.apellidos,
+               t.nombres,
+               COALESCE(a.cargo_faena,'') AS cargo_faena,
+               COALESCE(t.cargo,'') AS cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
-          AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-        ORDER BY t.apellidos, t.nombres
-        ''',
-        (int(faena_id),),
-    )
+          AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
+        ORDER BY t.apellidos, t.nombres, t.id
+    '''
+    reader = fetch_df_uncached if fresh else fetch_df
+    return reader(q, (int(faena_id),))
 
 def get_global_counts():
     """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
@@ -2287,6 +2304,9 @@ def go(page: str, faena_id=None):
     st.session_state["nav_request"] = page
     if faena_id is not None:
         st.session_state["nav_request_faena_id"] = int(faena_id)
+    if page == "Documentos Trabajador":
+        st.session_state["docs_scoped_toggle"] = True
+        st.session_state.pop("docs_trabajador_pick", None)
     st.rerun()
 
 def show_bootstrap_error(exc: Exception):
@@ -3640,6 +3660,8 @@ def _page_asignar_trabajadores_impl():
                             skipped_count += 1
                     c.commit()
                 clear_app_caches()
+                st.session_state["docs_scoped_toggle"] = True
+                st.session_state.pop("docs_trabajador_pick", None)
                 msg = f"Trabajadores asignados: {inserted_count}."
                 if skipped_count:
                     msg += f" Omitidos por ya existir: {skipped_count}."
@@ -3769,6 +3791,8 @@ def _page_asignar_trabajadores_impl():
                             c.commit()
 
                         clear_app_caches()
+                        st.session_state["docs_scoped_toggle"] = True
+                        st.session_state.pop("docs_trabajador_pick", None)
                         st.success(f"Listo. Filas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped} | Asignados: {assigned}")
                         auto_backup_db("import_asignar_faena")
                         # llevar a docs con la faena seleccionada
@@ -4125,13 +4149,21 @@ def _page_documentos_trabajador_impl():
 
     st.divider()
 
+    last_scope_key = "_docs_last_scope_signature"
+    current_scope_sig = (None if faena_pick is None else int(faena_pick), bool(scoped))
+    if st.session_state.get(last_scope_key) != current_scope_sig:
+        st.session_state[last_scope_key] = current_scope_sig
+        st.session_state.pop("docs_trabajador_pick", None)
+
     # Fuente de trabajadores: por faena o global
     if scoped:
         if faena_pick is None:
             st.error("Activa 'Solo esta faena' pero no has seleccionado una faena.")
             st.stop()
 
-        trab = fetch_assigned_workers(int(faena_pick))
+        trab = fetch_assigned_workers(int(faena_pick), fresh=True)
+        assigned_count = len(trab.index)
+        st.caption(f"Trabajadores asignados detectados en esta faena: {assigned_count}")
         if trab.empty:
             ui_tip("Esta faena no tiene trabajadores asignados. Ve a 'Asignar Trabajadores' para incorporar personal.")
             return
@@ -4151,7 +4183,7 @@ def _page_documentos_trabajador_impl():
                     else:
                         st.success(f"{k} — OK")
     else:
-        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        trab = fetch_df_uncached("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
         if trab.empty:
             ui_tip("Crea trabajadores primero.")
             return
