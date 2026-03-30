@@ -616,6 +616,24 @@ DOCS_MOTOSIERRISTA = [
     "CERTIFICACION_CORMA",
     "CEDULA_IDENTIDAD",
 ]
+CARGO_DOCS_RULES = {
+    "OPERADOR DE MAQUINARIA FORESTAL": DOC_OBLIGATORIOS + DOCS_OPERARIO_MAQUINARIA_FORESTAL,
+    "MOTOSIERRISTA": DOC_OBLIGATORIOS + DOCS_MOTOSIERRISTA,
+    "ESTROBERO": list(DOC_OBLIGATORIOS),
+    "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+    "MECANICO": list(DOC_OBLIGATORIOS),
+    "ASERRADERO": list(DOC_OBLIGATORIOS),
+    "PLANTA": list(DOC_OBLIGATORIOS),
+}
+CARGO_DOCS_ORDER = [
+    "OPERADOR DE MAQUINARIA FORESTAL",
+    "MOTOSIERRISTA",
+    "ESTROBERO",
+    "ADMINISTRATIVO",
+    "MECANICO",
+    "ASERRADERO",
+    "PLANTA",
+]
 DOC_EMPRESA_SUGERIDOS = [
     "LIQUIDACIONES_SUELDO_MES",
     "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
@@ -674,15 +692,33 @@ def normalize_text(value) -> str:
     return s.strip().lower()
 
 
+def canonical_cargo_label(cargo: str | None) -> str:
+    cargo_txt = str(cargo or "").strip()
+    cargo_n = normalize_text(cargo_txt)
+    if not cargo_n:
+        return "PLANTA"
+    if cargo_txt in CARGO_DOCS_RULES:
+        return cargo_txt
+    if "motosierr" in cargo_n:
+        return "MOTOSIERRISTA"
+    if "maquinaria" in cargo_n and "forestal" in cargo_n:
+        return "OPERADOR DE MAQUINARIA FORESTAL"
+    if "estrobero" in cargo_n:
+        return "ESTROBERO"
+    if "administr" in cargo_n:
+        return "ADMINISTRATIVO"
+    if "mecan" in cargo_n:
+        return "MECANICO"
+    if "aserradero" in cargo_n:
+        return "ASERRADERO"
+    if "planta" in cargo_n:
+        return "PLANTA"
+    return cargo_txt.upper()
+
+
 def worker_required_docs(cargo: str | None) -> list[str]:
-    cargo_n = normalize_text(cargo)
-    docs = list(DOC_OBLIGATORIOS)
-    if cargo_n:
-        if "motosierr" in cargo_n:
-            docs.extend(DOCS_MOTOSIERRISTA)
-        elif "maquinaria" in cargo_n and "forestal" in cargo_n:
-            docs.extend(DOCS_OPERARIO_MAQUINARIA_FORESTAL)
-    # preservar orden sin duplicar documentos
+    cargo_key = canonical_cargo_label(cargo)
+    docs = CARGO_DOCS_RULES.get(cargo_key, DOC_OBLIGATORIOS)
     return list(dict.fromkeys(docs))
 
 
@@ -702,6 +738,16 @@ def worker_required_docs_for_record(rec) -> list[str]:
     except Exception:
         cargo = None
     return worker_required_docs(cargo)
+
+
+def cargo_docs_catalog_rows():
+    rows = []
+    for cargo in CARGO_DOCS_ORDER:
+        rows.append({
+            "Cargo": cargo,
+            "Documentos obligatorios": doc_tipo_join(CARGO_DOCS_RULES.get(cargo, DOC_OBLIGATORIOS)),
+        })
+    return rows
 
 
 def inject_css():
@@ -3872,7 +3918,21 @@ def _page_trabajadores_impl():
             rut_new = rut_input("RUT", key=f"{edit_prefix}_rut", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
             nombres_new = st.text_input("Nombres", key=f"{edit_prefix}_nombres")
             apellidos_new = st.text_input("Apellidos", key=f"{edit_prefix}_apellidos")
-            cargo_new = st.text_input("Cargo", key=f"{edit_prefix}_cargo")
+            cargo_base_options = [
+                "OPERADOR DE MAQUINARIA FORESTAL",
+                "MOTOSIERRISTA",
+                "ESTROBERO",
+                "ADMINISTRATIVO",
+                "MECANICO",
+                "ASERRADERO",
+            ]
+            cargo_actual = str(st.session_state.get(f"{edit_prefix}_cargo", "") or "").strip()
+            cargo_options = cargo_base_options.copy()
+            if cargo_actual and cargo_actual not in cargo_options:
+                cargo_options = [cargo_actual] + cargo_options
+            cargo_default = cargo_options.index(cargo_actual) if cargo_actual in cargo_options else 0
+            cargo_new = st.selectbox("Cargo", cargo_options, index=cargo_default, key=f"{edit_prefix}_cargo_select")
+            st.session_state[f"{edit_prefix}_cargo"] = cargo_new
             cc_new = st.text_input("Centro de costo (opcional)", key=f"{edit_prefix}_cc")
             email_new = st.text_input("Email (opcional)", key=f"{edit_prefix}_email")
             fc_new = st.date_input("Fecha de contrato (opcional)", key=f"{edit_prefix}_fc")
@@ -4677,8 +4737,11 @@ def _page_documentos_trabajador_impl():
     col2.metric("Cargados", len([d for d in req_docs if d in tipos_presentes]))
     col3.metric("Faltan", len(faltan))
 
-    cargo_label = str(trabajador_row.get("cargo") or "(sin cargo)")
+    cargo_label = canonical_cargo_label(trabajador_row.get("cargo"))
     st.caption(f"Cargo del trabajador: **{cargo_label}**")
+
+    with st.expander("Ver documentos obligatorios por cargo", expanded=False):
+        st.dataframe(pd.DataFrame(cargo_docs_catalog_rows()), use_container_width=True, hide_index=True)
 
     if faltan:
         st.warning("Faltan obligatorios: " + doc_tipo_join(faltan))
