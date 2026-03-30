@@ -676,12 +676,14 @@ def normalize_text(value) -> str:
 
 def worker_required_docs(cargo: str | None) -> list[str]:
     cargo_n = normalize_text(cargo)
+    docs = list(DOC_OBLIGATORIOS)
     if cargo_n:
         if "motosierr" in cargo_n:
-            return list(DOCS_MOTOSIERRISTA)
-        if "maquinaria" in cargo_n and "forestal" in cargo_n:
-            return list(DOCS_OPERARIO_MAQUINARIA_FORESTAL)
-    return list(DOC_OBLIGATORIOS)
+            docs.extend(DOCS_MOTOSIERRISTA)
+        elif "maquinaria" in cargo_n and "forestal" in cargo_n:
+            docs.extend(DOCS_OPERARIO_MAQUINARIA_FORESTAL)
+    # preservar orden sin duplicar documentos
+    return list(dict.fromkeys(docs))
 
 
 def worker_required_docs_by_id(trabajador_id: int) -> list[str]:
