@@ -448,6 +448,35 @@ def render_upload_help():
     st.caption("💡 " + UPLOAD_HELP_TEXT)
 
 
+def periodo_ym(anio: int | None, mes: int | None) -> str:
+    try:
+        return f"{int(anio):04d}-{int(mes):02d}"
+    except Exception:
+        return "SIN_PERIODO"
+
+
+def periodo_label(anio: int | None, mes: int | None) -> str:
+    try:
+        anio_i = int(anio)
+        mes_i = int(mes)
+        return f"{anio_i:04d}-{mes_i:02d} · {MESES_ES.get(mes_i, str(mes_i))}"
+    except Exception:
+        return "SIN PERÍODO"
+
+
+def periodo_folder_segment(anio: int | None, mes: int | None) -> str:
+    return safe_name(periodo_label(anio, mes).replace(" · ", "_"))
+
+
+def pendientes_empresa_faena_periodo(faena_id: int, anio: int, mes: int):
+    df = fetch_df(
+        "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=?",
+        (int(faena_id), int(anio), int(mes)),
+    )
+    present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
+    return [d for d in DOC_EMPRESA_MENSUALES if d not in present]
+
+
 def _zip_single_file_bytes(file_name: str, file_bytes: bytes) -> tuple[str, bytes]:
     zip_name = str(file_name or "archivo").strip() or "archivo"
     if not zip_name.lower().endswith('.zip'):
@@ -579,6 +608,26 @@ DOC_EMPRESA_REQUERIDOS = [
     "CERTIFICADO_CUMPLIMIENTO_LABORAL",
     "CERTIFICADO_ACCIDENTABILIDAD",
 ]
+DOC_EMPRESA_MENSUALES = [
+    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
+    "CERTIFICADO_ACCIDENTABILIDAD",
+    "CERTIFICADO_ADHESION_A_MUTUALIDAD",
+    "LIQUIDACIONES_SUELDO_MES",
+]
+MESES_ES = {
+    1: "ENERO",
+    2: "FEBRERO",
+    3: "MARZO",
+    4: "ABRIL",
+    5: "MAYO",
+    6: "JUNIO",
+    7: "JULIO",
+    8: "AGOSTO",
+    9: "SEPTIEMBRE",
+    10: "OCTUBRE",
+    11: "NOVIEMBRE",
+    12: "DICIEMBRE",
+}
 REQ_DOCS_N = len(DOC_OBLIGATORIOS)
 
 ASSIGNACION_INSERT_SQL = """
@@ -792,10 +841,84 @@ def norm_col(s: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_")
 
+def _rut_parts(rut: str):
+    raw = str(rut or "").strip().upper()
+    raw = re.sub(r"[^0-9K]", "", raw)
+    if not raw:
+        return "", ""
+    if len(raw) == 1:
+        return "", raw
+    body = raw[:-1].lstrip("0") or "0"
+    dv = raw[-1]
+    return body, dv
+
+
+def format_rut_chileno(rut: str) -> str:
+    body, dv = _rut_parts(rut)
+    if not body and not dv:
+        return ""
+    if not body:
+        return dv
+    rev = body[::-1]
+    grouped_rev = ".".join(rev[i:i+3] for i in range(0, len(rev), 3))
+    return f"{grouped_rev[::-1]}-{dv}"
+
+
 def clean_rut(rut: str) -> str:
-    rut = (rut or "").strip().upper()
-    rut = rut.replace(" ", "")
-    return rut
+    return format_rut_chileno(rut)
+
+
+def _format_rut_session_value(key: str):
+    st.session_state[key] = format_rut_chileno(st.session_state.get(key, ""))
+
+
+def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None):
+    if key not in st.session_state:
+        st.session_state[key] = format_rut_chileno(value)
+    return st.text_input(label, key=key, placeholder=placeholder, help=help, on_change=_format_rut_session_value, args=(key,))
+
+
+@st.cache_data(show_spinner=False)
+def build_trabajadores_template_xlsx() -> bytes:
+    ejemplo = pd.DataFrame([
+        {
+            "RUT": "12.345.678-5",
+            "NOMBRE": "Juan Carlos Perez Soto",
+            "CARGO": "Operador",
+            "CENTRO_COSTO": "FAENA A",
+            "EMAIL": "juan.perez@empresa.cl",
+            "FECHA DE CONTRATO": "2026-03-30",
+            "VIGENCIA_EXAMEN": "2026-12-31",
+        }
+    ])
+    instrucciones = pd.DataFrame(
+        {
+            "Campo": [
+                "RUT",
+                "NOMBRE",
+                "CARGO",
+                "CENTRO_COSTO",
+                "EMAIL",
+                "FECHA DE CONTRATO",
+                "VIGENCIA_EXAMEN",
+            ],
+            "Obligatorio": ["Sí", "Sí", "No", "No", "No", "No", "No"],
+            "Detalle": [
+                "RUT chileno. La app lo normaliza al formato XX.XXX.XXX-X.",
+                "Nombre completo del trabajador.",
+                "Cargo o función.",
+                "Centro de costo o faena.",
+                "Correo electrónico.",
+                "Fecha en formato YYYY-MM-DD o fecha Excel.",
+                "Fecha en formato YYYY-MM-DD o fecha Excel.",
+            ],
+        }
+    )
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        ejemplo.to_excel(writer, sheet_name="Trabajadores", index=False)
+        instrucciones.to_excel(writer, sheet_name="Instrucciones", index=False)
+    return out.getvalue()
 
 def split_nombre_completo(nombre: str):
     nombre = (nombre or "").strip()
@@ -986,6 +1109,9 @@ def ensure_core_tables_postgres():
         CREATE TABLE IF NOT EXISTS faena_empresa_documentos (
             id BIGSERIAL PRIMARY KEY,
             faena_id BIGINT NOT NULL REFERENCES faenas(id) ON DELETE CASCADE,
+            mandante_id BIGINT REFERENCES mandantes(id) ON DELETE SET NULL,
+            periodo_anio INTEGER,
+            periodo_mes INTEGER,
             doc_tipo TEXT NOT NULL,
             nombre_archivo TEXT NOT NULL,
             file_path TEXT NOT NULL,
@@ -1186,12 +1312,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS faena_empresa_documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             faena_id INTEGER NOT NULL,
+            mandante_id INTEGER,
+            periodo_anio INTEGER,
+            periodo_mes INTEGER,
             doc_tipo TEXT NOT NULL,
             nombre_archivo TEXT NOT NULL,
             file_path TEXT NOT NULL,
             sha256 TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE
+            FOREIGN KEY(faena_id) REFERENCES faenas(id) ON DELETE CASCADE,
+            FOREIGN KEY(mandante_id) REFERENCES mandantes(id) ON DELETE SET NULL
         );
         ''')
         c.execute('''
@@ -1366,6 +1496,9 @@ def ensure_storage_columns_postgres():
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS mandante_id BIGINT;",
+        "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS periodo_anio INTEGER;",
+        "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS periodo_mes INTEGER;",
         "ALTER TABLE IF EXISTS faena_anexos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS faena_anexos ADD COLUMN IF NOT EXISTS object_path TEXT;",
         "ALTER TABLE IF EXISTS contratos_faena ADD COLUMN IF NOT EXISTS bucket TEXT;",
@@ -1390,7 +1523,7 @@ def ensure_storage_columns_sqlite(c):
         "faena_anexos": {"bucket": "TEXT", "object_path": "TEXT"},
         "trabajador_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
         "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
-        "faena_empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "faena_empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "mandante_id": "INTEGER", "periodo_anio": "INTEGER", "periodo_mes": "INTEGER"},
         "export_historial": {"bucket": "TEXT", "object_path": "TEXT"},
         "export_historial_mes": {"bucket": "TEXT", "object_path": "TEXT"},
     }
@@ -1967,7 +2100,8 @@ def export_zip_for_faena(
             if b:
                 fname = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa_faena"))
                 tipo = safe_name(d["doc_tipo"])
-                z.writestr(f"02_Documentos_Empresa_Faena/{tipo}/{fname}", b)
+                periodo_seg = periodo_folder_segment(d.get("periodo_anio"), d.get("periodo_mes"))
+                z.writestr(f"02_Documentos_Empresa_Faena/{periodo_seg}/{tipo}/{fname}", b)
 
     # 03_Trabajadores
     if include_trabajadores:
@@ -2124,7 +2258,8 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             if b:
                 fn = os.path.basename(str(d.get("file_path") or d.get("object_path") or d.get("nombre_archivo") or "documento_empresa_faena"))
                 tipo = safe_name(d["doc_tipo"])
-                z.writestr(f"{prefix}/02_Documentos_Empresa_Faena/{tipo}/{fn}", b)
+                periodo_seg = periodo_folder_segment(d.get("periodo_anio"), d.get("periodo_mes"))
+                z.writestr(f"{prefix}/02_Documentos_Empresa_Faena/{periodo_seg}/{tipo}/{fn}", b)
 
         # 03 trabajadores
         asign = fetch_df(
@@ -3337,6 +3472,14 @@ def _page_trabajadores_impl():
     # -------------------------
     with tab1:
         st.write("Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
+        st.download_button(
+            "⬇️ Descargar plantilla Excel de trabajadores",
+            data=build_trabajadores_template_xlsx(),
+            file_name="plantilla_trabajadores.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_tpl_excel_trabajadores",
+        )
+        st.caption("Usa esta plantilla para la carga masiva. Mantén los encabezados tal como vienen en el Excel.")
         up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trabajadores")
         if up is not None:
             try:
@@ -3447,7 +3590,7 @@ def _page_trabajadores_impl():
 
         with t_create:
             with st.form("form_trabajador_manual"):
-                rut = st.text_input("RUT", placeholder="12.345.678-9")
+                rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Se formatea automáticamente como RUT chileno.")
                 nombres = st.text_input("Nombres", placeholder="Juan")
                 apellidos = st.text_input("Apellidos", placeholder="Pérez")
                 cargo = st.text_input("Cargo", placeholder="Operador Harvester")
@@ -3500,7 +3643,7 @@ def _page_trabajadores_impl():
 
             st.markdown("### ✏️ Editar trabajador")
             with st.form("form_trabajador_edit"):
-                rut_new = st.text_input("RUT", value=str(row["rut"] or ""))
+                rut_new = rut_input("RUT", key=f"trabajador_edit_rut_{int(tid)}", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Se formatea automáticamente como RUT chileno.")
                 nombres_new = st.text_input("Nombres", value=str(row["nombres"] or ""))
                 apellidos_new = st.text_input("Apellidos", value=str(row["apellidos"] or ""))
                 cargo_new = st.text_input("Cargo", value=str(row["cargo"] or ""))
@@ -3674,6 +3817,14 @@ def _page_asignar_trabajadores_impl():
     # ---------------------------------
     with tab2:
         st.write("Sube Excel de trabajadores para **esta faena**. Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
+        st.download_button(
+            "⬇️ Descargar plantilla Excel de trabajadores",
+            data=build_trabajadores_template_xlsx(),
+            file_name="plantilla_trabajadores.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_tpl_trab_faena",
+        )
+        st.caption("Puedes usar la misma plantilla para la carga masiva por faena.")
         up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trab_por_faena")
         if up is not None:
             try:
@@ -3980,13 +4131,18 @@ def _page_documentos_empresa_impl():
                 auto_backup_db("doc_empresa_delete")
                 st.rerun()
 def _page_documentos_empresa_faena_impl():
-    ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
+    ui_header(
+        "Documentos Empresa (Faena)",
+        "Carga documentos de empresa POR FAENA, POR MANDANTE y POR MES. Cada período mensual puede tener varios archivos por tipo.",
+    )
 
-    faenas = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
+    faenas = fetch_df(
+        """
+        SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
         ORDER BY f.id DESC
-    ''')
+        """
+    )
     if faenas.empty:
         ui_tip("Crea una faena primero.")
         return
@@ -4003,76 +4159,120 @@ def _page_documentos_empresa_faena_impl():
         key="emp_faena_sel",
     )
     st.session_state["selected_faena_id"] = int(faena_id)
+    faena_row = faenas[faenas["id"] == faena_id].iloc[0]
+    mandante_id = int(faena_row["mandante_id"])
+    mandante_nombre = str(faena_row["mandante"])
 
-    docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id DESC",
-        (int(faena_id),),
+    hoy = datetime.now()
+    anios = sorted({int(hoy.year) - 1, int(hoy.year), int(hoy.year) + 1})
+    meses = list(range(1, 13))
+    ctop1, ctop2, ctop3 = st.columns([1.3, 1, 2.2])
+    with ctop1:
+        anio_sel = st.selectbox("Año del período", anios, index=anios.index(int(hoy.year)), key="emp_faena_periodo_anio")
+    with ctop2:
+        mes_sel = st.selectbox(
+            "Mes del período",
+            meses,
+            index=max(0, min(11, int(hoy.month) - 1)),
+            format_func=lambda x: f"{x:02d} · {MESES_ES.get(int(x), str(x))}",
+            key="emp_faena_periodo_mes",
+        )
+    with ctop3:
+        st.info(
+            f"Mandante seleccionado: **{mandante_nombre}**\n"
+            f"Faena: **{faena_row['nombre']}**\n"
+            f"Período mensual: **{periodo_label(anio_sel, mes_sel)}**"
+        )
+
+    st.caption(
+        "Documentación mensual sugerida por mandante/faena: Certificado de cumplimiento laboral, "
+        "Certificado de accidentabilidad, Certificado de adhesión a mutualidad y Liquidaciones de sueldo del mes "
+        "de los trabajadores que prestaron servicios en esa faena."
     )
-    tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
-    faltan = [d for d in DOC_EMPRESA_REQUERIDOS if d not in tipos_presentes]
+
+    docs_periodo = fetch_df(
+        "SELECT id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY id DESC",
+        (int(faena_id), int(anio_sel), int(mes_sel)),
+    )
+    tipos_presentes = set(docs_periodo["doc_tipo"].astype(str).tolist()) if not docs_periodo.empty else set()
+    faltan = [d for d in DOC_EMPRESA_MENSUALES if d not in tipos_presentes]
 
     c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Requeridos", len(DOC_EMPRESA_REQUERIDOS))
-    c2.metric("Cargados", len([d for d in DOC_EMPRESA_REQUERIDOS if d in tipos_presentes]))
-    c3.metric("Faltan", len(faltan))
+    c1.metric("Requeridos mensuales", len(DOC_EMPRESA_MENSUALES))
+    c2.metric("Tipos cargados en el período", len([d for d in DOC_EMPRESA_MENSUALES if d in tipos_presentes]))
+    c3.metric("Faltan en el período", len(faltan))
 
     if faltan:
-        st.warning("Faltan requeridos: " + ", ".join(faltan))
+        st.warning("Faltan en este período: " + ", ".join(faltan))
     else:
-        st.success("Empresa (por faena) completa: requeridos OK.")
+        st.success("Período mensual completo para esta faena/mandante.")
 
-    tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
+    tab1, tab2, tab3 = st.tabs(["📎 Cargar documento mensual", "📋 Documentos del período", "🗂️ Historial de la faena"])
 
     with tab1:
-        st.caption("Tipos sugeridos:")
-        st.code("\n".join(DOC_EMPRESA_SUGERIDOS))
+        st.caption("Tipos mensuales sugeridos:")
+        st.code("\n".join(DOC_EMPRESA_MENSUALES))
+        st.caption("Para LIQUIDACIONES_SUELDO_MES puedes subir uno o varios archivos del mismo período.")
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"], key="emp_faena_tipo")
+            tipo = st.selectbox("Tipo", DOC_EMPRESA_MENSUALES + ["OTRO"], key="emp_faena_tipo")
         with colx2:
-            tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación, Permiso, Seguro adicional", key="emp_faena_otro")
+            tipo_otro = st.text_input(
+                "Si eliges OTRO, escribe el nombre",
+                placeholder="Ej: F30, libro de remuneraciones, informe mensual adicional",
+                key="emp_faena_otro",
+            )
 
         up = st.file_uploader("Archivo", key="up_doc_emp_faena", type=None)
         render_upload_help()
-        if st.button("Guardar documento (empresa por faena)", type="primary"):
+        if st.button("Guardar documento mensual (empresa por faena)", type="primary"):
             if up is None:
                 st.error("Debes subir un archivo primero.")
                 st.stop()
 
             doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
             payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
-            folder = ["faenas", faena_id, "empresa", safe_name(doc_tipo)]
+            folder = [
+                "mandantes",
+                mandante_id,
+                safe_name(mandante_nombre),
+                "faenas",
+                faena_id,
+                safe_name(str(faena_row['nombre'])),
+                periodo_ym(anio_sel, mes_sel),
+                "empresa_mensual",
+                safe_name(doc_tipo),
+            ]
             file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
             sha = sha256_bytes(payload["file_bytes"])
 
             execute(
-                "INSERT INTO faena_empresa_documentos(faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (int(faena_id), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO faena_empresa_documentos(faena_id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (int(faena_id), int(mandante_id), int(anio_sel), int(mes_sel), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             if payload["compressed"] and payload.get("compression_note"):
                 st.info(payload["compression_note"])
-            st.success("Documento guardado (empresa por faena).")
-            auto_backup_db("doc_empresa_faena")
+            st.success(f"Documento guardado para {mandante_nombre} / {faena_row['nombre']} / {periodo_label(anio_sel, mes_sel)}.")
+            auto_backup_db("doc_empresa_faena_mensual")
             st.rerun()
 
-
     with tab2:
-        if docs.empty:
-            st.info("(sin documentos)")
+        if docs_periodo.empty:
+            st.info("(sin documentos cargados para este período)")
         else:
-            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
+            show = docs_periodo[["doc_tipo", "nombre_archivo", "created_at"]].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
 
             st.divider()
-            st.markdown("#### 🔎 Gestionar documento")
+            st.markdown("#### 🔎 Gestionar documento del período")
             pick_id = st.selectbox(
                 "Documento",
-                docs["id"].tolist(),
-                format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
+                docs_periodo["id"].tolist(),
+                format_func=lambda x: f"{docs_periodo[docs_periodo['id']==x].iloc[0]['doc_tipo']} — {docs_periodo[docs_periodo['id']==x].iloc[0]['nombre_archivo']}",
                 key="empf_pick_doc",
             )
-            row = docs[docs["id"] == pick_id].iloc[0]
+            row = docs_periodo[docs_periodo["id"] == pick_id].iloc[0]
             fpath = row.get("file_path", "")
             bucket = row.get("bucket", None)
             object_path = row.get("object_path", None)
@@ -4109,6 +4309,19 @@ def _page_documentos_empresa_faena_impl():
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_faena_delete")
                 st.rerun()
+
+    with tab3:
+        historial = fetch_df(
+            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
+            (int(faena_id),),
+        )
+        if historial.empty:
+            st.info("(sin historial de documentos empresa por faena)")
+        else:
+            historial = historial.copy()
+            historial["periodo"] = historial.apply(lambda r: periodo_label(r.get("periodo_anio"), r.get("periodo_mes")), axis=1)
+            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "created_at"]], use_container_width=True, hide_index=True)
+
 
 def _page_documentos_trabajador_impl():
     ui_header(
