@@ -3546,25 +3546,26 @@ def _page_trabajadores_impl():
                                 vigencia_examen = _to_text_date_import_excel(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ON CONFLICT(rut) DO UPDATE SET
-                                            nombres=excluded.nombres,
-                                            apellidos=excluded.apellidos,
-                                            cargo=excluded.cargo,
-                                            centro_costo=excluded.centro_costo,
-                                            email=excluded.email,
-                                            fecha_contrato=excluded.fecha_contrato,
-                                            vigencia_examen=excluded.vigencia_examen
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
                                     if rut in existing_set:
+                                        cursor_execute(
+                                            c,
+                                            """
+                                            UPDATE trabajadores
+                                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
+                                             WHERE rut=?
+                                            """,
+                                            (nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen, rut),
+                                        )
                                         updated += 1
                                     else:
+                                        cursor_execute(
+                                            c,
+                                            """
+                                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                            VALUES(?,?,?,?,?,?,?,?)
+                                            """,
+                                            (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                        )
                                         inserted += 1
                                         existing_set.add(rut)
                                 else:
@@ -3614,23 +3615,31 @@ def _page_trabajadores_impl():
                     st.stop()
                 try:
                     rut_norm = clean_rut(rut)
-                    execute(
-                        """
-                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                        VALUES(?,?,?,?,?,?,?,?)
-                        ON CONFLICT(rut) DO UPDATE SET
-                            nombres=excluded.nombres,
-                            apellidos=excluded.apellidos,
-                            cargo=excluded.cargo,
-                            centro_costo=excluded.centro_costo,
-                            email=excluded.email,
-                            fecha_contrato=excluded.fecha_contrato,
-                            vigencia_examen=excluded.vigencia_examen
-                        """,
-                        (rut_norm, nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
-                         str(fecha_contrato) if fecha_contrato else None,
-                         str(vigencia_examen) if vigencia_examen else None),
-                    )
+                    nombres_v = nombres.strip()
+                    apellidos_v = apellidos.strip()
+                    cargo_v = cargo.strip()
+                    centro_costo_v = centro_costo.strip()
+                    email_v = email.strip()
+                    fecha_contrato_v = str(fecha_contrato) if fecha_contrato else None
+                    vigencia_examen_v = str(vigencia_examen) if vigencia_examen else None
+                    exists_df = fetch_df("SELECT id FROM trabajadores WHERE rut=? ORDER BY id LIMIT 1", (rut_norm,))
+                    if exists_df.empty:
+                        execute(
+                            """
+                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                            VALUES(?,?,?,?,?,?,?,?)
+                            """,
+                            (rut_norm, nombres_v, apellidos_v, cargo_v, centro_costo_v, email_v, fecha_contrato_v, vigencia_examen_v),
+                        )
+                    else:
+                        execute(
+                            """
+                            UPDATE trabajadores
+                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
+                             WHERE id=?
+                            """,
+                            (nombres_v, apellidos_v, cargo_v, centro_costo_v, email_v, fecha_contrato_v, vigencia_examen_v, int(exists_df.iloc[0]["id"])),
+                        )
                     st.session_state["trabajador_create_rut"] = ""
                     st.session_state["trabajador_create_nombres"] = ""
                     st.session_state["trabajador_create_apellidos"] = ""
@@ -3916,25 +3925,26 @@ def _page_asignar_trabajadores_impl():
                                 vigencia_examen = _to_text_date_import_faena(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ON CONFLICT(rut) DO UPDATE SET
-                                            nombres=excluded.nombres,
-                                            apellidos=excluded.apellidos,
-                                            cargo=excluded.cargo,
-                                            centro_costo=excluded.centro_costo,
-                                            email=excluded.email,
-                                            fecha_contrato=excluded.fecha_contrato,
-                                            vigencia_examen=excluded.vigencia_examen
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
                                     if rut in rut_to_id:
+                                        cursor_execute(
+                                            c,
+                                            """
+                                            UPDATE trabajadores
+                                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
+                                             WHERE id=?
+                                            """,
+                                            (nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen, int(rut_to_id[rut])),
+                                        )
                                         updated += 1
                                     else:
+                                        cursor_execute(
+                                            c,
+                                            """
+                                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+                                            VALUES(?,?,?,?,?,?,?,?)
+                                            """,
+                                            (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+                                        )
                                         inserted += 1
                                 else:
                                     if rut in rut_to_id:
