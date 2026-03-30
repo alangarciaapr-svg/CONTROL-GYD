@@ -873,9 +873,12 @@ def _format_rut_session_value(key: str):
 
 
 def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None):
+    formatted_value = format_rut_chileno(value)
     if key not in st.session_state:
-        st.session_state[key] = format_rut_chileno(value)
-    return st.text_input(label, key=key, placeholder=placeholder, help=help, on_change=_format_rut_session_value, args=(key,))
+        st.session_state[key] = formatted_value
+    elif formatted_value and clean_rut(st.session_state.get(key, "")) != formatted_value:
+        st.session_state[key] = formatted_value
+    return st.text_input(label, key=key, placeholder=placeholder, help=help)
 
 
 @st.cache_data(show_spinner=False)
@@ -3590,7 +3593,7 @@ def _page_trabajadores_impl():
 
         with t_create:
             with st.form("form_trabajador_manual"):
-                rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Se formatea automáticamente como RUT chileno.")
+                rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Ingresa el RUT y se normalizará al guardar en formato chileno.")
                 nombres = st.text_input("Nombres", placeholder="Juan")
                 apellidos = st.text_input("Apellidos", placeholder="Pérez")
                 cargo = st.text_input("Cargo", placeholder="Operador Harvester")
@@ -3605,6 +3608,8 @@ def _page_trabajadores_impl():
                     st.error("Debes completar RUT, Nombres y Apellidos.")
                     st.stop()
                 try:
+                    rut_norm = clean_rut(rut)
+                    st.session_state['trabajador_create_rut'] = rut_norm
                     execute(
                         '''
                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
@@ -3618,7 +3623,7 @@ def _page_trabajadores_impl():
                             fecha_contrato=excluded.fecha_contrato,
                             vigencia_examen=excluded.vigencia_examen
                         ''',
-                        (clean_rut(rut), nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
+                        (rut_norm, nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
                          str(fecha_contrato) if fecha_contrato else None,
                          str(vigencia_examen) if vigencia_examen else None),
                     )
@@ -3643,7 +3648,7 @@ def _page_trabajadores_impl():
 
             st.markdown("### ✏️ Editar trabajador")
             with st.form("form_trabajador_edit"):
-                rut_new = rut_input("RUT", key=f"trabajador_edit_rut_{int(tid)}", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Se formatea automáticamente como RUT chileno.")
+                rut_new = rut_input("RUT", key=f"trabajador_edit_rut_{int(tid)}", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Ingresa el RUT y se normalizará al guardar en formato chileno.")
                 nombres_new = st.text_input("Nombres", value=str(row["nombres"] or ""))
                 apellidos_new = st.text_input("Apellidos", value=str(row["apellidos"] or ""))
                 cargo_new = st.text_input("Cargo", value=str(row["cargo"] or ""))
@@ -3658,10 +3663,12 @@ def _page_trabajadores_impl():
                     st.error("Debes completar RUT, Nombres y Apellidos.")
                     st.stop()
                 try:
+                    rut_norm_new = clean_rut(rut_new)
+                    st.session_state[f"trabajador_edit_rut_{int(tid)}"] = rut_norm_new
                     execute(
                         "UPDATE trabajadores SET rut=?, nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=?",
                         (
-                            clean_rut(rut_new),
+                            rut_norm_new,
                             nombres_new.strip(),
                             apellidos_new.strip(),
                             cargo_new.strip(),
