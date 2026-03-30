@@ -876,9 +876,14 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
     formatted_value = format_rut_chileno(value)
     if key not in st.session_state:
         st.session_state[key] = formatted_value
-    elif formatted_value and clean_rut(st.session_state.get(key, "")) != formatted_value:
-        st.session_state[key] = formatted_value
-    return st.text_input(label, key=key, placeholder=placeholder, help=help)
+    return st.text_input(
+        label,
+        key=key,
+        placeholder=placeholder,
+        help=help,
+        on_change=_format_rut_session_value,
+        args=(key,),
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -3592,16 +3597,16 @@ def _page_trabajadores_impl():
         t_create, t_edit = st.tabs(["➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
 
         with t_create:
-            with st.form("form_trabajador_manual"):
-                rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Ingresa el RUT y se normalizará al guardar en formato chileno.")
-                nombres = st.text_input("Nombres", placeholder="Juan")
-                apellidos = st.text_input("Apellidos", placeholder="Pérez")
-                cargo = st.text_input("Cargo", placeholder="Operador Harvester")
-                centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA")
-                email = st.text_input("Email (opcional)")
-                fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
-                vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
-                ok = st.form_submit_button("Guardar trabajador", type="primary")
+            st.caption("El RUT se formatea automáticamente al estilo chileno: XX.XXX.XXX-X")
+            rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
+            nombres = st.text_input("Nombres", placeholder="Juan", key="trabajador_create_nombres")
+            apellidos = st.text_input("Apellidos", placeholder="Pérez", key="trabajador_create_apellidos")
+            cargo = st.text_input("Cargo", placeholder="Operador Harvester", key="trabajador_create_cargo")
+            centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA", key="trabajador_create_cc")
+            email = st.text_input("Email (opcional)", key="trabajador_create_email")
+            fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None, key="trabajador_create_fc")
+            vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None, key="trabajador_create_ve")
+            ok = st.button("Guardar trabajador", type="primary", key="trabajador_create_btn")
 
             if ok:
                 if not (rut.strip() and nombres.strip() and apellidos.strip()):
@@ -3609,9 +3614,8 @@ def _page_trabajadores_impl():
                     st.stop()
                 try:
                     rut_norm = clean_rut(rut)
-                    st.session_state['trabajador_create_rut'] = rut_norm
                     execute(
-                        '''
+                        """
                         INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
                         VALUES(?,?,?,?,?,?,?,?)
                         ON CONFLICT(rut) DO UPDATE SET
@@ -3622,11 +3626,19 @@ def _page_trabajadores_impl():
                             email=excluded.email,
                             fecha_contrato=excluded.fecha_contrato,
                             vigencia_examen=excluded.vigencia_examen
-                        ''',
+                        """,
                         (rut_norm, nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
                          str(fecha_contrato) if fecha_contrato else None,
                          str(vigencia_examen) if vigencia_examen else None),
                     )
+                    st.session_state["trabajador_create_rut"] = ""
+                    st.session_state["trabajador_create_nombres"] = ""
+                    st.session_state["trabajador_create_apellidos"] = ""
+                    st.session_state["trabajador_create_cargo"] = ""
+                    st.session_state["trabajador_create_cc"] = ""
+                    st.session_state["trabajador_create_email"] = ""
+                    st.session_state["trabajador_create_fc"] = None
+                    st.session_state["trabajador_create_ve"] = None
                     st.success("Trabajador guardado.")
                     auto_backup_db("trabajador")
                     st.rerun()
@@ -3647,16 +3659,27 @@ def _page_trabajadores_impl():
             row = df[df["id"] == tid].iloc[0]
 
             st.markdown("### ✏️ Editar trabajador")
-            with st.form("form_trabajador_edit"):
-                rut_new = rut_input("RUT", key=f"trabajador_edit_rut_{int(tid)}", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Ingresa el RUT y se normalizará al guardar en formato chileno.")
-                nombres_new = st.text_input("Nombres", value=str(row["nombres"] or ""))
-                apellidos_new = st.text_input("Apellidos", value=str(row["apellidos"] or ""))
-                cargo_new = st.text_input("Cargo", value=str(row["cargo"] or ""))
-                cc_new = st.text_input("Centro de costo (opcional)", value=str(row["centro_costo"] or ""))
-                email_new = st.text_input("Email (opcional)", value=str(row["email"] or ""))
-                fc_new = st.date_input("Fecha de contrato (opcional)", value=parse_date_maybe(row["fecha_contrato"]))
-                ve_new = st.date_input("Vigencia examen (opcional)", value=parse_date_maybe(row["vigencia_examen"]))
-                ok_upd = st.form_submit_button("Guardar cambios", type="primary")
+            edit_prefix = f"trabajador_edit_{int(tid)}"
+            if st.session_state.get(f"{edit_prefix}_loaded_id") != int(tid):
+                st.session_state[f"{edit_prefix}_loaded_id"] = int(tid)
+                st.session_state[f"{edit_prefix}_rut"] = clean_rut(str(row["rut"] or ""))
+                st.session_state[f"{edit_prefix}_nombres"] = str(row["nombres"] or "")
+                st.session_state[f"{edit_prefix}_apellidos"] = str(row["apellidos"] or "")
+                st.session_state[f"{edit_prefix}_cargo"] = str(row["cargo"] or "")
+                st.session_state[f"{edit_prefix}_cc"] = str(row["centro_costo"] or "")
+                st.session_state[f"{edit_prefix}_email"] = str(row["email"] or "")
+                st.session_state[f"{edit_prefix}_fc"] = parse_date_maybe(row["fecha_contrato"])
+                st.session_state[f"{edit_prefix}_ve"] = parse_date_maybe(row["vigencia_examen"])
+
+            rut_new = rut_input("RUT", key=f"{edit_prefix}_rut", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
+            nombres_new = st.text_input("Nombres", key=f"{edit_prefix}_nombres")
+            apellidos_new = st.text_input("Apellidos", key=f"{edit_prefix}_apellidos")
+            cargo_new = st.text_input("Cargo", key=f"{edit_prefix}_cargo")
+            cc_new = st.text_input("Centro de costo (opcional)", key=f"{edit_prefix}_cc")
+            email_new = st.text_input("Email (opcional)", key=f"{edit_prefix}_email")
+            fc_new = st.date_input("Fecha de contrato (opcional)", key=f"{edit_prefix}_fc")
+            ve_new = st.date_input("Vigencia examen (opcional)", key=f"{edit_prefix}_ve")
+            ok_upd = st.button("Guardar cambios", type="primary", key=f"{edit_prefix}_save")
 
             if ok_upd:
                 if not (rut_new.strip() and nombres_new.strip() and apellidos_new.strip()):
@@ -3664,7 +3687,6 @@ def _page_trabajadores_impl():
                     st.stop()
                 try:
                     rut_norm_new = clean_rut(rut_new)
-                    st.session_state[f"trabajador_edit_rut_{int(tid)}"] = rut_norm_new
                     execute(
                         "UPDATE trabajadores SET rut=?, nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=?",
                         (
