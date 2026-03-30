@@ -12,6 +12,11 @@ try:
 except Exception:
     psycopg = None
 
+try:
+    from psycopg_pool import ConnectionPool
+except Exception:
+    ConnectionPool = None
+
 import shutil
 from datetime import date, datetime, timedelta
 
@@ -133,8 +138,8 @@ def storage_safe_segment(value: str) -> str:
 def _storage_object_path(folder_parts, file_name: str) -> str:
     safe_parts = []
     for part in (folder_parts or []):
-        part_txt = str(part or "").strip().replace("\\", "/")
-        for chunk in [c for c in part_txt.split("/") if c]:
+        txt = str(part or "").strip().replace("\\", "/")
+        for chunk in [c for c in txt.split("/") if c]:
             safe_parts.append(storage_safe_segment(chunk))
     safe_parts.append(storage_safe_segment(file_name))
     return "/".join(safe_parts)
@@ -204,20 +209,36 @@ def _is_secret_key(token: str) -> bool:
     t = (token or "").strip()
     return t.startswith("sb_secret_") or t.startswith("sb_publishable_")
 
+def _is_publishable_key(token: str) -> bool:
+    t = (token or "").strip()
+    return t.startswith("sb_publishable_")
+
 def storage_enabled() -> bool:
     return bool(STORAGE_URL and STORAGE_BUCKET and (STORAGE_SERVICE_KEY or STORAGE_ANON_KEY))
+
+def storage_admin_enabled() -> bool:
+    key = (STORAGE_SERVICE_KEY or "").strip()
+    return bool(STORAGE_URL and STORAGE_BUCKET and key and not _is_publishable_key(key))
 
 def _encode_storage_path(op: str) -> str:
     # Encode each segment to avoid errores por espacios/acentos/#/etc.
     op = (op or "").lstrip("/")
     return "/".join(quote(seg, safe="-_.~") for seg in op.split("/") if seg != "")
 
-def _storage_headers(content_type: str | None = None, upsert: bool = False, for_multipart: bool = False):
-    if not storage_enabled():
-        raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-    raw_service = (STORAGE_SERVICE_KEY or "").strip()
-    raw_anon = (STORAGE_ANON_KEY or "").strip()
-    key = raw_service or raw_anon
+def _storage_headers(content_type: str | None = None, upsert: bool = False, for_multipart: bool = False, require_admin: bool = False):
+    if require_admin:
+        if not storage_admin_enabled():
+            raise RuntimeError(
+                "Storage administrativo no configurado. Para subir o eliminar archivos debes usar SUPABASE_URL, "
+                "SUPABASE_SERVICE_ROLE_KEY (secret/service key real) y SUPABASE_STORAGE_BUCKET."
+            )
+        key = (STORAGE_SERVICE_KEY or "").strip()
+    else:
+        if not storage_enabled():
+            raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
+        raw_service = (STORAGE_SERVICE_KEY or "").strip()
+        raw_anon = (STORAGE_ANON_KEY or "").strip()
+        key = raw_service or raw_anon
     h = {
         "Accept": "application/json",
     }
@@ -301,7 +322,7 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     try:
         resp = http.post(
             url,
-            headers=_storage_headers(upsert=upsert, for_multipart=True),
+            headers=_storage_headers(upsert=upsert, for_multipart=True, require_admin=True),
             files={"file": (os.path.basename(object_path) or "archivo.bin", data, content_type)},
             timeout=STORAGE_TIMEOUT,
         )
@@ -317,7 +338,7 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
     try:
         resp = http.post(
             url,
-            headers=_storage_headers(content_type=content_type, upsert=upsert),
+            headers=_storage_headers(content_type=content_type, upsert=upsert, require_admin=True),
             data=data,
             timeout=STORAGE_TIMEOUT,
         )
@@ -339,7 +360,7 @@ def storage_upload(object_path: str, data: bytes, content_type: str = "applicati
         if should_try:
             resp = http.put(
                 url,
-                headers=_storage_headers(content_type=content_type, upsert=upsert),
+                headers=_storage_headers(content_type=content_type, upsert=upsert, require_admin=True),
                 data=data,
                 timeout=STORAGE_TIMEOUT,
             )
@@ -401,7 +422,7 @@ def storage_delete(object_path: str):
         return False
     url = f"{STORAGE_URL}/storage/v1/object/{STORAGE_BUCKET}/{op}"
     try:
-        resp = get_http_session().delete(url, headers=_storage_headers(), timeout=STORAGE_TIMEOUT)
+        resp = get_http_session().delete(url, headers=_storage_headers(require_admin=True), timeout=STORAGE_TIMEOUT)
     except Exception as e:
         _storage_set_last_error(url=url, method="storage_delete", exc=e)
         raise RuntimeError(f"Storage delete failed: {e}")
@@ -483,13 +504,13 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
     local_path = save_file(folder_parts, file_name, file_bytes)
-    object_path = "/".join([str(x).strip("/").replace("\\","/") for x in folder_parts] + [file_name])
+    object_path = _storage_object_path(folder_parts, file_name)
 
-    bucket = STORAGE_BUCKET if storage_enabled() else None
-    if storage_enabled():
+    bucket = STORAGE_BUCKET if storage_admin_enabled() else None
+    if storage_admin_enabled():
         try:
             storage_upload(object_path, file_bytes, content_type=content_type, upsert=True)
-        except Exception as e:
+        except Exception:
             # No romper el flujo: deja el archivo local, pero informa.
             bucket = None
             object_path = None
@@ -502,15 +523,23 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
                 st.warning(
                     "No se pudo subir el archivo a Supabase Storage" + extra + ". "
                     "El documento quedó solo en almacenamiento local (puede perderse si Streamlit reinicia)." + hint + " "
-                    "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY (opcional) y SUPABASE_STORAGE_BUCKET. "
+                    "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET. "
                     "En Backup/Restore verás un diagnóstico, o revisa Manage app → Logs."
                 )
             except Exception:
                 pass
     else:
-        # Storage no configurado: queda local
+        # Storage administrativo no configurado: queda local
         bucket = None
         object_path = None
+        if storage_enabled():
+            try:
+                st.warning(
+                    "Storage está configurado solo en modo lectura o con una key sin privilegios de escritura. "
+                    "El documento quedó solo en almacenamiento local. Revisa SUPABASE_SERVICE_ROLE_KEY."
+                )
+            except Exception:
+                pass
 
     return local_path, bucket, object_path
 
@@ -680,13 +709,17 @@ def safe_name(s: str) -> str:
 
 
 def fetch_assigned_workers(faena_id: int):
-    """Devuelve dataframe de trabajadores asignados a una faena."""
+    """Devuelve dataframe de trabajadores asignados a una faena.
+
+    Tolera asignaciones antiguas con estado NULL/vacío y solo excluye las cerradas.
+    """
     return fetch_df(
         '''
         SELECT t.id, t.rut, t.apellidos, t.nombres, COALESCE(a.cargo_faena,'') AS cargo_faena, COALESCE(t.cargo,'') AS cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE a.faena_id=? AND a.estado='ACTIVA'
+        WHERE a.faena_id=?
+          AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         ORDER BY t.apellidos, t.nombres
         ''',
         (int(faena_id),),
@@ -776,6 +809,23 @@ def ensure_dirs():
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
+@st.cache_resource(show_spinner=False)
+def get_pg_pool(dsn: str):
+    if not dsn or psycopg is None or ConnectionPool is None:
+        return None
+    try:
+        pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=1,
+            max_size=8,
+            kwargs={"prepare_threshold": None},
+            timeout=10,
+        )
+        pool.wait(timeout=10)
+        return pool
+    except Exception:
+        return None
+
 def conn():
     # Postgres (Supabase) if configured; otherwise SQLite local.
     if DB_BACKEND == "postgres":
@@ -784,7 +834,10 @@ def conn():
         if not PG_DSN:
             raise RuntimeError("Falta SUPABASE_DB_URL (o PG_DSN) en Secrets/ENV.")
         try:
-            return psycopg.connect(PG_DSN)
+            pool = get_pg_pool(PG_DSN)
+            if pool is not None:
+                return pool.connection()
+            return psycopg.connect(PG_DSN, prepare_threshold=None)
         except Exception as e:
             msg = str(e).strip() or e.__class__.__name__
             raise RuntimeError(
@@ -1169,7 +1222,17 @@ def init_db():
 
 AUTH_ITERATIONS = 200_000
 LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-maderas-gd-1.png"
-LOGIN_LOGO_BYTES = get_brand_logo_bytes(LOGIN_LOGO_URL)
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_login_logo_bytes():
+    return get_brand_logo_bytes(LOGIN_LOGO_URL)
+
+def render_brand_logo(width: int = 220):
+    logo = get_login_logo_bytes()
+    if logo:
+        st.image(logo, width=width)
+    else:
+        st.markdown(f"### {APP_NAME}")
 
 DEFAULT_PERMS = {
     "view_dashboard": True,
@@ -1385,7 +1448,7 @@ def auth_gate_ui():
 
     with cL:
         try:
-            st.image(LOGIN_LOGO_BYTES or LOGIN_LOGO_URL, width=260)
+            render_brand_logo(width=260)
         except Exception:
             pass
         st.markdown('<div class="auth-title">Control documental de faenas</div>', unsafe_allow_html=True)
@@ -1502,11 +1565,19 @@ def executemany(q: str, seq_params):
         c.executemany(q, seq_params)
         c.commit()
 
+def _safe_path_parts(parts):
+    safe = []
+    for part in (parts or []):
+        txt = str(part or "").strip().replace("\\", "/")
+        for chunk in [c for c in txt.split("/") if c]:
+            safe.append(storage_safe_segment(chunk))
+    return safe
+
 def save_file(folder_parts, file_name: str, file_bytes: bytes):
     ensure_dirs()
-    folder = os.path.join(UPLOAD_ROOT, *[str(x) for x in folder_parts])
+    folder = os.path.join(UPLOAD_ROOT, *_safe_path_parts(folder_parts))
     os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, file_name)
+    path = os.path.join(folder, storage_safe_segment(file_name))
     with open(path, "wb") as f:
         f.write(file_bytes)
     return path
@@ -1565,7 +1636,7 @@ def _count_file_references(file_path: str | None, bucket: str | None, object_pat
 
 def cleanup_file_assets(file_path: str | None, bucket: str | None, object_path: str | None):
     issues = []
-    if object_path and storage_enabled():
+    if object_path and storage_admin_enabled():
         try:
             storage_delete(str(object_path))
         except FileNotFoundError:
@@ -1576,6 +1647,30 @@ def cleanup_file_assets(file_path: str | None, bucket: str | None, object_path: 
         _local_delete_file(file_path)
     except Exception as e:
         issues.append(f"Local: {e}")
+    return issues
+
+def fetch_file_refs(table_name: str, where_sql: str = "", params=()):
+    q = f"SELECT file_path, bucket, object_path FROM {table_name}"
+    if where_sql:
+        q += f" WHERE {where_sql}"
+    df = fetch_df(q, params)
+    if df.empty:
+        return []
+    return [row.to_dict() for _, row in df.iterrows()]
+
+def cleanup_deleted_file_refs(file_refs):
+    issues = []
+    seen = set()
+    for ref in (file_refs or []):
+        file_path = ref.get("file_path")
+        bucket = ref.get("bucket")
+        object_path = ref.get("object_path")
+        key = (str(file_path or ""), str(bucket or ""), str(object_path or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _count_file_references(file_path, bucket, object_path) == 0:
+            issues.extend(cleanup_file_assets(file_path, bucket, object_path))
     return issues
 
 
@@ -1625,6 +1720,7 @@ def pendientes_obligatorios(faena_id: int):
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
+          AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         ORDER BY t.apellidos, t.nombres
     ''', (faena_id,))
     out = {}
@@ -1671,7 +1767,13 @@ def faena_progress_table():
     if faenas.empty:
         return faenas
 
-    asg = fetch_df("SELECT faena_id, trabajador_id FROM asignaciones")
+    asg = fetch_df(
+        """
+        SELECT faena_id, trabajador_id
+        FROM asignaciones
+        WHERE COALESCE(NULLIF(TRIM(estado), ''), 'ACTIVA')='ACTIVA'
+        """
+    )
     if asg.empty:
         faenas["trabajadores"] = 0
         faenas["trab_ok"] = 0
@@ -1685,6 +1787,7 @@ def faena_progress_table():
                COUNT(DISTINCT CASE WHEN d.doc_tipo IN ({placeholders}) THEN d.doc_tipo END) AS req_docs_present
         FROM asignaciones a
         LEFT JOIN trabajador_documentos d ON d.trabajador_id=a.trabajador_id
+        WHERE COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         GROUP BY a.faena_id, a.trabajador_id
     '''
     stats = fetch_df(q, tuple(DOC_OBLIGATORIOS))
@@ -1856,6 +1959,7 @@ def export_zip_for_faena(
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
         ''', (faena_id,))
         for _, r in asign.iterrows():
@@ -2012,6 +2116,7 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
             ''',
             (fid,),
@@ -2262,7 +2367,7 @@ if st.session_state.get("nav_page") not in VISIBLE_PAGES:
 with st.sidebar:
     # Branding compacto
     try:
-        st.image(LOGIN_LOGO_BYTES or LOGIN_LOGO_URL, width=170)
+        render_brand_logo(width=170)
     except Exception:
         pass
     st.markdown("**Control documental**")
@@ -2901,10 +3006,15 @@ def page_contratos_faena():
                 st.error("Debes confirmar el checkbox antes de eliminar.")
                 st.stop()
             try:
+                refs = fetch_file_refs("contratos_faena", "id=?", (int(contrato_id),))
                 # primero desvincular (por seguridad explícita, aunque FK está ON DELETE SET NULL)
                 execute("UPDATE faenas SET contrato_faena_id=NULL WHERE contrato_faena_id=?", (int(contrato_id),))
                 execute("DELETE FROM contratos_faena WHERE id=?", (int(contrato_id),))
-                st.success("Contrato eliminado.")
+                cleanup_issues = cleanup_deleted_file_refs(refs)
+                if cleanup_issues:
+                    st.warning("Contrato eliminado, pero hubo problemas al limpiar el archivo asociado: " + " | ".join(cleanup_issues))
+                else:
+                    st.success("Contrato eliminado.")
                 auto_backup_db("contrato_delete")
                 st.rerun()
             except Exception as e:
@@ -3110,7 +3220,7 @@ def page_faenas():
         contratos_m = contratos[contratos["mandante_id"] == int(row["mandante_id"])] if not contratos.empty else pd.DataFrame()
         contrato_opts = [None] + (contratos_m["id"].tolist() if not contratos_m.empty else [])
 
-        def _fmt_contrato2(x):
+        def _fmt_contrato_edit_faena(x):
             if x is None:
                 return "(sin contrato asociado)"
             r2 = contratos_m[contratos_m["id"] == x]
@@ -3128,7 +3238,7 @@ def page_faenas():
             fi_new = st.date_input("Fecha inicio", value=parse_date_maybe(row["fecha_inicio"]) or date.today())
             ft_new = st.date_input("Fecha término (opcional)", value=parse_date_maybe(row["fecha_termino"]))
             estado_new = st.selectbox("Estado", ESTADOS_FAENA, index=ESTADOS_FAENA.index(str(row["estado"])) if str(row["estado"]) in ESTADOS_FAENA else 0)
-            contrato_new = st.selectbox("Contrato de faena (opcional)", contrato_opts, index=contrato_index, format_func=_fmt_contrato2)
+            contrato_new = st.selectbox("Contrato de faena (opcional)", contrato_opts, index=contrato_index, format_func=_fmt_contrato_edit_faena)
 
             errors = validate_faena_dates(fi_new, ft_new, estado_new)
             if errors:
@@ -3179,10 +3289,18 @@ def page_faenas():
                 st.error("Debes confirmar el checkbox antes de eliminar.")
                 st.stop()
             try:
+                refs = []
+                refs.extend(fetch_file_refs("faena_anexos", "faena_id=?", (int(fid),)))
+                refs.extend(fetch_file_refs("faena_empresa_documentos", "faena_id=?", (int(fid),)))
                 execute("DELETE FROM faena_anexos WHERE faena_id=?", (int(fid),))
+                execute("DELETE FROM faena_empresa_documentos WHERE faena_id=?", (int(fid),))
                 execute("DELETE FROM asignaciones WHERE faena_id=?", (int(fid),))
                 execute("DELETE FROM faenas WHERE id=?", (int(fid),))
-                st.success("Faena eliminada.")
+                cleanup_issues = cleanup_deleted_file_refs(refs)
+                if cleanup_issues:
+                    st.warning("Faena eliminada, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
+                else:
+                    st.success("Faena eliminada.")
                 auto_backup_db("faena_delete")
                 # limpiar selección
                 st.session_state["selected_faena_id"] = None
@@ -3190,7 +3308,7 @@ def page_faenas():
             except Exception as e:
                 st.error(f"No se pudo eliminar: {e}")
 
-def page_trabajadores():
+def _page_trabajadores_impl():
     ui_header("Trabajadores", "Carga masiva por Excel o gestión manual. Puedes crear, editar o eliminar trabajadores. Luego asigna a faenas y adjunta documentos.")
     tab1, tab2, tab3 = st.tabs(["📥 Importar Excel", "🧩 Gestión", "📋 Listado"])
 
@@ -3227,7 +3345,7 @@ def page_trabajadores():
                         fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
                         has_ve = "vigencia_examen" in df.columns
 
-                        def _to_text_date(v):
+                        def _to_text_date_import_excel(v):
                             if v is None or pd.isna(v):
                                 return None
                             if isinstance(v, datetime):
@@ -3253,8 +3371,8 @@ def page_trabajadores():
                                 cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
                                 centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
                                 email = str(r.get("email", "") or "").strip() if has_email else ""
-                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
-                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
+                                fecha_contrato = _to_text_date_import_excel(r.get(fc_col)) if fc_col else None
+                                vigencia_examen = _to_text_date_import_excel(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
                                     cursor_execute(
@@ -3353,11 +3471,11 @@ def page_trabajadores():
                 st.info("No hay trabajadores aún.")
                 return
 
-            def _fmt(x):
+            def _fmt_trab_edit(x):
                 r = df[df["id"] == x].iloc[0]
                 return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
 
-            tid = st.selectbox("Selecciona trabajador", df["id"].tolist(), format_func=_fmt, key="trab_edit_sel")
+            tid = st.selectbox("Selecciona trabajador", df["id"].tolist(), format_func=_fmt_trab_edit, key="trab_edit_sel")
             row = df[df["id"] == tid].iloc[0]
 
             st.markdown("### ✏️ Editar trabajador")
@@ -3399,7 +3517,7 @@ def page_trabajadores():
 
             st.divider()
             st.markdown("### 🗑️ Eliminar trabajador")
-            st.caption("Se eliminarán también sus asignaciones a faenas y sus documentos. Esto NO elimina archivos físicos en disco (solo la base de datos).")
+            st.caption("Se eliminarán también sus asignaciones a faenas y sus documentos. La app intentará limpiar además los archivos físicos que ya no queden referenciados.")
 
             dep_asg = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
             dep_docs = fetch_df("SELECT COUNT(*) AS n FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
@@ -3417,10 +3535,15 @@ def page_trabajadores():
                     st.error("Debes confirmar el checkbox antes de eliminar.")
                     st.stop()
                 try:
+                    refs = fetch_file_refs("trabajador_documentos", "trabajador_id=?", (int(tid),))
                     execute("DELETE FROM asignaciones WHERE trabajador_id=?", (int(tid),))
                     execute("DELETE FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
                     execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
-                    st.success("Trabajador eliminado.")
+                    cleanup_issues = cleanup_deleted_file_refs(refs)
+                    if cleanup_issues:
+                        st.warning("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
+                    else:
+                        st.success("Trabajador eliminado.")
                     auto_backup_db("trabajador_delete")
                     st.rerun()
                 except Exception as e:
@@ -3444,7 +3567,7 @@ def page_trabajadores():
         st.dataframe(out, use_container_width=True, hide_index=True)
         st.caption("Para editar/eliminar: ve a la pestaña **Gestión → Editar / Eliminar**.")
 
-def page_asignar_trabajadores():
+def _page_asignar_trabajadores_impl():
     ui_header("Asignar Trabajadores", "Carga e incorpora trabajadores por faena. Si un trabajador se repite en otra faena, mantiene su documentación ya cargada.")
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre
@@ -3516,6 +3639,7 @@ def page_asignar_trabajadores():
                         else:
                             skipped_count += 1
                     c.commit()
+                clear_app_caches()
                 msg = f"Trabajadores asignados: {inserted_count}."
                 if skipped_count:
                     msg += f" Omitidos por ya existir: {skipped_count}."
@@ -3560,7 +3684,7 @@ def page_asignar_trabajadores():
                         fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
                         has_ve = "vigencia_examen" in df.columns
 
-                        def _to_text_date(v):
+                        def _to_text_date_import_faena(v):
                             if v is None or pd.isna(v):
                                 return None
                             if isinstance(v, datetime):
@@ -3586,8 +3710,8 @@ def page_asignar_trabajadores():
                                 cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
                                 centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
                                 email = str(r.get("email", "") or "").strip() if has_email else ""
-                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
-                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
+                                fecha_contrato = _to_text_date_import_faena(r.get(fc_col)) if fc_col else None
+                                vigencia_examen = _to_text_date_import_faena(r.get("vigencia_examen")) if has_ve else None
 
                                 if overwrite:
                                     cursor_execute(
@@ -3644,6 +3768,7 @@ def page_asignar_trabajadores():
 
                             c.commit()
 
+                        clear_app_caches()
                         st.success(f"Listo. Filas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped} | Asignados: {assigned}")
                         auto_backup_db("import_asignar_faena")
                         # llevar a docs con la faena seleccionada
@@ -3720,7 +3845,7 @@ def page_asignar_trabajadores():
                 if st.button("Limpiar selección", use_container_width=True, key="btn_asg_remove_clear"):
                     st.session_state["asg_remove_multi"] = []
                     st.rerun()
-def page_documentos_empresa():
+def _page_documentos_empresa_impl():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
 
@@ -3830,7 +3955,7 @@ def page_documentos_empresa():
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_delete")
                 st.rerun()
-def page_documentos_empresa_faena():
+def _page_documentos_empresa_faena_impl():
     ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
 
     faenas = fetch_df('''
@@ -3961,7 +4086,7 @@ def page_documentos_empresa_faena():
                 auto_backup_db("doc_empresa_faena_delete")
                 st.rerun()
 
-def page_documentos_trabajador():
+def _page_documentos_trabajador_impl():
     ui_header(
         "Documentos Trabajador",
         "Carga documentos obligatorios por trabajador. Puedes trabajar por FAENA: selecciona una faena y verás solo los trabajadores asignados.",
@@ -4032,11 +4157,11 @@ def page_documentos_trabajador():
             return
 
     # Selector de trabajador (solo asignados si scoped)
-    def _fmt(x):
+    def _fmt_trab_docs(x):
         r = trab[trab["id"] == x].iloc[0]
         return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
 
-    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt, key="docs_trabajador_pick")
+    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt_trab_docs, key="docs_trabajador_pick")
 
     # Estado documental del trabajador (global: se reutiliza entre faenas)
     docs = fetch_df(
@@ -4206,14 +4331,14 @@ def page_documentos_trabajador():
                 auto_backup_db("doc_trabajador_delete")
                 st.rerun()
 
-def _get_bytes(file_path, bucket, object_path):
+def _get_bytes_impl(file_path, bucket, object_path):
     try:
         return load_file_anywhere(file_path, bucket, object_path)
     except Exception:
         return None
 
 
-def page_export_zip():
+def _page_export_zip_impl():
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
 
     faenas = fetch_df('''
@@ -4286,6 +4411,7 @@ def page_export_zip():
             FROM trabajador_documentos td
             JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY td.doc_tipo
         ''', (int(faena_id),))
         trab_list = trab_types["doc_tipo"].dropna().astype(str).tolist() if not trab_types.empty else []
@@ -4320,7 +4446,7 @@ def page_export_zip():
 
         if inc_emp_faena:
             emp_docs = fetch_df(
-                "SELECT id, doc_tipo, nombre_archivo, file_path, object_path, fecha_vencimiento FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, nombre_archivo, id",
+                "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, nombre_archivo, id",
                 (int(faena_id),),
             )
             use_specific_emp_docs = st.checkbox(
@@ -4338,7 +4464,7 @@ def page_export_zip():
                         did = int(row["id"])
                         nombre = str(row.get("nombre_archivo") or row.get("file_path") or row.get("object_path") or f"documento_{did}")
                         nombre = os.path.basename(nombre)
-                        venc = f" | vence {row['fecha_vencimiento']}" if row.get("fecha_vencimiento") else ""
+                        venc = ""
                         emp_doc_labels[did] = f"{did} · {row.get('doc_tipo', '-')} · {nombre}{venc}"
                     emp_ids = list(emp_doc_labels.keys())
                     emp_faena_doc_sel_ids = st.multiselect(
@@ -4357,6 +4483,7 @@ def page_export_zip():
                 FROM asignaciones a
                 JOIN trabajadores t ON t.id=a.trabajador_id
                 WHERE a.faena_id=?
+                  AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
                 ORDER BY t.apellidos, t.nombres
             ''', (int(faena_id),))
             use_specific_workers = st.checkbox(
@@ -4385,7 +4512,7 @@ def page_export_zip():
                     selected_trab_doc_map = {}
                     for tid in selected_trab_ids:
                         docs_worker = fetch_df(
-                            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path, fecha_vencimiento FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
+                            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
                             (int(tid),),
                         )
                         with st.expander(f"Documentos de {worker_labels.get(int(tid), tid)}", expanded=False):
@@ -4398,7 +4525,7 @@ def page_export_zip():
                                     did = int(row["id"])
                                     nombre = str(row.get("nombre_archivo") or row.get("file_path") or row.get("object_path") or f"documento_{did}")
                                     nombre = os.path.basename(nombre)
-                                    venc = f" | vence {row['fecha_vencimiento']}" if row.get("fecha_vencimiento") else ""
+                                    venc = ""
                                     doc_labels[did] = f"{did} · {row.get('doc_tipo', '-')} · {nombre}{venc}"
                                 doc_ids = list(doc_labels.keys())
                                 selected_trab_doc_map[int(tid)] = st.multiselect(
@@ -4446,1396 +4573,144 @@ def page_export_zip():
             st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
 
     with tab3:
-        base = fetch_df('''
-            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio, f.fecha_termino, f.ubicacion,
-                   COALESCE(cf.nombre, '') AS contrato_faena
-            FROM faenas f
-            JOIN mandantes m ON m.id=f.mandante_id
-            LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-            ORDER BY f.id DESC
-        ''')
-
-        if base.empty:
-            st.info("No hay faenas.")
-            return
-
-        faena_id = st.selectbox(
-            "Faena",
-            base["id"].tolist(),
-            format_func=lambda x: f"{x} - {base[base['id']==x].iloc[0]['mandante']} / {base[base['id']==x].iloc[0]['nombre']}",
-        )
-        st.session_state["selected_faena_id"] = int(faena_id)
-
-        st.markdown("### Subir anexo")
-        up = st.file_uploader("Archivo anexo", key="up_anexo_faena", type=None)
-        render_upload_help()
-        if st.button("Guardar anexo", type="primary"):
-            if up is None:
-                st.error("Debes subir un archivo primero.")
-                st.stop()
-            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, "type", None) or "application/octet-stream")
-            file_path, bucket, object_path = save_file_online(["faenas", faena_id, "anexos"], payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
-            sha = sha256_bytes(payload["file_bytes"])
-            execute(
-                "INSERT INTO faena_anexos(faena_id, nombre, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (int(faena_id), payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
-            )
-            if payload["compressed"] and payload.get("compression_note"):
-                st.info(payload["compression_note"])
-            st.success("Anexo guardado.")
-            auto_backup_db("anexo_faena")
-            st.rerun()
-
-        anexos = fetch_df("SELECT id, nombre, created_at FROM faena_anexos WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
-        st.caption("Anexos cargados")
-        st.dataframe(anexos if not anexos.empty else pd.DataFrame([{"info": "(sin anexos)"}]), use_container_width=True)
-
-    # ------------------
-    # Tab 4: editar/eliminar
-    # ------------------
-    with tab4:
-        base = fetch_df('''
-            SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.ubicacion, f.fecha_inicio, f.fecha_termino, f.estado,
-                   f.contrato_faena_id, COALESCE(cf.nombre,'') AS contrato_nombre
-            FROM faenas f
-            JOIN mandantes m ON m.id=f.mandante_id
-            LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-            ORDER BY f.id DESC
-        ''')
-        if base.empty:
-            st.info("No hay faenas para editar.")
-            return
-
-        fid = st.selectbox(
-            "Selecciona faena",
-            base["id"].tolist(),
-            format_func=lambda x: f"{int(x)} - {base[base['id']==x].iloc[0]['mandante']} / {base[base['id']==x].iloc[0]['nombre']} ({base[base['id']==x].iloc[0]['estado']})",
-            key="faena_edit_sel",
-        )
-        st.session_state["selected_faena_id"] = int(fid)
-        row = base[base["id"] == int(fid)].iloc[0]
-
-        # Contratos compatibles con el mandante de la faena (o ninguno)
-        contratos_m = contratos[contratos["mandante_id"] == int(row["mandante_id"])] if not contratos.empty else pd.DataFrame()
-        contrato_opts = [None] + (contratos_m["id"].tolist() if not contratos_m.empty else [])
-
-        def _fmt_contrato2(x):
-            if x is None:
-                return "(sin contrato asociado)"
-            r2 = contratos_m[contratos_m["id"] == x]
-            if r2.empty:
-                return str(x)
-            return f"{int(x)} - {r2.iloc[0]['nombre']}"
-
-        default_c = None if pd.isna(row["contrato_faena_id"]) else int(row["contrato_faena_id"])
-        contrato_index = contrato_opts.index(default_c) if default_c in contrato_opts else 0
-
-        st.markdown("### ✏️ Editar faena")
-        with st.form("form_edit_faena"):
-            nombre_new = st.text_input("Nombre", value=str(row["nombre"] or ""))
-            ubic_new = st.text_input("Ubicación", value=str(row["ubicacion"] or ""))
-            fi_new = st.date_input("Fecha inicio", value=parse_date_maybe(row["fecha_inicio"]) or date.today())
-            ft_new = st.date_input("Fecha término (opcional)", value=parse_date_maybe(row["fecha_termino"]))
-            estado_new = st.selectbox("Estado", ESTADOS_FAENA, index=ESTADOS_FAENA.index(str(row["estado"])) if str(row["estado"]) in ESTADOS_FAENA else 0)
-            contrato_new = st.selectbox("Contrato de faena (opcional)", contrato_opts, index=contrato_index, format_func=_fmt_contrato2)
-
-            errors = validate_faena_dates(fi_new, ft_new, estado_new)
-            if errors:
-                st.warning("Revisar: " + " | ".join(errors))
-
-            ok_upd = st.form_submit_button("Guardar cambios", type="primary")
-
-        if ok_upd:
-            if not nombre_new.strip():
-                st.error("El nombre no puede estar vacío.")
-                st.stop()
-            if errors:
-                st.error("Corrige las fechas/estado antes de guardar.")
-                st.stop()
-            try:
-                execute(
-                    "UPDATE faenas SET nombre=?, ubicacion=?, fecha_inicio=?, fecha_termino=?, estado=?, contrato_faena_id=? WHERE id=?",
-                    (
-                        nombre_new.strip(),
-                        ubic_new.strip(),
-                        str(fi_new),
-                        str(ft_new) if ft_new else None,
-                        estado_new,
-                        int(contrato_new) if contrato_new else None,
-                        int(fid),
-                    ),
-                )
-                st.success("Faena actualizada.")
-                auto_backup_db("faena_edit")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo actualizar: {e}")
-
-        st.divider()
-        st.markdown("### 🗑️ Eliminar faena")
-        st.caption("Se eliminará la faena y sus anexos/asignaciones asociadas. Los trabajadores NO se eliminan.")
-
-        dep1 = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE faena_id=?", (int(fid),))
-        dep2 = fetch_df("SELECT COUNT(*) AS n FROM faena_anexos WHERE faena_id=?", (int(fid),))
-        n_asg = int(dep1["n"].iloc[0]) if not dep1.empty else 0
-        n_anx = int(dep2["n"].iloc[0]) if not dep2.empty else 0
-
-        st.warning(f"Dependencias: {n_asg} asignaciones · {n_anx} anexos")
-
-        confirm = st.checkbox("Confirmo que deseo eliminar esta faena", key="chk_del_faena")
-        if st.button("Eliminar faena definitivamente", type="secondary"):
-            if not confirm:
-                st.error("Debes confirmar el checkbox antes de eliminar.")
-                st.stop()
-            try:
-                execute("DELETE FROM faena_anexos WHERE faena_id=?", (int(fid),))
-                execute("DELETE FROM asignaciones WHERE faena_id=?", (int(fid),))
-                execute("DELETE FROM faenas WHERE id=?", (int(fid),))
-                st.success("Faena eliminada.")
-                auto_backup_db("faena_delete")
-                # limpiar selección
-                st.session_state["selected_faena_id"] = None
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo eliminar: {e}")
-
-def page_trabajadores():
-    ui_header("Trabajadores", "Carga masiva por Excel o gestión manual. Puedes crear, editar o eliminar trabajadores. Luego asigna a faenas y adjunta documentos.")
-    tab1, tab2, tab3 = st.tabs(["📥 Importar Excel", "🧩 Gestión", "📋 Listado"])
-
-    # -------------------------
-    # Tab 1: Importación Excel
-    # -------------------------
-    with tab1:
-        st.write("Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
-        up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trabajadores")
-        if up is not None:
-            try:
-                xls = pd.ExcelFile(up)
-                sheet = st.selectbox("Hoja", xls.sheet_names, index=0, key="sheet_excel_trab")
-                raw = pd.read_excel(xls, sheet_name=sheet)
-
-                colmap = {c: norm_col(str(c)) for c in raw.columns}
-                df = raw.rename(columns=colmap).copy()
-
-                st.caption("Vista previa (primeras 10 filas)")
-                st.dataframe(df.head(10), use_container_width=True)
-
-                if "rut" not in df.columns or "nombre" not in df.columns:
-                    st.error("El Excel debe tener columnas 'RUT' y 'NOMBRE'.")
-                else:
-                    overwrite = st.checkbox("Sobrescribir si el RUT ya existe", value=True, key="ow_excel_trab")
-
-                    if st.button("Importar Excel ahora", type="primary", key="btn_import_excel_trab"):
-                        existing_set = set(fetch_df("SELECT rut FROM trabajadores")["rut"].astype(str).tolist())
-
-                        rows = inserted = updated = skipped = 0
-                        has_cargo = "cargo" in df.columns
-                        has_cc = "centro_costo" in df.columns
-                        has_email = "email" in df.columns
-                        fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
-                        has_ve = "vigencia_examen" in df.columns
-
-                        def _to_text_date(v):
-                            if v is None or pd.isna(v):
-                                return None
-                            if isinstance(v, datetime):
-                                return str(v.date())
-                            if isinstance(v, date):
-                                return str(v)
-                            return str(v)
-
-                        with conn() as c:
-                            for _, r in df.iterrows():
-                                rows += 1
-                                rut = clean_rut(str(r.get("rut", "") or ""))
-                                nombre = str(r.get("nombre", "") or "").strip()
-
-                                if not rut or rut.lower() in ("nan", "none"):
-                                    skipped += 1
-                                    continue
-                                if not nombre or nombre.lower() in ("nan", "none"):
-                                    skipped += 1
-                                    continue
-
-                                nombres, apellidos = split_nombre_completo(nombre)
-                                cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
-                                centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
-                                email = str(r.get("email", "") or "").strip() if has_email else ""
-                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
-                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
-
-                                if overwrite:
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ON CONFLICT(rut) DO UPDATE SET
-                                            nombres=excluded.nombres,
-                                            apellidos=excluded.apellidos,
-                                            cargo=excluded.cargo,
-                                            centro_costo=excluded.centro_costo,
-                                            email=excluded.email,
-                                            fecha_contrato=excluded.fecha_contrato,
-                                            vigencia_examen=excluded.vigencia_examen
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
-                                    if rut in existing_set:
-                                        updated += 1
-                                    else:
-                                        inserted += 1
-                                        existing_set.add(rut)
-                                else:
-                                    if rut in existing_set:
-                                        skipped += 1
-                                        continue
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
-                                    inserted += 1
-                                    existing_set.add(rut)
-
-                            c.commit()
-
-                        st.success(f"Importación lista. Filas leídas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped}")
-                        auto_backup_db("import_excel")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo leer/importar el Excel: {e}")
-
-    # -------------------------
-    # Tab 2: Gestión (crear/editar/eliminar)
-    # -------------------------
-    with tab2:
-        t_create, t_edit = st.tabs(["➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
-
-        with t_create:
-            with st.form("form_trabajador_manual"):
-                rut = st.text_input("RUT", placeholder="12.345.678-9")
-                nombres = st.text_input("Nombres", placeholder="Juan")
-                apellidos = st.text_input("Apellidos", placeholder="Pérez")
-                cargo = st.text_input("Cargo", placeholder="Operador Harvester")
-                centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA")
-                email = st.text_input("Email (opcional)")
-                fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None)
-                vigencia_examen = st.date_input("Vigencia examen (opcional)", value=None)
-                ok = st.form_submit_button("Guardar trabajador", type="primary")
-
-            if ok:
-                if not (rut.strip() and nombres.strip() and apellidos.strip()):
-                    st.error("Debes completar RUT, Nombres y Apellidos.")
-                    st.stop()
-                try:
-                    execute(
-                        '''
-                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                        VALUES(?,?,?,?,?,?,?,?)
-                        ON CONFLICT(rut) DO UPDATE SET
-                            nombres=excluded.nombres,
-                            apellidos=excluded.apellidos,
-                            cargo=excluded.cargo,
-                            centro_costo=excluded.centro_costo,
-                            email=excluded.email,
-                            fecha_contrato=excluded.fecha_contrato,
-                            vigencia_examen=excluded.vigencia_examen
-                        ''',
-                        (clean_rut(rut), nombres.strip(), apellidos.strip(), cargo.strip(), centro_costo.strip(), email.strip(),
-                         str(fecha_contrato) if fecha_contrato else None,
-                         str(vigencia_examen) if vigencia_examen else None),
-                    )
-                    st.success("Trabajador guardado.")
-                    auto_backup_db("trabajador")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo guardar: {e}")
-
-        with t_edit:
-            df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY apellidos, nombres")
-            if df.empty:
-                st.info("No hay trabajadores aún.")
-                return
-
-            def _fmt(x):
-                r = df[df["id"] == x].iloc[0]
-                return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
-
-            tid = st.selectbox("Selecciona trabajador", df["id"].tolist(), format_func=_fmt, key="trab_edit_sel")
-            row = df[df["id"] == tid].iloc[0]
-
-            st.markdown("### ✏️ Editar trabajador")
-            with st.form("form_trabajador_edit"):
-                rut_new = st.text_input("RUT", value=str(row["rut"] or ""))
-                nombres_new = st.text_input("Nombres", value=str(row["nombres"] or ""))
-                apellidos_new = st.text_input("Apellidos", value=str(row["apellidos"] or ""))
-                cargo_new = st.text_input("Cargo", value=str(row["cargo"] or ""))
-                cc_new = st.text_input("Centro de costo (opcional)", value=str(row["centro_costo"] or ""))
-                email_new = st.text_input("Email (opcional)", value=str(row["email"] or ""))
-                fc_new = st.date_input("Fecha de contrato (opcional)", value=parse_date_maybe(row["fecha_contrato"]))
-                ve_new = st.date_input("Vigencia examen (opcional)", value=parse_date_maybe(row["vigencia_examen"]))
-                ok_upd = st.form_submit_button("Guardar cambios", type="primary")
-
-            if ok_upd:
-                if not (rut_new.strip() and nombres_new.strip() and apellidos_new.strip()):
-                    st.error("Debes completar RUT, Nombres y Apellidos.")
-                    st.stop()
-                try:
-                    execute(
-                        "UPDATE trabajadores SET rut=?, nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=?",
-                        (
-                            clean_rut(rut_new),
-                            nombres_new.strip(),
-                            apellidos_new.strip(),
-                            cargo_new.strip(),
-                            cc_new.strip(),
-                            email_new.strip(),
-                            str(fc_new) if fc_new else None,
-                            str(ve_new) if ve_new else None,
-                            int(tid),
-                        ),
-                    )
-                    st.success("Trabajador actualizado.")
-                    auto_backup_db("trabajador_edit")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo actualizar: {e}")
-
-            st.divider()
-            st.markdown("### 🗑️ Eliminar trabajador")
-            st.caption("Se eliminarán también sus asignaciones a faenas y sus documentos. Esto NO elimina archivos físicos en disco (solo la base de datos).")
-
-            dep_asg = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
-            dep_docs = fetch_df("SELECT COUNT(*) AS n FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
-            dep_faenas = fetch_df("SELECT COUNT(DISTINCT faena_id) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
-
-            n_asg = int(dep_asg["n"].iloc[0]) if not dep_asg.empty else 0
-            n_docs = int(dep_docs["n"].iloc[0]) if not dep_docs.empty else 0
-            n_faenas = int(dep_faenas["n"].iloc[0]) if not dep_faenas.empty else 0
-
-            st.warning(f"Dependencias: {n_asg} asignaciones (en {n_faenas} faenas) · {n_docs} documentos")
-
-            confirm = st.checkbox("Confirmo que deseo eliminar este trabajador", key="chk_del_trab")
-            if st.button("Eliminar trabajador definitivamente", type="secondary", key="btn_del_trab"):
-                if not confirm:
-                    st.error("Debes confirmar el checkbox antes de eliminar.")
-                    st.stop()
-                try:
-                    execute("DELETE FROM asignaciones WHERE trabajador_id=?", (int(tid),))
-                    execute("DELETE FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
-                    execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
-                    st.success("Trabajador eliminado.")
-                    auto_backup_db("trabajador_delete")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo eliminar: {e}")
-
-    # -------------------------
-    # Tab 3: Listado
-    # -------------------------
-    with tab3:
-        df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY id DESC")
-        q = st.text_input("Buscar", placeholder="RUT, nombre o cargo", key="q_trab_list")
-        out = df.copy()
-        if q.strip():
-            qq = q.strip().lower()
-            out = out[
-                out["rut"].astype(str).str.lower().str.contains(qq, na=False) |
-                out["apellidos"].astype(str).str.lower().str.contains(qq, na=False) |
-                out["nombres"].astype(str).str.lower().str.contains(qq, na=False) |
-                out["cargo"].astype(str).str.lower().str.contains(qq, na=False)
-            ]
-        st.dataframe(out, use_container_width=True, hide_index=True)
-        st.caption("Para editar/eliminar: ve a la pestaña **Gestión → Editar / Eliminar**.")
-
-def page_asignar_trabajadores():
-    ui_header("Asignar Trabajadores", "Carga e incorpora trabajadores por faena. Si un trabajador se repite en otra faena, mantiene su documentación ya cargada.")
-    faenas = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-    ''')
-    if faenas.empty:
-        ui_tip("Crea faenas primero.")
-        return
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        faena_id = st.selectbox(
-            "Faena",
-            faenas["id"].tolist(),
-            format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']}",
-        )
-    with col2:
-        st.session_state["selected_faena_id"] = int(faena_id)
-
-    tab1, tab2, tab3 = st.tabs(["🧩 Asignar existentes", "📥 Importar Excel y asignar", "📋 Asignados"])
-
-    # -------------------------
-    # Tab 1: asignar existentes
-    # -------------------------
-    with tab1:
-        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
-        if trab.empty:
-            ui_tip("Crea trabajadores primero (o usa 'Importar Excel y asignar').")
-            return
-
-        asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=?", (int(faena_id),))
-        asignados_ids = set(asignados["trabajador_id"].tolist()) if not asignados.empty else set()
-        disponibles = trab[~trab["id"].isin(asignados_ids)].copy()
-
-        def _fmt_trab(x):
-            r = trab[trab["id"] == x].iloc[0]
-            return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
-
-        st.markdown("#### Agregar asignaciones")
-        if disponibles.empty:
-            st.success("Todos los trabajadores ya están asignados.")
-        else:
-            with st.form("form_asignar"):
-                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
-                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
-                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
-                ok = st.form_submit_button("Asignar seleccionados", type="primary")
-
-            if ok:
-                if len(seleccion) == 0:
-                    st.error("Selecciona al menos un trabajador para asignar.")
-                    st.stop()
-                inserted_count = 0
-                skipped_count = 0
-                with conn() as c:
-                    for tid in seleccion:
-                        cur = cursor_execute(
-                            c,
-                            ASSIGNACION_INSERT_SQL,
-                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
-                        )
-                        try:
-                            rc = int(cur.rowcount or 0)
-                        except Exception:
-                            rc = 0
-                        if rc > 0:
-                            inserted_count += 1
-                        else:
-                            skipped_count += 1
-                    c.commit()
-                msg = f"Trabajadores asignados: {inserted_count}."
-                if skipped_count:
-                    msg += f" Omitidos por ya existir: {skipped_count}."
-                st.success(msg)
-                auto_backup_db("asignacion")
-                st.rerun()
-
-    # ---------------------------------
-    # Tab 2: importar Excel y asignar
-    # ---------------------------------
-    with tab2:
-        st.write("Sube Excel de trabajadores para **esta faena**. Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
-        up = st.file_uploader("Sube Excel (.xlsx)", type=["xlsx"], key="up_excel_trab_por_faena")
-        if up is not None:
-            try:
-                xls = pd.ExcelFile(up)
-                sheet = st.selectbox("Hoja", xls.sheet_names, index=0, key="sheet_trab_por_faena")
-                raw = pd.read_excel(xls, sheet_name=sheet)
-
-                colmap = {c: norm_col(str(c)) for c in raw.columns}
-                df = raw.rename(columns=colmap).copy()
-
-                st.caption("Vista previa (primeras 10 filas)")
-                st.dataframe(df.head(10), use_container_width=True)
-
-                if "rut" not in df.columns or "nombre" not in df.columns:
-                    st.error("El Excel debe tener columnas 'RUT' y 'NOMBRE'.")
-                else:
-                    overwrite = st.checkbox("Sobrescribir datos si el RUT ya existe", value=True, key="ow_trab_por_faena")
-                    fecha_ingreso = st.date_input("Fecha ingreso para esta faena", value=date.today(), key="fi_trab_por_faena")
-                    cargo_faena_all = st.text_input("Cargo en faena (opcional, aplica a todos)", key="cargo_faena_all")
-
-                    if st.button("Importar y asignar a esta faena", type="primary"):
-                        existing = fetch_df("SELECT rut, id FROM trabajadores")
-                        rut_to_id = {str(r["rut"]): int(r["id"]) for _, r in existing.iterrows()} if not existing.empty else {}
-
-                        rows = inserted = updated = skipped = assigned = 0
-
-                        has_cargo = "cargo" in df.columns
-                        has_cc = "centro_costo" in df.columns
-                        has_email = "email" in df.columns
-                        fc_col = "fecha_de_contrato" if "fecha_de_contrato" in df.columns else ("fecha_contrato" if "fecha_contrato" in df.columns else None)
-                        has_ve = "vigencia_examen" in df.columns
-
-                        def _to_text_date(v):
-                            if v is None or pd.isna(v):
-                                return None
-                            if isinstance(v, datetime):
-                                return str(v.date())
-                            if isinstance(v, date):
-                                return str(v)
-                            return str(v)
-
-                        with conn() as c:
-                            for _, r in df.iterrows():
-                                rows += 1
-                                rut = clean_rut(str(r.get("rut", "") or ""))
-                                nombre = str(r.get("nombre", "") or "").strip()
-
-                                if not rut or rut.lower() in ("nan", "none"):
-                                    skipped += 1
-                                    continue
-                                if not nombre or nombre.lower() in ("nan", "none"):
-                                    skipped += 1
-                                    continue
-
-                                nombres, apellidos = split_nombre_completo(nombre)
-                                cargo = str(r.get("cargo", "") or "").strip() if has_cargo else ""
-                                centro_costo = str(r.get("centro_costo", "") or "").strip() if has_cc else ""
-                                email = str(r.get("email", "") or "").strip() if has_email else ""
-                                fecha_contrato = _to_text_date(r.get(fc_col)) if fc_col else None
-                                vigencia_examen = _to_text_date(r.get("vigencia_examen")) if has_ve else None
-
-                                if overwrite:
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ON CONFLICT(rut) DO UPDATE SET
-                                            nombres=excluded.nombres,
-                                            apellidos=excluded.apellidos,
-                                            cargo=excluded.cargo,
-                                            centro_costo=excluded.centro_costo,
-                                            email=excluded.email,
-                                            fecha_contrato=excluded.fecha_contrato,
-                                            vigencia_examen=excluded.vigencia_examen
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
-                                    if rut in rut_to_id:
-                                        updated += 1
-                                    else:
-                                        inserted += 1
-                                else:
-                                    if rut in rut_to_id:
-                                        skipped += 1
-                                        continue
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
-                                    inserted += 1
-
-                                # obtener id del trabajador
-                                if rut not in rut_to_id:
-                                    rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
-                                    if rid:
-                                        rut_to_id[rut] = int(rid[0])
-
-                                tid = rut_to_id.get(rut)
-                                if tid:
-                                    cur_asg = cursor_execute(
-                                        c,
-                                        ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
-                                    )
-                                    try:
-                                        assigned += int(cur_asg.rowcount or 0)
-                                    except Exception:
-                                        pass
-
-                            c.commit()
-
-                        st.success(f"Listo. Filas: {rows} | Insertados: {inserted} | Actualizados: {updated} | Omitidos: {skipped} | Asignados: {assigned}")
-                        auto_backup_db("import_asignar_faena")
-                        # llevar a docs con la faena seleccionada
-                        st.session_state["selected_faena_id"] = int(faena_id)
-                        go("Documentos Trabajador", faena_id=int(faena_id))
-            except Exception as e:
-                st.error(f"No se pudo leer/importar el Excel: {e}")
-
-    # -------------------------
-    # Tab 3: asignados + quitar
-    # -------------------------
-    with tab3:
-        docs_asg = fetch_df('''
-            SELECT a.id AS asignacion_id,
-                   t.id AS trabajador_id,
-                   t.apellidos || ' ' || t.nombres AS trabajador,
-                   t.rut,
-                   a.cargo_faena,
-                   a.fecha_ingreso,
-                   a.estado
-            FROM asignaciones a
-            JOIN trabajadores t ON t.id=a.trabajador_id
-            WHERE a.faena_id=?
-            ORDER BY t.apellidos, t.nombres
-        ''', (int(faena_id),))
-
-        if docs_asg.empty:
-            st.info("(sin trabajadores asignados)")
-        else:
-            st.dataframe(
-                docs_asg[["trabajador","rut","cargo_faena","fecha_ingreso","estado"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.divider()
-            st.markdown("#### 🗑️ Quitar trabajadores de esta faena")
-            st.caption("Esto **solo elimina la asignación** (no elimina al trabajador ni sus documentos).")
-
-            def _fmt_asg(tid):
-                r = docs_asg[docs_asg["trabajador_id"] == tid].iloc[0]
-                return f"{r['trabajador']} ({r['rut']})"
-
-            to_remove = st.multiselect(
-                "Selecciona trabajadores a quitar",
-                docs_asg["trabajador_id"].tolist(),
-                format_func=_fmt_asg,
-                key="asg_remove_multi",
-            )
-            confirm = st.checkbox(
-                "Confirmo que deseo quitar los seleccionados de esta faena",
-                key="asg_remove_confirm",
-            )
-
-            cols = st.columns([1, 1, 2])
-            with cols[0]:
-                if st.button("Quitar seleccionados", type="secondary", use_container_width=True, key="btn_asg_remove"):
-                    if not to_remove:
-                        st.error("Selecciona al menos un trabajador.")
-                        st.stop()
-                    if not confirm:
-                        st.error("Debes confirmar el checkbox antes de quitar.")
-                        st.stop()
-                    try:
-                        params = [(int(faena_id), int(tid)) for tid in to_remove]
-                        executemany("DELETE FROM asignaciones WHERE faena_id=? AND trabajador_id=?", params)
-                        st.success(f"Listo. Quitados: {len(to_remove)}")
-                        auto_backup_db("asignacion_remove")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo quitar: {e}")
-
-            with cols[1]:
-                if st.button("Limpiar selección", use_container_width=True, key="btn_asg_remove_clear"):
-                    st.session_state["asg_remove_multi"] = []
-                    st.rerun()
-def page_documentos_empresa():
-    ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
-    st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
-
-    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
-    tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
-    faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
-
-    c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Tipos sugeridos", len(DOC_EMPRESA_SUGERIDOS))
-    c2.metric("Tipos presentes", len(set(tipos_presentes)))
-    c3.metric("Faltan sugeridos", len(faltan))
-
-    if faltan:
-        st.warning("Sugeridos faltantes: " + ", ".join(faltan))
-    else:
-        st.success("Sugeridos completos (si aplica).")
-
-    tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
-
-    with tab1:
-        st.caption("Tipos sugeridos:")
-        st.code("\n".join(DOC_EMPRESA_SUGERIDOS))
-
-        colx1, colx2 = st.columns([1, 2])
-        with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"])
-        with colx2:
-            tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
-
-        up = st.file_uploader("Archivo", key="up_doc_empresa", type=None)
-        render_upload_help()
-        if st.button("Guardar documento empresa", type="primary"):
-            if up is None:
-                st.error("Debes subir un archivo.")
-                st.stop()
-            doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
-            folder = ["empresa", safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
-            sha = sha256_bytes(payload["file_bytes"])
-            execute(
-                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
-            )
-            if payload["compressed"] and payload.get("compression_note"):
-                st.info(payload["compression_note"])
-            st.success("Documento empresa guardado.")
-            auto_backup_db("doc_empresa")
-            st.rerun()
-
-
-
-    with tab2:
-        if df.empty:
-            st.info("(sin documentos empresa)")
-        else:
-            docs = df.copy()
-            show = (
-                docs[["doc_tipo", "nombre_archivo", "created_at"]].copy()
-                if all(c in docs.columns for c in ["doc_tipo", "nombre_archivo", "created_at"])
-                else docs.copy()
-            )
-            st.dataframe(show, use_container_width=True, hide_index=True)
-
-            st.divider()
-            st.markdown("#### 🔎 Gestionar documento")
-            pick_id = st.selectbox(
-                "Documento",
-                docs["id"].tolist(),
-                format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-                key="emp_pick_doc",
-            )
-            row = docs[docs["id"] == pick_id].iloc[0]
-            fpath = row.get("file_path", "")
-            bucket = row.get("bucket", None)
-            object_path = row.get("object_path", None)
-            fname = row.get("nombre_archivo", "documento")
-            try:
-                b = load_file_anywhere(fpath, bucket, object_path)
-                st.download_button(
-                    "Descargar documento",
-                    data=b,
-                    file_name=fname,
-                    mime="application/octet-stream",
-                    use_container_width=True,
-                    key="emp_dl_btn",
-                )
-            except Exception:
-                st.warning(
-                    "El archivo no está disponible (Storage/disco). "
-                    "Verifica configuración de Storage o vuelve a cargar el documento."
-                )
-
-            confirm_del = st.checkbox(
-                "Confirmo que quiero eliminar este documento cargado.",
-                key="emp_del_confirm",
-            )
-            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="emp_del_btn"):
-                if not confirm_del:
-                    st.error("Debes confirmar la eliminación.")
-                    st.stop()
-                result = delete_uploaded_document_record("empresa_documentos", int(pick_id))
-                if result["shared_refs"]:
-                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
-                elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
-                st.success(f"Documento eliminado: {result['file_name']}")
-                auto_backup_db("doc_empresa_delete")
-                st.rerun()
-def page_documentos_empresa_faena():
-    ui_header("Documentos Empresa (Faena)", "Carga documentos de empresa requeridos POR FAENA (igual que Documentos Trabajador). Se incluirán en el ZIP de la faena.")
-
-    faenas = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-    ''')
-    if faenas.empty:
-        ui_tip("Crea una faena primero.")
-        return
-
-    default_id = st.session_state.get("selected_faena_id", None)
-    opts = faenas["id"].tolist()
-    idx = opts.index(default_id) if default_id in opts else 0
-
-    faena_id = st.selectbox(
-        "Faena",
-        opts,
-        index=idx,
-        format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']} ({faenas[faenas['id']==x].iloc[0]['estado']})",
-        key="emp_faena_sel",
-    )
-    st.session_state["selected_faena_id"] = int(faena_id)
-
-    docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id DESC",
-        (int(faena_id),),
-    )
-    tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
-    faltan = [d for d in DOC_EMPRESA_REQUERIDOS if d not in tipos_presentes]
-
-    c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Requeridos", len(DOC_EMPRESA_REQUERIDOS))
-    c2.metric("Cargados", len([d for d in DOC_EMPRESA_REQUERIDOS if d in tipos_presentes]))
-    c3.metric("Faltan", len(faltan))
-
-    if faltan:
-        st.warning("Faltan requeridos: " + ", ".join(faltan))
-    else:
-        st.success("Empresa (por faena) completa: requeridos OK.")
-
-    tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
-
-    with tab1:
-        st.caption("Tipos sugeridos:")
-        st.code("\n".join(DOC_EMPRESA_SUGERIDOS))
-
-        colx1, colx2 = st.columns([1, 2])
-        with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"], key="emp_faena_tipo")
-        with colx2:
-            tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Certificación, Permiso, Seguro adicional", key="emp_faena_otro")
-
-        up = st.file_uploader("Archivo", key="up_doc_emp_faena", type=None)
-        render_upload_help()
-        if st.button("Guardar documento (empresa por faena)", type="primary"):
-            if up is None:
-                st.error("Debes subir un archivo primero.")
-                st.stop()
-
-            doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
-            folder = ["faenas", faena_id, "empresa", safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
-            sha = sha256_bytes(payload["file_bytes"])
-
-            execute(
-                "INSERT INTO faena_empresa_documentos(faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (int(faena_id), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
-            )
-            if payload["compressed"] and payload.get("compression_note"):
-                st.info(payload["compression_note"])
-            st.success("Documento guardado (empresa por faena).")
-            auto_backup_db("doc_empresa_faena")
-            st.rerun()
-
-
-    with tab2:
-        if docs.empty:
-            st.info("(sin documentos)")
-        else:
-            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-            st.dataframe(show, use_container_width=True, hide_index=True)
-
-            st.divider()
-            st.markdown("#### 🔎 Gestionar documento")
-            pick_id = st.selectbox(
-                "Documento",
-                docs["id"].tolist(),
-                format_func=lambda x: f"{docs[docs['id']==x].iloc[0]['doc_tipo']} — {docs[docs['id']==x].iloc[0]['nombre_archivo']}",
-                key="empf_pick_doc",
-            )
-            row = docs[docs["id"] == pick_id].iloc[0]
-            fpath = row.get("file_path", "")
-            bucket = row.get("bucket", None)
-            object_path = row.get("object_path", None)
-            fname = row.get("nombre_archivo", "documento")
-            try:
-                b = load_file_anywhere(fpath, bucket, object_path)
-                st.download_button(
-                    "Descargar documento",
-                    data=b,
-                    file_name=fname,
-                    mime="application/octet-stream",
-                    use_container_width=True,
-                    key="empf_dl_btn",
-                )
-            except Exception:
-                st.warning(
-                    "El archivo no está disponible (Storage/disco). "
-                    "Verifica configuración de Storage o vuelve a cargar el documento."
-                )
-
-            confirm_del = st.checkbox(
-                "Confirmo que quiero eliminar este documento cargado.",
-                key="empf_del_confirm",
-            )
-            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="empf_del_btn"):
-                if not confirm_del:
-                    st.error("Debes confirmar la eliminación.")
-                    st.stop()
-                result = delete_uploaded_document_record("faena_empresa_documentos", int(pick_id))
-                if result["shared_refs"]:
-                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
-                elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
-                st.success(f"Documento eliminado: {result['file_name']}")
-                auto_backup_db("doc_empresa_faena_delete")
-                st.rerun()
-
-def page_documentos_trabajador():
-    ui_header(
-        "Documentos Trabajador",
-        "Carga documentos obligatorios por trabajador. Puedes trabajar por FAENA: selecciona una faena y verás solo los trabajadores asignados.",
-    )
-
-    # Lista de faenas para selector local (en este mismo apartado)
-    faenas = fetch_df(
-        '''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-        '''
-    )
-
-    # Selector de faena dentro del apartado (no genera cajas vacías)
-    current = st.session_state.get("selected_faena_id")
-    ids = [None] + (faenas["id"].tolist() if not faenas.empty else [])
-    default_index = ids.index(current) if (current in ids) else 0
-
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        faena_pick = st.selectbox(
-            "Faena (opcional)",
-            ids,
-            index=default_index,
-            format_func=lambda x: "(sin faena)" if x is None else (
-                f"{int(x)} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']} ({faenas[faenas['id']==x].iloc[0]['estado']})"
-            ),
-            key="docs_faena_pick",
-        )
-        st.session_state["selected_faena_id"] = None if faena_pick is None else int(faena_pick)
-
-    with c2:
-        default_scoped = True if faena_pick is not None else False
-        scoped = st.toggle("Solo esta faena", value=default_scoped, key="docs_scoped_toggle")
-
-    st.divider()
-
-    # Fuente de trabajadores: por faena o global
-    if scoped:
-        if faena_pick is None:
-            st.error("Activa 'Solo esta faena' pero no has seleccionado una faena.")
-            st.stop()
-
-        trab = fetch_assigned_workers(int(faena_pick))
-        if trab.empty:
-            ui_tip("Esta faena no tiene trabajadores asignados. Ve a 'Asignar Trabajadores' para incorporar personal.")
-            return
-
-        # Pendientes por faena (resumen accionable)
-        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
-            pend = pendientes_obligatorios(int(faena_pick))
-            if not pend:
-                st.info("(sin asignaciones)")
-            else:
-                ok = sum(1 for v in pend.values() if not v)
-                total = len(pend)
-                st.metric("Trabajadores OK", f"{ok}/{total}")
-                for k, missing in pend.items():
-                    if missing:
-                        st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
-                    else:
-                        st.success(f"{k} — OK")
-    else:
-        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
-        if trab.empty:
-            ui_tip("Crea trabajadores primero.")
-            return
-
-    # Selector de trabajador (solo asignados si scoped)
-    def _fmt(x):
-        r = trab[trab["id"] == x].iloc[0]
-        return f"{r['apellidos']} {r['nombres']} ({r['rut']})"
-
-    tid = st.selectbox("Trabajador", trab["id"].tolist(), format_func=_fmt, key="docs_trabajador_pick")
-
-    # Estado documental del trabajador (global: se reutiliza entre faenas)
-    docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
-        (int(tid),),
-    )
-    tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
-    faltan = [d for d in DOC_OBLIGATORIOS if d not in tipos_presentes]
-
-    col1, col2, col3 = st.columns([1, 1, 2])
-    col1.metric("Obligatorios", len(DOC_OBLIGATORIOS))
-    col2.metric("Cargados", len([d for d in DOC_OBLIGATORIOS if d in tipos_presentes]))
-    col3.metric("Faltan", len(faltan))
-
-    if faltan:
-        st.warning("Faltan obligatorios: " + doc_tipo_join(faltan))
-    else:
-        st.success("Trabajador completo (obligatorios OK).")
-
-    tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
-
-    with tab1:
-        st.caption("Tipos obligatorios configurados:")
-        st.code("\n".join(doc_tipo_label(d) for d in DOC_OBLIGATORIOS))
-
-        colx1, colx2 = st.columns([1, 2])
-        with colx1:
-            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
-        with colx2:
-            tipo_otro = st.text_input(
-                "Si eliges OTRO, escribe el nombre",
-                placeholder="Ej: Certificación operador, Licencia, Examen ocupacional",
-                key="doc_tipo_otro",
-            )
-
-        up = st.file_uploader("Archivo", key="up_doc_trabajador", type=None)
-        render_upload_help()
-        if st.button("Guardar documento", type="primary"):
-            if up is None:
-                st.error("Debes subir un archivo primero.")
-                st.stop()
-
-            doc_tipo = tipo if tipo != "OTRO" else (tipo_otro.strip() or "OTRO")
-            payload = prepare_upload_payload(up.name, up.getvalue(), getattr(up, 'type', None) or 'application/octet-stream')
-            folder = ["trabajadores", tid, safe_name(doc_tipo)]
-            file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
-            sha = sha256_bytes(payload["file_bytes"])
-            if payload["compressed"] and payload.get("compression_note"):
-                st.info(payload["compression_note"])
-
-            try:
-
-                execute(
-
-                    "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
-
-                    (int(tid), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
-
-                )
-
-            except Exception:
-
-                # Manejo de duplicados (UniqueViolation): actualiza el registro existente sin romper la app
-
-                if DB_BACKEND == "postgres":
-
-                    rc = execute_rowcount(
-
-                        "UPDATE trabajador_documentos SET file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
-
-                        "WHERE trabajador_id=? AND doc_tipo=? AND nombre_archivo=?",
-
-                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo, payload["file_name"]),
-
-                    )
-
-                    if rc == 0:
-
-                        execute_rowcount(
-
-                            "UPDATE trabajador_documentos SET nombre_archivo=?, file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
-
-                            "WHERE trabajador_id=? AND doc_tipo=?",
-
-                            (payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo),
-
-                        )
-
-                else:
-
-                    raise
-            st.success("Documento guardado.")
-            auto_backup_db("doc_trabajador")
-            st.rerun()
-
-
-    with tab2:
-        if docs.empty:
-            st.info("(sin documentos)")
-        else:
-            show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
-            st.dataframe(show, use_container_width=True, hide_index=True)
-
-            st.divider()
-            st.markdown("#### 🔎 Gestionar documento")
-
-            ids = docs["id"].tolist()
-            cur = st.session_state.get("trab_pick_doc", None)
-            if cur not in ids:
-                st.session_state["trab_pick_doc"] = ids[0]
-
-            def _fmt_doc(x):
-                try:
-                    r = docs.loc[docs["id"] == x].iloc[0]
-                    return f"{r.get('doc_tipo','DOC')} — {r.get('nombre_archivo','archivo')}"
-                except Exception:
-                    return f"ID {x}"
-
-            pick_id = st.selectbox(
-                "Documento",
-                ids,
-                format_func=_fmt_doc,
-                key="trab_pick_doc",
-            )
-
-            sel = docs.loc[docs["id"] == pick_id]
-            if sel.empty:
-                st.warning("El documento seleccionado ya no está disponible en la lista. Vuelve a seleccionar.")
-                return
-
-            row = sel.iloc[0]
-            fpath = row.get("file_path", "")
-            bucket = row.get("bucket", None)
-            object_path = row.get("object_path", None)
-            fname = row.get("nombre_archivo", "documento")
-
-            try:
-                b = load_file_anywhere(fpath, bucket, object_path)
-                st.download_button(
-                    "Descargar documento",
-                    data=b,
-                    file_name=fname,
-                    mime="application/octet-stream",
-                    use_container_width=True,
-                    key="trab_dl_btn",
-                )
-            except Exception:
-                st.warning(
-                    "El archivo no está disponible (Storage/disco). "
-                    "Verifica configuración de Storage o vuelve a cargar el documento."
-                )
-
-            confirm_del = st.checkbox(
-                "Confirmo que quiero eliminar este documento cargado.",
-                key="trab_del_confirm",
-            )
-            if st.button("Eliminar documento", type="secondary", use_container_width=True, key="trab_del_btn"):
-                if not confirm_del:
-                    st.error("Debes confirmar la eliminación.")
-                    st.stop()
-                result = delete_uploaded_document_record("trabajador_documentos", int(pick_id))
-                if result["shared_refs"]:
-                    st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
-                elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
-                st.success(f"Documento eliminado: {result['file_name']}")
-                auto_backup_db("doc_trabajador_delete")
-                st.rerun()
-
-def _get_bytes(file_path, bucket, object_path):
-    try:
-        return load_file_anywhere(file_path, bucket, object_path)
-    except Exception:
-        return None
-
-
-def page_export_zip():
-    ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
-
-    faenas = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-    ''')
-    if faenas.empty:
-        ui_tip("Crea una faena primero.")
-        return
-
-    default_id = st.session_state.get("selected_faena_id", None)
-    opts = faenas["id"].tolist()
-    idx = opts.index(default_id) if default_id in opts else 0
-
-    faena_id = st.selectbox(
-        "Faena",
-        opts,
-        index=idx,
-        format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']} ({faenas[faenas['id']==x].iloc[0]['estado']})",
-    )
-    st.session_state["selected_faena_id"] = int(faena_id)
-
-    tab1, tab2, tab3, tab4 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Export por mes"])
-
-    with tab1:
-        pend = pendientes_obligatorios(int(faena_id))
-        miss_emp = pendientes_empresa_faena(int(faena_id))
-        st.write("**Pendientes obligatorios (antes de exportar):**")
-        if not pend:
-            st.info("(sin trabajadores asignados)")
-        else:
-            for k, missing in pend.items():
-                if missing:
-                    st.error(f"{k} — faltan: {doc_tipo_join(missing)}")
-                else:
-                    st.success(f"{k} — OK")
-
-        st.divider()
-        st.write("**Documentos empresa (por faena):**")
-        if miss_emp:
-            st.error("Faltan: " + ", ".join(miss_emp))
-        else:
-            st.success("OK (requeridos completos).")
-
-    with tab2:
-        st.markdown("### 📦 Selecciona qué incluir en el ZIP")
-
-        cA, cB, cC = st.columns(3)
-        with cA:
-            inc_contrato = st.checkbox("Contrato de faena", value=True, key="exp_inc_contrato")
-            inc_anexos = st.checkbox("Anexos de faena", value=True, key="exp_inc_anexos")
-        with cB:
-            inc_emp_faena = st.checkbox("Docs empresa (por faena)", value=True, key="exp_inc_emp_faena")
-            inc_emp_global = st.checkbox("Docs empresa (global)", value=True, key="exp_inc_emp_global")
-        with cC:
-            inc_trab = st.checkbox("Docs trabajadores", value=True, key="exp_inc_trab")
-
-        st.divider()
-        st.markdown("#### (Opcional) Filtrar por tipo de documento")
-
-        emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
-        emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
-
-        emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo", (int(faena_id),))
-        emp_faena_list = emp_faena_types["doc_tipo"].dropna().astype(str).tolist() if not emp_faena_types.empty else []
-
-        trab_types = fetch_df('''
-            SELECT DISTINCT td.doc_tipo AS doc_tipo
-            FROM trabajador_documentos td
-            JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
-            WHERE a.faena_id=?
-            ORDER BY td.doc_tipo
-        ''', (int(faena_id),))
-        trab_list = trab_types["doc_tipo"].dropna().astype(str).tolist() if not trab_types.empty else []
-
-        colf1, colf2, colf3 = st.columns(3)
-        with colf1:
-            emp_global_sel = []
-            if inc_emp_global and emp_global_list:
-                emp_global_sel = st.multiselect("Tipos Empresa Global", emp_global_list, default=emp_global_list, key="exp_types_emp_global")
-            elif inc_emp_global and not emp_global_list:
-                st.caption("Sin docs empresa global cargados.")
-        with colf2:
-            emp_faena_sel = []
-            if inc_emp_faena and emp_faena_list:
-                emp_faena_sel = st.multiselect("Tipos Empresa por Faena", emp_faena_list, default=emp_faena_list, key="exp_types_emp_faena")
-            elif inc_emp_faena and not emp_faena_list:
-                st.caption("Sin docs empresa por faena cargados.")
-        with colf3:
-            trab_sel = []
-            if inc_trab and trab_list:
-                trab_sel = st.multiselect("Tipos Trabajador", trab_list, default=trab_list, key="exp_types_trab")
-            elif inc_trab and not trab_list:
-                st.caption("Sin docs trabajador cargados para esta faena.")
-
-        st.divider()
-        colx1, colx2 = st.columns([1, 1])
-        with colx1:
-            if st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
-                try:
-                    zip_bytes, name = export_zip_for_faena(
-                        int(faena_id),
-                        include_global_empresa_docs=inc_emp_global,
-                        include_contrato=inc_contrato,
-                        include_anexos=inc_anexos,
-                        include_empresa_faena=inc_emp_faena,
-                        include_trabajadores=inc_trab,
-                        doc_types_empresa_global=(emp_global_sel or None),
-                        doc_types_empresa_faena=(emp_faena_sel or None),
-                        doc_types_trabajador=(trab_sel or None),
-                    )
-                    path = persist_export(int(faena_id), zip_bytes, name)
-                    st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
-                    auto_backup_db("export_zip")
-                    st.download_button(
-                        "Descargar ZIP (recién generado)",
-                        data=zip_bytes,
-                        file_name=os.path.basename(path),
-                        mime="application/zip",
-                        use_container_width=True,
-                    )
-                except Exception as e:
-                    st.error(f"No se pudo generar ZIP: {e}")
-        with colx2:
-            st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
-
-    with tab3:
         hist = fetch_df(
-            "SELECT id, file_path, bucket, object_path, size_bytes, created_at FROM export_historial WHERE faena_id=? ORDER BY id DESC",
-            (int(faena_id),),
+            """
+            SELECT eh.id, eh.faena_id, f.nombre AS faena_nombre, eh.file_path, eh.bucket, eh.object_path,
+                   eh.size_bytes, eh.created_at
+            FROM export_historial eh
+            LEFT JOIN faenas f ON f.id = eh.faena_id
+            ORDER BY eh.id DESC
+            """
         )
         if hist.empty:
-            st.info("(sin exportaciones guardadas aún)")
+            st.info("Aún no hay ZIPs exportados.")
         else:
-            show = hist.copy()
-            show["archivo"] = show.apply(lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"export_{int(r['id'])}.zip")), axis=1)
-            show["size_kb"] = (show["size_bytes"] / 1024).round(1)
-            st.dataframe(show[["id", "archivo", "size_kb", "created_at"]], use_container_width=True, hide_index=True)
+            view = hist.copy()
+            view["archivo"] = view.apply(
+                lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"export_{int(r['id'])}.zip")),
+                axis=1,
+            )
+            view["tamaño"] = view["size_bytes"].apply(human_file_size)
+            show_cols = ["id", "faena_id", "faena_nombre", "archivo", "tamaño", "created_at"]
+            st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
 
-            exp_id = st.selectbox("Elegir export para descargar", show["id"].tolist(), format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['archivo']}")
-            row = show[show["id"] == exp_id].iloc[0]
-            b = _get_bytes(row.get("file_path"), row.get("bucket"), row.get("object_path"))
-            if b:
-                out_name = os.path.basename(str(row.get("file_path") or row.get("object_path") or f"export_{int(exp_id)}.zip"))
-                st.download_button("Descargar export seleccionado", data=b, file_name=out_name, mime="application/zip", use_container_width=True)
-            else:
-                st.warning("El archivo no está disponible ni en Storage ni en disco local.")
+            hid = st.selectbox(
+                "ZIP del historial",
+                view["id"].tolist(),
+                format_func=lambda x: f"{int(x)} - {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['created_at']})",
+                key="exp_hist_pick",
+            )
+            row = view[view["id"] == hid].iloc[0]
+            try:
+                b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
+                st.download_button(
+                    "Descargar ZIP del historial",
+                    data=b,
+                    file_name=row["archivo"],
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="exp_hist_dl",
+                )
+            except Exception as e:
+                st.warning(f"No se pudo abrir el ZIP guardado: {e}")
 
     with tab4:
-        st.markdown("Genera un ZIP con **todas las faenas** cuyo **inicio** cae dentro de un mes (YYYY-MM).")
-        fa = fetch_df("SELECT DISTINCT substr(fecha_inicio,1,7) AS ym FROM faenas WHERE fecha_inicio IS NOT NULL AND TRIM(fecha_inicio)<>'' ORDER BY ym DESC")
-        ym_opts = fa["ym"].tolist() if not fa.empty else []
-        if not ym_opts:
-            st.info("No hay fechas de inicio registradas para exportar por mes.")
-        else:
-            ym = st.selectbox("Mes", ym_opts, key="exp_mes_pick")
-            include_global = st.checkbox("Incluir documentos empresa globales (una vez)", value=True, key="exp_mes_inc_global")
+        st.markdown("### 📅 Export por mes")
+        c1, c2 = st.columns(2)
+        with c1:
+            year = st.number_input("Año", min_value=2020, max_value=2100, value=date.today().year, step=1, key="exp_mes_year")
+        with c2:
+            month = st.number_input("Mes", min_value=1, max_value=12, value=date.today().month, step=1, key="exp_mes_month")
 
-            lst = fetch_df('''
-                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
-                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-                WHERE substr(f.fecha_inicio,1,7)=?
-                ORDER BY f.id DESC
-            ''', (ym,))
-            st.caption(f"Faenas incluidas: {len(lst)}")
-            st.dataframe(lst[["id","mandante","nombre","estado","fecha_inicio"]], use_container_width=True, hide_index=True)
+        inc_mes_emp_global = st.checkbox(
+            "Incluir documentos empresa global en export mensual",
+            value=True,
+            key="exp_mes_inc_emp_global",
+        )
 
-            colm1, colm2 = st.columns([1,1])
-            with colm1:
-                if st.button("Generar ZIP mensual y guardar", type="primary", use_container_width=True):
-                    try:
-                        y, m = ym.split("-")
-                        zip_bytes, name = export_zip_for_mes(int(y), int(m), include_global_empresa_docs=include_global)
-                        path = persist_export_mes(ym, zip_bytes)
-                        st.success(f"ZIP mensual generado: {os.path.basename(path)}")
-                        auto_backup_db("export_mes")
-                        st.download_button("Descargar ZIP mensual (recién generado)", data=zip_bytes, file_name=os.path.basename(path), mime="application/zip", use_container_width=True)
-                    except Exception as e:
-                        st.error(f"No se pudo generar ZIP mensual: {e}")
-            with colm2:
-                st.caption("Se guarda en historial mensual (si no hay reboot). Para conservar, usa Backup / Restore.")
+        if st.button("Generar ZIP mensual y guardar en historial", type="primary", use_container_width=True, key="exp_mes_btn"):
+            try:
+                zip_bytes, ym = export_zip_for_mes(int(year), int(month), include_global_empresa_docs=inc_mes_emp_global)
+                path_export = persist_export_mes(ym, zip_bytes)
+                st.success(f"ZIP mensual generado y guardado: {os.path.basename(path_export)}")
+                auto_backup_db("export_zip_mes")
+                st.download_button(
+                    "Descargar ZIP mensual (recién generado)",
+                    data=zip_bytes,
+                    file_name=os.path.basename(path_export),
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="exp_mes_dl_now",
+                )
+            except Exception as e:
+                st.error(f"No se pudo generar export mensual: {e}")
 
         st.divider()
-        st.markdown("#### 🗂️ Historial mensual")
-        histm = fetch_df("SELECT id, year_month, file_path, bucket, object_path, size_bytes, created_at FROM export_historial_mes ORDER BY id DESC")
-        if histm.empty:
-            st.info("(sin exportaciones mensuales guardadas aún)")
+        hist_mes = fetch_df(
+            """
+            SELECT id, year_month, file_path, bucket, object_path, size_bytes, created_at
+            FROM export_historial_mes
+            ORDER BY id DESC
+            """
+        )
+        if hist_mes.empty:
+            st.caption("Aún no hay exportaciones mensuales guardadas.")
         else:
-            show = histm.copy()
-            show["archivo"] = show.apply(lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"export_mes_{int(r['id'])}.zip")), axis=1)
-            show["size_kb"] = (show["size_bytes"] / 1024).round(1)
-            st.dataframe(show[["id","year_month","archivo","size_kb","created_at"]], use_container_width=True, hide_index=True)
-
-            exp_id = st.selectbox(
-                "Elegir export mensual para descargar",
-                show["id"].tolist(),
-                format_func=lambda x: f"{int(x)} - {show[show['id']==x].iloc[0]['year_month']} / {show[show['id']==x].iloc[0]['archivo']}",
-                key="pick_hist_mes",
+            view = hist_mes.copy()
+            view["archivo"] = view.apply(
+                lambda r: os.path.basename(str(r.get("file_path") or r.get("object_path") or f"mes_{r.get('year_month','export')}.zip")),
+                axis=1,
             )
-            row = show[show["id"] == exp_id].iloc[0]
-            b = _get_bytes(row.get("file_path"), row.get("bucket"), row.get("object_path"))
-            if b:
-                out_name = os.path.basename(str(row.get("file_path") or row.get("object_path") or f"export_mes_{int(exp_id)}.zip"))
-                st.download_button("Descargar export mensual seleccionado", data=b, file_name=out_name, mime="application/zip", use_container_width=True)
-            else:
-                st.warning("El archivo no está disponible ni en Storage ni en disco local.")
+            view["tamaño"] = view["size_bytes"].apply(human_file_size)
+            st.dataframe(view[["id", "year_month", "archivo", "tamaño", "created_at"]], use_container_width=True, hide_index=True)
+
+            mid = st.selectbox(
+                "ZIP mensual del historial",
+                view["id"].tolist(),
+                format_func=lambda x: f"{int(x)} - {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['year_month']})",
+                key="exp_mes_hist_pick",
+            )
+            row = view[view["id"] == mid].iloc[0]
+            try:
+                b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
+                st.download_button(
+                    "Descargar ZIP mensual del historial",
+                    data=b,
+                    file_name=row["archivo"],
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="exp_mes_hist_dl",
+                )
+            except Exception as e:
+                st.warning(f"No se pudo abrir el ZIP mensual guardado: {e}")
+
+# Consolidación definitiva: se mantiene una sola implementación real por pantalla
+def page_trabajadores():
+    return _page_trabajadores_impl()
+
+def page_asignar_trabajadores():
+    return _page_asignar_trabajadores_impl()
+
+def page_documentos_empresa():
+    return _page_documentos_empresa_impl()
+
+def page_documentos_empresa_faena():
+    return _page_documentos_empresa_faena_impl()
+
+def page_documentos_trabajador():
+    return _page_documentos_trabajador_impl()
+
+def _get_bytes(file_path, bucket, object_path):
+    return _get_bytes_impl(file_path, bucket, object_path)
+
+def page_export_zip():
+    return _page_export_zip_impl()
 
 def page_backup_restore():
-    ui_header("Backup / Restore", "Respalda la base y documentos para evitar pérdidas en Streamlit Community Cloud.")
+    ui_header("Backup / Restore", "Diagnostica el backend activo y gestiona respaldos locales o heredados sin confundirlos con la persistencia real online.")
     st.warning(
         "En Streamlit Community Cloud, los archivos locales (incluyendo SQLite y uploads) pueden perderse en reboots/redeploy. "
-        "Este módulo te permite descargar un **Backup ZIP** con la base y documentos, y luego restaurarlo."
+        "Si trabajas con Supabase/Postgres, la fuente de verdad está online y este módulo sirve sobre todo para diagnóstico y compatibilidad local heredada."
     )
     if DB_BACKEND == "postgres":
         st.info(
@@ -5843,12 +4718,20 @@ def page_backup_restore():
             "Usa principalmente el diagnóstico de Storage y las exportaciones/documentos online."
         )
 
-    tab1, tab2, tab3 = st.tabs(["⚡ Auto-backups", "🗄️ Base (app.db)", "📦 Backup completo (ZIP)"])
+    tab1, tab2, tab3 = st.tabs(["🧪 Diagnóstico backend", "🗄️ Base local heredada (app.db)", "📦 Backup completo (ZIP)"])
 
     with tab1:
+        cdiag1, cdiag2, cdiag3 = st.columns(3)
+        cdiag1.metric("Backend activo", DB_BACKEND.upper())
+        cdiag2.metric("Storage lectura", "Sí" if storage_enabled() else "No")
+        cdiag3.metric("Storage admin", "Sí" if storage_admin_enabled() else "No")
         if DB_BACKEND == "postgres":
-            st.info("En modo Postgres los auto-backups locales de **app.db** no son la fuente principal y no se generan automáticamente.")
-        st.caption("Auto-backups generados al guardar (solo app.db). Se guardan localmente y conviene descargarlos.")
+            st.info("Modo Postgres/Supabase activo. La persistencia real vive online. Los auto-backups/app.db de abajo se mantienen como compatibilidad local heredada.")
+        else:
+            st.info("Modo SQLite local activo. En este modo app.db sí es la fuente principal de datos.")
+        if storage_enabled() and not storage_admin_enabled():
+            st.warning("Storage está solo en modo lectura o con key débil. Para subir/eliminar archivos usa una secret/service key real en SUPABASE_SERVICE_ROLE_KEY.")
+        st.caption("Auto-backups generados al guardar (solo app.db). Se guardan localmente y conviene descargarlos si sigues usando SQLite local.")
         hist = fetch_df("SELECT id, tag, file_path, size_bytes, created_at FROM auto_backup_historial ORDER BY id DESC")
         if hist.empty:
             st.info("(aún no hay auto-backups)")
@@ -5874,7 +4757,7 @@ def page_backup_restore():
 
     with tab2:
         if DB_BACKEND == "postgres":
-            st.info("Esta pestaña aplica solo a respaldo/restauración de **SQLite local (app.db)**. En Supabase la persistencia real vive en Postgres.")
+            st.info("Esta pestaña aplica solo a respaldo/restauración de **SQLite local (app.db)**. En Supabase la persistencia real vive en Postgres; úsala solo como compatibilidad o diagnóstico local.")
         coldb1, coldb2 = st.columns([1, 1])
 
         with coldb1:
@@ -5910,9 +4793,9 @@ def page_backup_restore():
         st.divider()
         st.markdown("### 🧪 Diagnóstico Storage (solo admin)")
         if not storage_enabled():
-            st.info("Storage no está activo. Revisa Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET. (Opcional: SUPABASE_ANON_KEY)")
+            st.info("Storage no está activo. Revisa Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET. (SUPABASE_ANON_KEY es solo opcional para lectura)")
         else:
-            st.success(f"Storage activo: bucket **{STORAGE_BUCKET}**")
+            st.success(f"Storage activo: bucket **{STORAGE_BUCKET}** · admin={'Sí' if storage_admin_enabled() else 'No'}")
             last = st.session_state.get("storage_last_error")
             if last:
                 st.warning(f"Último error Storage: HTTP {last.get('status')} · {str(last.get('body',''))[:120]}")
