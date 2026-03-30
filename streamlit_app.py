@@ -592,6 +592,15 @@ DOC_TIPO_LABELS = {
     "REGISTRO_EPP": "REGISTRO DE EPP",
     "ENTREGA_RIOHS": "REGISTRO ENTREGA DE RIOHS",
     "IRL": "IRL",
+    "LICENCIA_CONDUCIR": "LICENCIA DE CONDUCIR",
+    "CEDULA_IDENTIDAD": "CÉDULA DE IDENTIDAD",
+    "CERTIFICACION_CORMA": "CERTIFICACIÓN CORMA",
+    "LIQUIDACIONES_SUELDO_MES": "LIQUIDACIONES DE SUELDO",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30": "CERTIFICADO DE ANTECEDENTES LABORALES F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1": "CERTIFICADO DE CUMPLIMIENTOS LABORALES Y PREVISIONALES F30-1",
+    "CERTIFICADO_ACCIDENTABILIDAD": "CERTIFICADO DE ACCIDENTABILIDAD",
+    "CERTIFICADO_CUMPLIMIENTO_LABORAL": "CERTIFICADO DE CUMPLIMIENTO LABORAL",
+    "CERTIFICADO_ADHESION_A_MUTUALIDAD": "CERTIFICADO DE ADHESIÓN A MUTUALIDAD",
 }
 DOC_OBLIGATORIOS = [
     "CONTRATO_TRABAJO",
@@ -599,20 +608,31 @@ DOC_OBLIGATORIOS = [
     "ENTREGA_RIOHS",
     "IRL",
 ]
+DOCS_OPERARIO_MAQUINARIA_FORESTAL = [
+    "LICENCIA_CONDUCIR",
+    "CEDULA_IDENTIDAD",
+]
+DOCS_MOTOSIERRISTA = [
+    "CERTIFICACION_CORMA",
+    "CEDULA_IDENTIDAD",
+]
 DOC_EMPRESA_SUGERIDOS = [
-    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
+    "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
     "CERTIFICADO_ACCIDENTABILIDAD",
-    "OTROS",
 ]
 DOC_EMPRESA_REQUERIDOS = [
-    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
+    "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
     "CERTIFICADO_ACCIDENTABILIDAD",
 ]
 DOC_EMPRESA_MENSUALES = [
-    "CERTIFICADO_CUMPLIMIENTO_LABORAL",
-    "CERTIFICADO_ACCIDENTABILIDAD",
-    "CERTIFICADO_ADHESION_A_MUTUALIDAD",
     "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
+    "CERTIFICADO_ACCIDENTABILIDAD",
 ]
 MESES_ES = {
     1: "ENERO",
@@ -645,6 +665,41 @@ def doc_tipo_label(value: str) -> str:
 
 def doc_tipo_join(values) -> str:
     return ", ".join(doc_tipo_label(v) for v in values)
+
+
+def normalize_text(value) -> str:
+    s = str(value or "")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.strip().lower()
+
+
+def worker_required_docs(cargo: str | None) -> list[str]:
+    cargo_n = normalize_text(cargo)
+    if cargo_n:
+        if "motosierr" in cargo_n:
+            return list(DOCS_MOTOSIERRISTA)
+        if "maquinaria" in cargo_n and "forestal" in cargo_n:
+            return list(DOCS_OPERARIO_MAQUINARIA_FORESTAL)
+    return list(DOC_OBLIGATORIOS)
+
+
+def worker_required_docs_by_id(trabajador_id: int) -> list[str]:
+    row = fetch_row("SELECT cargo FROM trabajadores WHERE id=?", (int(trabajador_id),))
+    cargo = row[0] if row else None
+    return worker_required_docs(cargo)
+
+
+def worker_required_docs_for_record(rec) -> list[str]:
+    cargo = None
+    try:
+        if isinstance(rec, dict):
+            cargo = rec.get("cargo")
+        else:
+            cargo = rec["cargo"] if "cargo" in rec else None
+    except Exception:
+        cargo = None
+    return worker_required_docs(cargo)
 
 
 def inject_css():
@@ -2013,7 +2068,7 @@ def validate_faena_dates(inicio: date, termino, estado: str):
 
 def pendientes_obligatorios(faena_id: int):
     asign = fetch_df('''
-        SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
+        SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos, t.cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
@@ -2039,7 +2094,8 @@ def pendientes_obligatorios(faena_id: int):
         tid = int(r["trabajador_id"])
         label = f"{r['apellidos']} {r['nombres']} ({r['rut']})"
         have = docs_map.get(tid, set())
-        missing = [d for d in DOC_OBLIGATORIOS if d not in have]
+        req_docs = worker_required_docs_for_record(r)
+        missing = [d for d in req_docs if d not in have]
         out[label] = missing
     return out
 
@@ -2052,23 +2108,25 @@ def pendientes_empresa_faena(faena_id: int):
     return missing
 
 
+
 def faena_progress_table():
 
-    faenas = fetch_df('''
+    faenas = fetch_df("""
         SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
                m.nombre AS mandante
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
         ORDER BY f.id DESC
-    ''')
+    """)
     if faenas.empty:
         return faenas
 
     asg = fetch_df(
         """
-        SELECT faena_id, trabajador_id
-        FROM asignaciones
-        WHERE COALESCE(NULLIF(TRIM(estado), ''), 'ACTIVA')='ACTIVA'
+        SELECT a.faena_id, a.trabajador_id, COALESCE(t.cargo,'') AS cargo
+        FROM asignaciones a
+        JOIN trabajadores t ON t.id=a.trabajador_id
+        WHERE COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         """
     )
     if asg.empty:
@@ -2078,33 +2136,47 @@ def faena_progress_table():
         faenas["faltantes_total"] = 0
         return faenas
 
-    placeholders = ",".join(["?"]*len(DOC_OBLIGATORIOS))
-    q = f'''
-        SELECT a.faena_id, a.trabajador_id,
-               COUNT(DISTINCT CASE WHEN d.doc_tipo IN ({placeholders}) THEN d.doc_tipo END) AS req_docs_present
-        FROM asignaciones a
-        LEFT JOIN trabajador_documentos d ON d.trabajador_id=a.trabajador_id
-        WHERE COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-        GROUP BY a.faena_id, a.trabajador_id
-    '''
-    stats = fetch_df(q, tuple(DOC_OBLIGATORIOS))
-    stats["req_docs_present"] = stats["req_docs_present"].fillna(0).astype(int)
-    stats["worker_ok"] = (stats["req_docs_present"] >= REQ_DOCS_N).astype(int)
+    ids = asg["trabajador_id"].astype(int).unique().tolist()
+    docs_all = fetch_df(
+        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
+        tuple(ids),
+    ) if ids else pd.DataFrame(columns=["trabajador_id", "doc_tipo"])
 
+    docs_map = {}
+    if not docs_all.empty:
+        for tid, grp in docs_all.groupby("trabajador_id"):
+            docs_map[int(tid)] = set(grp["doc_tipo"].astype(str).tolist())
+
+    rows = []
+    for _, r in asg.iterrows():
+        tid = int(r["trabajador_id"])
+        req_docs = worker_required_docs_for_record(r)
+        have = docs_map.get(tid, set())
+        req_docs_present = sum(1 for d in req_docs if d in have)
+        rows.append({
+            "faena_id": int(r["faena_id"]),
+            "trabajador_id": tid,
+            "req_docs_present": req_docs_present,
+            "req_docs_total": len(req_docs),
+            "worker_ok": int(req_docs_present >= len(req_docs)),
+        })
+
+    stats = pd.DataFrame(rows)
     agg = stats.groupby("faena_id").agg(
         trabajadores=("trabajador_id", "nunique"),
         trab_ok=("worker_ok", "sum"),
         req_docs_sum=("req_docs_present", "sum"),
+        req_docs_total=("req_docs_total", "sum"),
     ).reset_index()
 
-    agg["faltantes_total"] = (agg["trabajadores"] * REQ_DOCS_N) - agg["req_docs_sum"]
-    agg["cobertura_docs_pct"] = (agg["req_docs_sum"] / (agg["trabajadores"] * REQ_DOCS_N)).where(agg["trabajadores"] > 0, 0.0) * 100.0
+    agg["faltantes_total"] = agg["req_docs_total"] - agg["req_docs_sum"]
+    agg["cobertura_docs_pct"] = (agg["req_docs_sum"] / agg["req_docs_total"]).where(agg["req_docs_total"] > 0, 0.0) * 100.0
 
     out = faenas.merge(agg, how="left", on="faena_id")
     out["trabajadores"] = out["trabajadores"].fillna(0).astype(int)
     out["trab_ok"] = out["trab_ok"].fillna(0).astype(int)
     out["faltantes_total"] = out["faltantes_total"].fillna(0).astype(int)
-    out["cobertura_docs_pct"] = out["cobertura_docs_pct"].fillna(0.0).round(1)
+    out["cobertura_docs_pct"] = out["cobertura_docs_pct"].fillna(0.0).astype(float)
     return out
 
 def parse_date_maybe(s):
@@ -2193,13 +2265,13 @@ def export_zip_for_faena(
     else:
         for k, missing in pend_t.items():
             if missing:
-                idx.append(f"* {k}: faltan {', '.join(missing)}")
+                idx.append(f"* {k}: faltan {doc_tipo_join(missing)}")
             else:
                 idx.append(f"* {k}: OK")
     idx.append("")
     idx.append("PENDIENTES DOCUMENTOS EMPRESA (POR FAENA):")
     if miss_emp:
-        idx.append(f"* faltan: {', '.join(miss_emp)}")
+        idx.append(f"* faltan: {doc_tipo_join(miss_emp)}")
     else:
         idx.append("* OK")
 
@@ -2373,13 +2445,13 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
         else:
             for k, missing in pend_t.items():
                 if missing:
-                    idx2.append(f"* {k}: faltan {', '.join(missing)}")
+                    idx2.append(f"* {k}: faltan {doc_tipo_join(missing)}")
                 else:
                     idx2.append(f"* {k}: OK")
         idx2.append("")
         idx2.append("PENDIENTES DOCUMENTOS EMPRESA (POR FAENA):")
         if miss_emp:
-            idx2.append(f"* faltan: {', '.join(miss_emp)}")
+            idx2.append(f"* faltan: {doc_tipo_join(miss_emp)}")
         else:
             idx2.append("* OK")
         z.writestr(f"{prefix}/99_Index_Pendientes.txt", "\n".join(idx2))
@@ -4203,31 +4275,31 @@ def _page_asignar_trabajadores_impl():
                     st.rerun()
 def _page_documentos_empresa_impl():
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
-    st.caption("Puedes subir múltiples archivos por tipo. Los tipos sugeridos son opcionales y puedes crear tus propios tipos con OTRO.")
+    st.caption("Puedes subir múltiples archivos por tipo. Los tipos requeridos base son liquidaciones de sueldo, F30, F30-1 y certificado de accidentabilidad; además puedes crear tus propios tipos con OTRO.")
 
     df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
     tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
 
     c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Tipos sugeridos", len(DOC_EMPRESA_SUGERIDOS))
+    c1.metric("Tipos requeridos", len(DOC_EMPRESA_SUGERIDOS))
     c2.metric("Tipos presentes", len(set(tipos_presentes)))
-    c3.metric("Faltan sugeridos", len(faltan))
+    c3.metric("Faltan requeridos", len(faltan))
 
     if faltan:
-        st.warning("Sugeridos faltantes: " + ", ".join(faltan))
+        st.warning("Faltan requeridos: " + doc_tipo_join(faltan))
     else:
-        st.success("Sugeridos completos (si aplica).")
+        st.success("Requeridos completos (si aplica).")
 
     tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
 
     with tab1:
-        st.caption("Tipos sugeridos:")
-        st.code("\n".join(DOC_EMPRESA_SUGERIDOS))
+        st.caption("Tipos requeridos base:")
+        st.code("\n".join(doc_tipo_label(d) for d in DOC_EMPRESA_SUGERIDOS))
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"])
+            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"], format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
 
@@ -4366,9 +4438,8 @@ def _page_documentos_empresa_faena_impl():
         )
 
     st.caption(
-        "Documentación mensual sugerida por mandante/faena: Certificado de cumplimiento laboral, "
-        "Certificado de accidentabilidad, Certificado de adhesión a mutualidad y Liquidaciones de sueldo del mes "
-        "de los trabajadores que prestaron servicios en esa faena."
+        "Documentación mensual requerida por mandante/faena: Liquidaciones de sueldo, Certificado de antecedentes laborales F30, "
+        "Certificado de cumplimientos laborales y previsionales F30-1, y Certificado de accidentabilidad del período."
     )
 
     docs_periodo = fetch_df(
@@ -4384,24 +4455,24 @@ def _page_documentos_empresa_faena_impl():
     c3.metric("Faltan en el período", len(faltan))
 
     if faltan:
-        st.warning("Faltan en este período: " + ", ".join(faltan))
+        st.warning("Faltan en este período: " + doc_tipo_join(faltan))
     else:
         st.success("Período mensual completo para esta faena/mandante.")
 
     tab1, tab2, tab3 = st.tabs(["📎 Cargar documento mensual", "📋 Documentos del período", "🗂️ Historial de la faena"])
 
     with tab1:
-        st.caption("Tipos mensuales sugeridos:")
-        st.code("\n".join(DOC_EMPRESA_MENSUALES))
+        st.caption("Tipos mensuales requeridos:")
+        st.code("\n".join(doc_tipo_label(d) for d in DOC_EMPRESA_MENSUALES))
         st.caption("Para LIQUIDACIONES_SUELDO_MES puedes subir uno o varios archivos del mismo período.")
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_MENSUALES + ["OTRO"], key="emp_faena_tipo")
+            tipo = st.selectbox("Tipo", DOC_EMPRESA_MENSUALES + ["OTRO"], key="emp_faena_tipo", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input(
                 "Si eliges OTRO, escribe el nombre",
-                placeholder="Ej: F30, libro de remuneraciones, informe mensual adicional",
+                placeholder="Ej: respaldo adicional mensual, informe complementario, control interno",
                 key="emp_faena_otro",
             )
 
@@ -4594,13 +4665,18 @@ def _page_documentos_trabajador_impl():
         "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
         (int(tid),),
     )
+    trabajador_row = trab[trab["id"] == tid].iloc[0]
+    req_docs = worker_required_docs_for_record(trabajador_row)
     tipos_presentes = set(docs["doc_tipo"].astype(str).tolist()) if not docs.empty else set()
-    faltan = [d for d in DOC_OBLIGATORIOS if d not in tipos_presentes]
+    faltan = [d for d in req_docs if d not in tipos_presentes]
 
     col1, col2, col3 = st.columns([1, 1, 2])
-    col1.metric("Obligatorios", len(DOC_OBLIGATORIOS))
-    col2.metric("Cargados", len([d for d in DOC_OBLIGATORIOS if d in tipos_presentes]))
+    col1.metric("Obligatorios", len(req_docs))
+    col2.metric("Cargados", len([d for d in req_docs if d in tipos_presentes]))
     col3.metric("Faltan", len(faltan))
+
+    cargo_label = str(trabajador_row.get("cargo") or "(sin cargo)")
+    st.caption(f"Cargo del trabajador: **{cargo_label}**")
 
     if faltan:
         st.warning("Faltan obligatorios: " + doc_tipo_join(faltan))
@@ -4610,12 +4686,12 @@ def _page_documentos_trabajador_impl():
     tab1, tab2 = st.tabs(["📎 Cargar documento", "📋 Documentos cargados"])
 
     with tab1:
-        st.caption("Tipos obligatorios configurados:")
-        st.code("\n".join(doc_tipo_label(d) for d in DOC_OBLIGATORIOS))
+        st.caption("Tipos obligatorios configurados para este trabajador:")
+        st.code("\n".join(doc_tipo_label(d) for d in req_docs))
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_OBLIGATORIOS + ["OTRO"], key="doc_tipo_pick", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
+            tipo = st.selectbox("Tipo", req_docs + ["OTRO"], key="doc_tipo_pick", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input(
                 "Si eliges OTRO, escribe el nombre",
