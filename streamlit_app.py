@@ -3612,12 +3612,12 @@ def page_faenas():
 
 def _page_trabajadores_impl():
     ui_header("Trabajadores", "Carga masiva por Excel o gestión manual. Puedes crear, editar o eliminar trabajadores. Luego asigna a faenas y adjunta documentos.")
-    tab1, tab2, tab3 = st.tabs(["📥 Importar Excel", "🧩 Gestión", "📋 Listado"])
+    tab_list, tab_gestion, tab_import = st.tabs(["📋 Listado", "🧩 Gestión", "📥 Importar Excel"])
 
     # -------------------------
     # Tab 1: Importación Excel
     # -------------------------
-    with tab1:
+    with tab_import:
         st.write("Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
         st.download_button(
             "⬇️ Descargar plantilla Excel de trabajadores",
@@ -3716,7 +3716,7 @@ def _page_trabajadores_impl():
     # -------------------------
     # Tab 2: Gestión (crear/editar/eliminar)
     # -------------------------
-    with tab2:
+    with tab_gestion:
         t_create, t_edit = st.tabs(["➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
 
         with t_create:
@@ -3868,9 +3868,35 @@ def _page_trabajadores_impl():
     # -------------------------
     # Tab 3: Listado
     # -------------------------
-    with tab3:
-        df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY id DESC")
-        q = st.text_input("Buscar", placeholder="RUT, nombre o cargo", key="q_trab_list")
+    with tab_list:
+        df = fetch_df(
+            """
+            SELECT
+                t.id,
+                t.rut,
+                t.apellidos,
+                t.nombres,
+                t.cargo,
+                COALESCE(
+                    (
+                        SELECT f.nombre
+                        FROM asignaciones a
+                        JOIN faenas f ON f.id = a.faena_id
+                        WHERE a.trabajador_id = t.id
+                          AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
+                        ORDER BY a.id DESC
+                        LIMIT 1
+                    ),
+                    'PLANTA'
+                ) AS faena_actual,
+                t.email,
+                t.fecha_contrato,
+                t.vigencia_examen
+            FROM trabajadores t
+            ORDER BY t.id DESC
+            """
+        )
+        q = st.text_input("Buscar", placeholder="RUT, nombre, cargo o faena", key="q_trab_list")
         out = df.copy()
         if q.strip():
             qq = q.strip().lower()
@@ -3878,9 +3904,22 @@ def _page_trabajadores_impl():
                 out["rut"].astype(str).str.lower().str.contains(qq, na=False) |
                 out["apellidos"].astype(str).str.lower().str.contains(qq, na=False) |
                 out["nombres"].astype(str).str.lower().str.contains(qq, na=False) |
-                out["cargo"].astype(str).str.lower().str.contains(qq, na=False)
+                out["cargo"].astype(str).str.lower().str.contains(qq, na=False) |
+                out["faena_actual"].astype(str).str.lower().str.contains(qq, na=False)
             ]
-        st.dataframe(out, use_container_width=True, hide_index=True)
+        show = out.rename(
+            columns={
+                "rut": "RUT",
+                "apellidos": "Apellidos",
+                "nombres": "Nombres",
+                "cargo": "Cargo",
+                "faena_actual": "Faena actual",
+                "email": "Email",
+                "fecha_contrato": "Fecha de contrato",
+                "vigencia_examen": "Vigencia examen",
+            }
+        )
+        st.dataframe(show, use_container_width=True, hide_index=True)
         st.caption("Para editar/eliminar: ve a la pestaña **Gestión → Editar / Eliminar**.")
 
 def _page_asignar_trabajadores_impl():
