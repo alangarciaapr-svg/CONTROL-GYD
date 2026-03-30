@@ -1199,6 +1199,7 @@ def init_db():
     if DB_BACKEND == "postgres":
         ensure_core_tables_postgres()
         ensure_storage_columns_postgres()
+        sync_postgres_core_sequences()
         return
     with conn() as c:
         c.execute("PRAGMA foreign_keys = ON;")
@@ -1521,6 +1522,117 @@ def ensure_storage_columns_postgres():
             execute(s)
         except Exception:
             pass
+
+
+def sync_postgres_identity_sequence(table: str, pk: str = "id"):
+    """Sincroniza la secuencia/identity de Postgres con el MAX(pk) real de la tabla."""
+    if DB_BACKEND != "postgres":
+        return
+    import re as _re
+    table = str(table or "").strip()
+    pk = str(pk or "id").strip()
+    if not (_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pk)):
+        raise ValueError("Nombre de tabla/columna inválido para sincronizar secuencia")
+    sql = f"""
+    SELECT setval(
+        pg_get_serial_sequence('{table}', '{pk}'),
+        COALESCE((SELECT MAX({pk}) + 1 FROM {table}), 1),
+        false
+    )
+    """
+    try:
+        execute(sql)
+    except Exception:
+        # No bloquear la app por una secuencia no encontrada; solo evitar crash.
+        pass
+
+
+def sync_postgres_core_sequences():
+    if DB_BACKEND != "postgres":
+        return
+    for _table in [
+        "mandantes",
+        "contratos_faena",
+        "faenas",
+        "faena_anexos",
+        "trabajadores",
+        "asignaciones",
+        "trabajador_documentos",
+        "empresa_documentos",
+        "faena_empresa_documentos",
+        "export_historial",
+        "export_historial_mes",
+        "users",
+    ]:
+        sync_postgres_identity_sequence(_table, "id")
+
+
+def _trabajador_get_id(cur_or_conn, rut: str):
+    row = cursor_execute(cur_or_conn, "SELECT id FROM trabajadores WHERE rut=? ORDER BY id LIMIT 1", (rut,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def _trabajador_insert_or_update(cur_or_conn, *, rut: str, nombres: str, apellidos: str, cargo: str = "", centro_costo: str = "", email: str = "", fecha_contrato=None, vigencia_examen=None, overwrite: bool = True, existing_id=None):
+    """Inserta/actualiza trabajadores sin depender de una secuencia sana en Postgres."""
+    rut = clean_rut(rut)
+    existing_id = int(existing_id) if existing_id not in (None, "") else None
+    if existing_id is None:
+        existing_id = _trabajador_get_id(cur_or_conn, rut)
+
+    payload = (nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+
+    if existing_id is not None:
+        if overwrite:
+            cursor_execute(
+                cur_or_conn,
+                """
+                UPDATE trabajadores
+                   SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
+                 WHERE id=?
+                """,
+                (*payload, int(existing_id)),
+            )
+            return "updated", int(existing_id)
+        return "skipped", int(existing_id)
+
+    if DB_BACKEND == "postgres":
+        cursor_execute(cur_or_conn, "SELECT pg_advisory_xact_lock(hashtext('trabajadores_manual_id_insert'));")
+        existing_id = _trabajador_get_id(cur_or_conn, rut)
+        if existing_id is not None:
+            if overwrite:
+                cursor_execute(
+                    cur_or_conn,
+                    """
+                    UPDATE trabajadores
+                       SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
+                     WHERE id=?
+                    """,
+                    (*payload, int(existing_id)),
+                )
+                return "updated", int(existing_id)
+            return "skipped", int(existing_id)
+        row = cursor_execute(cur_or_conn, "SELECT COALESCE(MAX(id), 0) + 1 FROM trabajadores").fetchone()
+        next_id = int(row[0]) if row and row[0] is not None else 1
+        cursor_execute(
+            cur_or_conn,
+            """
+            INSERT INTO trabajadores(id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (next_id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+        )
+        return "inserted", next_id
+
+    cursor_execute(
+        cur_or_conn,
+        """
+        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
+        VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
+    )
+    new_id = _trabajador_get_id(cur_or_conn, rut)
+    return "inserted", int(new_id) if new_id is not None else None
 
 
 def ensure_storage_columns_sqlite(c):
@@ -3545,43 +3657,26 @@ def _page_trabajadores_impl():
                                 fecha_contrato = _to_text_date_import_excel(r.get(fc_col)) if fc_col else None
                                 vigencia_examen = _to_text_date_import_excel(r.get("vigencia_examen")) if has_ve else None
 
-                                if overwrite:
-                                    if rut in existing_set:
-                                        cursor_execute(
-                                            c,
-                                            """
-                                            UPDATE trabajadores
-                                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                                             WHERE rut=?
-                                            """,
-                                            (nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen, rut),
-                                        )
-                                        updated += 1
-                                    else:
-                                        cursor_execute(
-                                            c,
-                                            """
-                                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                            VALUES(?,?,?,?,?,?,?,?)
-                                            """,
-                                            (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                        )
-                                        inserted += 1
-                                        existing_set.add(rut)
-                                else:
-                                    if rut in existing_set:
-                                        skipped += 1
-                                        continue
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
+                                action, _tid = _trabajador_insert_or_update(
+                                    c,
+                                    rut=rut,
+                                    nombres=nombres,
+                                    apellidos=apellidos,
+                                    cargo=cargo,
+                                    centro_costo=centro_costo,
+                                    email=email,
+                                    fecha_contrato=fecha_contrato,
+                                    vigencia_examen=vigencia_examen,
+                                    overwrite=overwrite,
+                                    existing_id=None,
+                                )
+                                if action == "inserted":
                                     inserted += 1
-                                    existing_set.add(rut)
+                                elif action == "updated":
+                                    updated += 1
+                                else:
+                                    skipped += 1
+                                existing_set.add(rut)
 
                             c.commit()
 
@@ -3622,24 +3717,21 @@ def _page_trabajadores_impl():
                     email_v = email.strip()
                     fecha_contrato_v = str(fecha_contrato) if fecha_contrato else None
                     vigencia_examen_v = str(vigencia_examen) if vigencia_examen else None
-                    exists_df = fetch_df("SELECT id FROM trabajadores WHERE rut=? ORDER BY id LIMIT 1", (rut_norm,))
-                    if exists_df.empty:
-                        execute(
-                            """
-                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                            VALUES(?,?,?,?,?,?,?,?)
-                            """,
-                            (rut_norm, nombres_v, apellidos_v, cargo_v, centro_costo_v, email_v, fecha_contrato_v, vigencia_examen_v),
+                    with conn() as c:
+                        _action, _tid = _trabajador_insert_or_update(
+                            c,
+                            rut=rut_norm,
+                            nombres=nombres_v,
+                            apellidos=apellidos_v,
+                            cargo=cargo_v,
+                            centro_costo=centro_costo_v,
+                            email=email_v,
+                            fecha_contrato=fecha_contrato_v,
+                            vigencia_examen=vigencia_examen_v,
+                            overwrite=True,
+                            existing_id=None,
                         )
-                    else:
-                        execute(
-                            """
-                            UPDATE trabajadores
-                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                             WHERE id=?
-                            """,
-                            (nombres_v, apellidos_v, cargo_v, centro_costo_v, email_v, fecha_contrato_v, vigencia_examen_v, int(exists_df.iloc[0]["id"])),
-                        )
+                        c.commit()
                     st.session_state["trabajador_create_rut"] = ""
                     st.session_state["trabajador_create_nombres"] = ""
                     st.session_state["trabajador_create_apellidos"] = ""
@@ -3924,47 +4016,35 @@ def _page_asignar_trabajadores_impl():
                                 fecha_contrato = _to_text_date_import_faena(r.get(fc_col)) if fc_col else None
                                 vigencia_examen = _to_text_date_import_faena(r.get("vigencia_examen")) if has_ve else None
 
-                                if overwrite:
-                                    if rut in rut_to_id:
-                                        cursor_execute(
-                                            c,
-                                            """
-                                            UPDATE trabajadores
-                                               SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                                             WHERE id=?
-                                            """,
-                                            (nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen, int(rut_to_id[rut])),
-                                        )
-                                        updated += 1
-                                    else:
-                                        cursor_execute(
-                                            c,
-                                            """
-                                            INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                            VALUES(?,?,?,?,?,?,?,?)
-                                            """,
-                                            (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                        )
-                                        inserted += 1
-                                else:
-                                    if rut in rut_to_id:
-                                        skipped += 1
-                                        continue
-                                    cursor_execute(
-                                        c,
-                                        '''
-                                        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-                                        VALUES(?,?,?,?,?,?,?,?)
-                                        ''',
-                                        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-                                    )
+                                action, tid_saved = _trabajador_insert_or_update(
+                                    c,
+                                    rut=rut,
+                                    nombres=nombres,
+                                    apellidos=apellidos,
+                                    cargo=cargo,
+                                    centro_costo=centro_costo,
+                                    email=email,
+                                    fecha_contrato=fecha_contrato,
+                                    vigencia_examen=vigencia_examen,
+                                    overwrite=overwrite,
+                                    existing_id=rut_to_id.get(rut),
+                                )
+                                if action == "inserted":
                                     inserted += 1
+                                elif action == "updated":
+                                    updated += 1
+                                else:
+                                    skipped += 1
+                                    continue
 
                                 # obtener id del trabajador
                                 if rut not in rut_to_id:
-                                    rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
-                                    if rid:
-                                        rut_to_id[rut] = int(rid[0])
+                                    if tid_saved:
+                                        rut_to_id[rut] = int(tid_saved)
+                                    else:
+                                        rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
+                                        if rid:
+                                            rut_to_id[rut] = int(rid[0])
 
                                 tid = rut_to_id.get(rut)
                                 if tid:
