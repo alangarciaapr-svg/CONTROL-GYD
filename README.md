@@ -1,4 +1,4 @@
-# Control Documental de Faenas (v8.4.23)
+# Control Documental de Faenas (v8.4.39)
 
 Estado de esta base:
 - Backend compatible con SQLite local o Supabase/Postgres.
@@ -16,3 +16,15 @@ Notas operativas:
 - En Streamlit Community Cloud el filesystem local no es persistente garantizado entre reinicios.
 - Si trabajas con Supabase/Postgres, la fuente de verdad es la base online y Storage.
 - Para subir o borrar archivos en Storage usa una secret/service key real en `SUPABASE_SERVICE_ROLE_KEY`.
+
+
+Primera versión ERP / SGSST incorporada:
+- Nuevo módulo **Mi Empresa / SGSST** en el menú lateral.
+- Ficha empresa editable.
+- Matriz legal base para **DS 44**, **Ley 16.744** y **DS 594**.
+- Programa anual preventivo.
+- MIPER inicial por faena / proceso / cargo.
+- Inspecciones DS 594.
+- Accidentes e incidentes.
+- Capacitaciones y ODI.
+- Bitácora de auditoría del módulo ERP.
