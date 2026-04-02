@@ -31,9 +31,9 @@ import unicodedata
 # ----------------------------
 # Config
 # ----------------------------
-st.set_page_config(page_title="Control Documental Faenas", layout="wide")
+st.set_page_config(page_title="SEGAV ERP", layout="wide")
 
-APP_NAME = "Control Documental de Faenas"
+APP_NAME = "SEGAV ERP"
 DB_PATH = "app.db"
 UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
 MAX_UPLOAD_FILE_BYTES = int(1.5 * 1024 * 1024)
@@ -181,6 +181,8 @@ def _is_select_query(q: str) -> bool:
 def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     ensure_dirs()
     init_db()
+    ensure_segav_erp_tables()
+    ensure_segav_erp_seed_data()
     return True
 
 def _qmark_to_pct(sql: str) -> str:
@@ -474,7 +476,7 @@ def pendientes_empresa_faena_periodo(faena_id: int, anio: int, mes: int):
         (int(faena_id), int(anio), int(mes)),
     )
     present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
-    return [d for d in DOC_EMPRESA_MENSUALES if d not in present]
+    return [d for d in get_empresa_monthly_doc_types() if d not in present]
 
 
 def _zip_single_file_bytes(file_name: str, file_bytes: bytes) -> tuple[str, bytes]:
@@ -652,6 +654,95 @@ DOC_EMPRESA_MENSUALES = [
     "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
     "CERTIFICADO_ACCIDENTABILIDAD",
 ]
+
+ERP_CLIENT_PARAM_DEFAULTS = {
+    "usa_multi_faena": "SI",
+    "usa_docs_empresa_mensuales": "SI",
+    "usa_miper": "SI",
+    "usa_ds594": "SI",
+    "usa_ley_16744": "SI",
+    "usa_capacitaciones_odi": "SI",
+    "usa_auditoria": "SI",
+    "branding_cliente": "ESTANDAR",
+}
+
+ERP_TEMPLATE_PRESETS = {
+    "GENERAL": {
+        "label": "General",
+        "vertical": "General",
+        "description": "Base comercial multipropósito para servicios, administración y operación documental.",
+        "cargos": ["OPERARIO", "SUPERVISOR", "ADMINISTRATIVO", "MECANICO", "BODEGUERO", "PLANTA"],
+        "cargo_rules": {
+            "OPERARIO": list(DOC_OBLIGATORIOS),
+            "SUPERVISOR": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "BODEGUERO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "FORESTAL": {
+        "label": "Forestal",
+        "vertical": "Forestal",
+        "description": "Plantilla base para faenas forestales, con cargos y documentos obligatorios por rol.",
+        "cargos": list(CARGO_DOCS_ORDER) + ["SUPERVISOR DE FAENA"],
+        "cargo_rules": {
+            **{k: list(dict.fromkeys(v)) for k, v in CARGO_DOCS_RULES.items()},
+            "SUPERVISOR DE FAENA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "CONSTRUCCION": {
+        "label": "Construcción",
+        "vertical": "Construcción",
+        "description": "Plantilla para contratistas y subcontratistas con control de cuadrillas, conducción y documentación mensual.",
+        "cargos": ["OPERARIO", "CAPATAZ", "CONDUCTOR", "MECANICO", "ADMINISTRATIVO", "BODEGUERO", "PLANTA"],
+        "cargo_rules": {
+            "OPERARIO": list(DOC_OBLIGATORIOS),
+            "CAPATAZ": list(DOC_OBLIGATORIOS),
+            "CONDUCTOR": list(dict.fromkeys(DOC_OBLIGATORIOS + ["LICENCIA_CONDUCIR", "CEDULA_IDENTIDAD"])),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "BODEGUERO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "TRANSPORTE": {
+        "label": "Transporte",
+        "vertical": "Transporte",
+        "description": "Plantilla para operación con conductores, mantención y trazabilidad documental por servicio.",
+        "cargos": ["CONDUCTOR", "PEONETA", "MECANICO", "ADMINISTRATIVO", "PLANTA"],
+        "cargo_rules": {
+            "CONDUCTOR": list(dict.fromkeys(DOC_OBLIGATORIOS + ["LICENCIA_CONDUCIR", "CEDULA_IDENTIDAD"])),
+            "PEONETA": list(DOC_OBLIGATORIOS),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "SERVICIOS": {
+        "label": "Servicios",
+        "vertical": "Servicios",
+        "description": "Plantilla para empresas de servicios generales con configuración ligera y adaptable.",
+        "cargos": ["TECNICO", "SUPERVISOR", "ADMINISTRATIVO", "AUXILIAR", "PLANTA"],
+        "cargo_rules": {
+            "TECNICO": list(DOC_OBLIGATORIOS),
+            "SUPERVISOR": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "AUXILIAR": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+}
 MESES_ES = {
     1: "ENERO",
     2: "FEBRERO",
@@ -711,33 +802,42 @@ def normalize_text(value) -> str:
     return s.strip().lower()
 
 
+def make_erp_key(value: str, prefix: str = "") -> str:
+    base = normalize_text(value)
+    base = re.sub(r"[^a-z0-9]+", "_", base).strip("_") or "item"
+    return f"{prefix}{base}" if prefix else base
+
+
 def canonical_cargo_label(cargo: str | None) -> str:
     cargo_txt = str(cargo or "").strip()
     cargo_n = normalize_text(cargo_txt)
+    labels = segav_cargo_labels(active_only=False)
     if not cargo_n:
-        return "PLANTA"
-    if cargo_txt in CARGO_DOCS_RULES:
-        return cargo_txt
-    if "motosierr" in cargo_n:
-        return "MOTOSIERRISTA"
-    if "maquinaria" in cargo_n and "forestal" in cargo_n:
-        return "OPERADOR DE MAQUINARIA FORESTAL"
-    if "estrobero" in cargo_n:
-        return "ESTROBERO"
-    if "administr" in cargo_n:
-        return "ADMINISTRATIVO"
-    if "mecan" in cargo_n:
-        return "MECANICO"
-    if "aserradero" in cargo_n:
-        return "ASERRADERO"
-    if "planta" in cargo_n:
-        return "PLANTA"
+        return "PLANTA" if "PLANTA" in labels else (labels[0] if labels else "PLANTA")
+    for label in labels:
+        if cargo_txt == label:
+            return label
+    alias_patterns = [
+        ("motosierr", "MOTOSIERRISTA"),
+        ("maquinaria forestal", "OPERADOR DE MAQUINARIA FORESTAL"),
+        ("estrobero", "ESTROBERO"),
+        ("administr", "ADMINISTRATIVO"),
+        ("mecan", "MECANICO"),
+        ("aserradero", "ASERRADERO"),
+        ("planta", "PLANTA"),
+    ]
+    for patt, canon in alias_patterns:
+        if patt in cargo_n and canon in labels:
+            return canon
+    for label in labels:
+        if normalize_text(label) == cargo_n:
+            return label
     return cargo_txt.upper()
 
 
 def worker_required_docs(cargo: str | None) -> list[str]:
     cargo_key = canonical_cargo_label(cargo)
-    docs = CARGO_DOCS_RULES.get(cargo_key, DOC_OBLIGATORIOS)
+    docs = segav_cargo_rules().get(cargo_key, DOC_OBLIGATORIOS)
     return list(dict.fromkeys(docs))
 
 
@@ -761,10 +861,11 @@ def worker_required_docs_for_record(rec) -> list[str]:
 
 def cargo_docs_catalog_rows():
     rows = []
-    for cargo in CARGO_DOCS_ORDER:
+    rules = segav_cargo_rules()
+    for cargo in segav_cargo_labels(active_only=False):
         rows.append({
             "Cargo": cargo,
-            "Documentos obligatorios": doc_tipo_join(CARGO_DOCS_RULES.get(cargo, DOC_OBLIGATORIOS)),
+            "Documentos obligatorios": doc_tipo_join(rules.get(cargo, DOC_OBLIGATORIOS)),
         })
     return rows
 
@@ -1858,18 +1959,18 @@ def ensure_sgsst_seed_data():
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    "Sociedad Maderera Gálvez y Di Genova Ltda.",
+                    "Empresa demo",
                     "",
-                    "Ruta 215 km 12, Camino Viejo Las Lumas, Osorno",
-                    "Maderero / Forestal",
-                    "Mutual de Seguridad",
-                    "Rodrigo Gálvez Rebolledo; Paola Di Genova Andrades",
-                    "Alan García Vidal",
-                    "maderasgyd@gmail.com",
-                    24,
+                    "",
+                    "General",
+                    "Organismo administrador",
+                    "",
+                    "",
+                    "",
+                    0,
                     "1.0",
                     date.today().isoformat(),
-                    "Primera base ERP/SGSST montada sobre el control documental existente.",
+                    "Base inicial de SEGAV ERP / SGSST configurable para cualquier empresa.",
                     datetime.now().isoformat(timespec='seconds'),
                     datetime.now().isoformat(timespec='seconds'),
                 ),
@@ -1898,6 +1999,357 @@ def ensure_sgsst_seed_data():
             )
     except Exception:
         pass
+
+
+
+def ensure_segav_erp_tables():
+    stmts = [
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_config (
+            config_key TEXT PRIMARY KEY,
+            config_value TEXT,
+            updated_at TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_cargos (
+            cargo_key TEXT PRIMARY KEY,
+            cargo_label TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            activo INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_docs_cargo (
+            cargo_key TEXT NOT NULL,
+            doc_tipo TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (cargo_key, doc_tipo)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_docs_empresa (
+            doc_tipo TEXT PRIMARY KEY,
+            obligatorio INTEGER NOT NULL DEFAULT 1,
+            mensual INTEGER NOT NULL DEFAULT 1,
+            por_mandante INTEGER NOT NULL DEFAULT 1,
+            por_faena INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_templates (
+            template_key TEXT PRIMARY KEY,
+            template_label TEXT NOT NULL,
+            vertical TEXT,
+            description TEXT,
+            payload_json TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            activo INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_clientes (
+            cliente_key TEXT PRIMARY KEY,
+            cliente_nombre TEXT NOT NULL,
+            rut TEXT,
+            vertical TEXT,
+            modo_implementacion TEXT,
+            activo INTEGER NOT NULL DEFAULT 1,
+            contacto TEXT,
+            email TEXT,
+            observaciones TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_erp_parametros_cliente (
+            cliente_key TEXT NOT NULL,
+            param_key TEXT NOT NULL,
+            param_value TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (cliente_key, param_key)
+        );
+        """,
+    ]
+    for s in stmts:
+        execute(s)
+
+
+def set_segav_erp_config_value(key: str, value: str):
+    now = datetime.now().isoformat(timespec='seconds')
+    execute("DELETE FROM segav_erp_config WHERE config_key=?", (key,))
+    execute("INSERT INTO segav_erp_config(config_key, config_value, updated_at) VALUES(?,?,?)", (key, str(value), now))
+
+
+def ensure_segav_erp_seed_data():
+    now = datetime.now().isoformat(timespec='seconds')
+    defaults = {
+        'erp_name': 'SEGAV ERP',
+        'erp_slogan': 'ERP comercializable de cumplimiento, prevención y operación documental',
+        'erp_vertical': 'General',
+        'multiempresa': 'SI',
+        'cliente_actual': 'Empresa actual',
+        'modo_implementacion': 'CONFIGURABLE',
+        'template_actual': 'GENERAL',
+    }
+    for k, v in defaults.items():
+        execute(
+            "INSERT INTO segav_erp_config(config_key, config_value, updated_at) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM segav_erp_config WHERE config_key=?)",
+            (k, v, now, k),
+        )
+
+    if int(fetch_value("SELECT COUNT(*) FROM segav_erp_cargos", default=0) or 0) == 0:
+        for idx, cargo in enumerate(CARGO_DOCS_ORDER, start=1):
+            execute(
+                "INSERT INTO segav_erp_cargos(cargo_key, cargo_label, sort_order, activo, updated_at) VALUES(?,?,?,?,?)",
+                (cargo, cargo, idx, 1, now),
+            )
+
+    if int(fetch_value("SELECT COUNT(*) FROM segav_erp_docs_cargo", default=0) or 0) == 0:
+        for cargo, docs in CARGO_DOCS_RULES.items():
+            for idx, doc_tipo in enumerate(list(dict.fromkeys(docs)), start=1):
+                execute(
+                    "INSERT INTO segav_erp_docs_cargo(cargo_key, doc_tipo, sort_order, updated_at) VALUES(?,?,?,?)",
+                    (cargo, doc_tipo, idx, now),
+                )
+
+    if int(fetch_value("SELECT COUNT(*) FROM segav_erp_docs_empresa", default=0) or 0) == 0:
+        for idx, doc_tipo in enumerate(DOC_EMPRESA_MENSUALES, start=1):
+            execute(
+                "INSERT INTO segav_erp_docs_empresa(doc_tipo, obligatorio, mensual, por_mandante, por_faena, sort_order, updated_at) VALUES(?,?,?,?,?,?,?)",
+                (doc_tipo, 1, 1, 1, 1, idx, now),
+            )
+
+    if int(fetch_value("SELECT COUNT(*) FROM segav_erp_templates", default=0) or 0) == 0:
+        for idx, (template_key, payload) in enumerate(ERP_TEMPLATE_PRESETS.items(), start=1):
+            execute(
+                "INSERT INTO segav_erp_templates(template_key, template_label, vertical, description, payload_json, sort_order, activo, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (template_key, payload.get('label') or template_key, payload.get('vertical') or '', payload.get('description') or '', json.dumps(payload, ensure_ascii=False), idx, 1, now),
+            )
+
+    if int(fetch_value("SELECT COUNT(*) FROM segav_erp_clientes", default=0) or 0) == 0:
+        empresa = fetch_df("SELECT razon_social, rut FROM sgsst_empresa ORDER BY id LIMIT 1")
+        razon = 'Empresa actual'
+        rut = ''
+        if empresa is not None and not empresa.empty:
+            razon = str(empresa.iloc[0].get('razon_social') or razon)
+            rut = clean_rut(empresa.iloc[0].get('rut') or '')
+        cliente_nombre = segav_erp_value('cliente_actual', razon) or razon
+        cliente_key = make_erp_key(cliente_nombre, prefix='cli_')
+        execute(
+            "INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (cliente_key, cliente_nombre, rut, segav_erp_value('erp_vertical', 'General'), segav_erp_value('modo_implementacion', 'CONFIGURABLE'), 1, '', '', 'Cliente inicial sembrado desde la configuración actual.', now, now),
+        )
+        for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
+            execute(
+                "INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) VALUES(?,?,?,?)",
+                (cliente_key, param_key, str(param_value), now),
+            )
+        if not segav_erp_value('current_client_key', ''):
+            set_segav_erp_config_value('current_client_key', cliente_key)
+            set_segav_erp_config_value('cliente_actual', cliente_nombre)
+
+    # asegura cliente actual y parámetros base
+    cliente_df = fetch_df("SELECT cliente_key, cliente_nombre FROM segav_erp_clientes WHERE COALESCE(activo,1)=1 ORDER BY cliente_nombre")
+    if cliente_df is not None and not cliente_df.empty:
+        current_key = segav_erp_value('current_client_key', '')
+        if not current_key or current_key not in cliente_df['cliente_key'].astype(str).tolist():
+            current_key = str(cliente_df.iloc[0].get('cliente_key'))
+            set_segav_erp_config_value('current_client_key', current_key)
+            set_segav_erp_config_value('cliente_actual', str(cliente_df.iloc[0].get('cliente_nombre') or 'Empresa actual'))
+        for _, row in cliente_df.iterrows():
+            ckey = str(row.get('cliente_key') or '')
+            if not ckey:
+                continue
+            for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
+                execute(
+                    "INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM segav_erp_parametros_cliente WHERE cliente_key=? AND param_key=?)",
+                    (ckey, param_key, str(param_value), now, ckey, param_key),
+                )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_erp_config_map(_backend: str, _dsn: str):
+    df = fetch_df("SELECT config_key, config_value FROM segav_erp_config ORDER BY config_key")
+    if df is None or df.empty:
+        return {}
+    return {str(r['config_key']): str(r['config_value'] or '') for _, r in df.iterrows()}
+
+
+def segav_erp_config_map():
+    return get_segav_erp_config_map(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+def segav_erp_value(key: str, default: str = "") -> str:
+    return str(segav_erp_config_map().get(key, default) or default)
+
+
+def erp_brand_name() -> str:
+    return segav_erp_value('erp_name', APP_NAME)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_cargos_df(_backend: str, _dsn: str):
+    df = fetch_df("SELECT cargo_key, cargo_label, sort_order, activo FROM segav_erp_cargos ORDER BY sort_order, cargo_label")
+    return df if df is not None else pd.DataFrame()
+
+
+def segav_cargos_df():
+    return get_segav_cargos_df(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+def segav_cargo_labels(active_only: bool = True) -> list[str]:
+    df = segav_cargos_df()
+    if df is None or df.empty:
+        return list(CARGO_DOCS_ORDER)
+    if active_only and 'activo' in df.columns:
+        df = df[df['activo'].fillna(1).astype(int) == 1]
+    labels = [str(v).strip() for v in df['cargo_label'].tolist() if str(v).strip()]
+    return labels or list(CARGO_DOCS_ORDER)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_cargo_rules(_backend: str, _dsn: str):
+    df = fetch_df(
+        """
+        SELECT c.cargo_label, d.doc_tipo, d.sort_order
+          FROM segav_erp_docs_cargo d
+          LEFT JOIN segav_erp_cargos c ON c.cargo_key=d.cargo_key
+         ORDER BY COALESCE(c.sort_order,9999), COALESCE(d.sort_order,9999), d.doc_tipo
+        """
+    )
+    if df is None or df.empty:
+        return {}
+    rules = {}
+    for _, r in df.iterrows():
+        cargo = str(r.get('cargo_label') or '').strip()
+        doc_tipo = str(r.get('doc_tipo') or '').strip()
+        if not cargo or not doc_tipo:
+            continue
+        rules.setdefault(cargo, []).append(doc_tipo)
+    return {k: list(dict.fromkeys(v)) for k, v in rules.items()}
+
+
+def segav_cargo_rules():
+    rules = get_segav_cargo_rules(DB_BACKEND, PG_DSN_FINGERPRINT)
+    return rules or {k: list(dict.fromkeys(v)) for k, v in CARGO_DOCS_RULES.items()}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_empresa_docs_df(_backend: str, _dsn: str):
+    df = fetch_df("SELECT doc_tipo, obligatorio, mensual, por_mandante, por_faena, sort_order FROM segav_erp_docs_empresa ORDER BY sort_order, doc_tipo")
+    return df if df is not None else pd.DataFrame()
+
+
+def segav_empresa_docs_df():
+    return get_segav_empresa_docs_df(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_templates_df(_backend: str, _dsn: str):
+    df = fetch_df("SELECT template_key, template_label, vertical, description, payload_json, sort_order, activo FROM segav_erp_templates ORDER BY sort_order, template_label")
+    return df if df is not None else pd.DataFrame()
+
+
+def segav_templates_df():
+    return get_segav_templates_df(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+def segav_template_payload(template_key: str) -> dict:
+    df = segav_templates_df()
+    if df is not None and not df.empty:
+        row = df[df['template_key'].astype(str) == str(template_key)]
+        if not row.empty:
+            raw = str(row.iloc[0].get('payload_json') or '')
+            try:
+                return json.loads(raw) if raw else {}
+            except Exception:
+                return {}
+    return dict(ERP_TEMPLATE_PRESETS.get(str(template_key), {}))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_clientes_df(_backend: str, _dsn: str):
+    df = fetch_df("SELECT cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at FROM segav_erp_clientes ORDER BY COALESCE(activo,1) DESC, cliente_nombre")
+    return df if df is not None else pd.DataFrame()
+
+
+def segav_clientes_df():
+    return get_segav_clientes_df(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+def current_segav_client_key() -> str:
+    return segav_erp_value('current_client_key', '')
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_segav_cliente_params_df(_backend: str, _dsn: str, cliente_key: str):
+    if not cliente_key:
+        return pd.DataFrame(columns=['cliente_key','param_key','param_value'])
+    df = fetch_df("SELECT cliente_key, param_key, param_value FROM segav_erp_parametros_cliente WHERE cliente_key=? ORDER BY param_key", (cliente_key,))
+    return df if df is not None else pd.DataFrame()
+
+
+def segav_cliente_params(cliente_key: str) -> dict:
+    df = get_segav_cliente_params_df(DB_BACKEND, PG_DSN_FINGERPRINT, str(cliente_key or ''))
+    if df is None or df.empty:
+        return dict(ERP_CLIENT_PARAM_DEFAULTS)
+    params = {str(r.get('param_key') or ''): str(r.get('param_value') or '') for _, r in df.iterrows()}
+    merged = dict(ERP_CLIENT_PARAM_DEFAULTS)
+    merged.update(params)
+    return merged
+
+
+def apply_segav_template(template_key: str):
+    payload = segav_template_payload(template_key)
+    if not payload:
+        return False, 'Plantilla no disponible.'
+    now = datetime.now().isoformat(timespec='seconds')
+    cargos = [str(c).strip().upper() for c in payload.get('cargos', []) if str(c).strip()]
+    cargo_rules = payload.get('cargo_rules', {}) or {}
+    empresa_docs = [str(d).strip() for d in payload.get('empresa_docs', []) if str(d).strip()]
+
+    for idx, cargo in enumerate(cargos, start=1):
+        execute("DELETE FROM segav_erp_cargos WHERE cargo_key=?", (cargo,))
+        execute("INSERT INTO segav_erp_cargos(cargo_key, cargo_label, sort_order, activo, updated_at) VALUES(?,?,?,?,?)", (cargo, cargo, idx, 1, now))
+        docs = [str(d).strip() for d in cargo_rules.get(cargo, DOC_OBLIGATORIOS) if str(d).strip()]
+        execute("DELETE FROM segav_erp_docs_cargo WHERE cargo_key=?", (cargo,))
+        for d_idx, doc_tipo in enumerate(list(dict.fromkeys(docs)), start=1):
+            execute("INSERT INTO segav_erp_docs_cargo(cargo_key, doc_tipo, sort_order, updated_at) VALUES(?,?,?,?)", (cargo, doc_tipo, d_idx, now))
+
+    for idx, doc_tipo in enumerate(list(dict.fromkeys(empresa_docs)), start=1):
+        execute("DELETE FROM segav_erp_docs_empresa WHERE doc_tipo=?", (doc_tipo,))
+        execute("INSERT INTO segav_erp_docs_empresa(doc_tipo, obligatorio, mensual, por_mandante, por_faena, sort_order, updated_at) VALUES(?,?,?,?,?,?,?)", (doc_tipo, 1, 1, 1, 1, idx, now))
+
+    set_segav_erp_config_value('template_actual', template_key)
+    if payload.get('vertical'):
+        set_segav_erp_config_value('erp_vertical', str(payload.get('vertical')))
+    clear_app_caches()
+    return True, f"Plantilla {payload.get('label') or template_key} aplicada al catálogo ERP."
+
+
+def get_empresa_required_doc_types() -> list[str]:
+    df = segav_empresa_docs_df()
+    if df is None or df.empty:
+        return list(DOC_EMPRESA_REQUERIDOS)
+    df = df[df['obligatorio'].fillna(1).astype(int) == 1]
+    docs = [str(v).strip() for v in df['doc_tipo'].tolist() if str(v).strip()]
+    return docs or list(DOC_EMPRESA_REQUERIDOS)
+
+
+def get_empresa_monthly_doc_types() -> list[str]:
+    df = segav_empresa_docs_df()
+    if df is None or df.empty:
+        return list(DOC_EMPRESA_MENSUALES)
+    df = df[df['mensual'].fillna(1).astype(int) == 1]
+    docs = [str(v).strip() for v in df['doc_tipo'].tolist() if str(v).strip()]
+    return docs or list(DOC_EMPRESA_MENSUALES)
 
 
 def sgsst_log(modulo: str, accion: str, detalle: str = ""):
@@ -1929,7 +2381,7 @@ def render_brand_logo(width: int = 220):
     if logo:
         st.image(logo, width=width)
     else:
-        st.markdown(f"### {APP_NAME}")
+        st.markdown(f"### {erp_brand_name()}")
 
 DEFAULT_PERMS = {
     "view_dashboard": True,
@@ -1947,7 +2399,12 @@ DEFAULT_PERMS = {
     "manage_users": False,
 }
 
+ALL_PERM_KEYS = list(DEFAULT_PERMS.keys())
+SUPERADMIN_PERMS = {k: True for k in ALL_PERM_KEYS}
+USER_ROLE_OPTIONS = ["SUPERADMIN", "ADMIN", "OPERADOR", "LECTOR"]
+
 ROLE_TEMPLATES = {
+    "SUPERADMIN": SUPERADMIN_PERMS.copy(),
     "ADMIN": {**DEFAULT_PERMS, "manage_users": True},
     "OPERADOR": {**DEFAULT_PERMS, "manage_users": False},
     "LECTOR": {
@@ -1989,6 +2446,8 @@ def verify_password(password: str, salt_b64: str, hash_b64: str) -> bool:
 
 def perms_from_row(role: str, perms_json: str | None):
     role = (role or "OPERADOR").upper()
+    if role == "SUPERADMIN":
+        return SUPERADMIN_PERMS.copy()
     perms = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES["OPERADOR"]).copy()
     if perms_json:
         try:
@@ -2221,6 +2680,32 @@ def admins_count(active_only: bool = True) -> int:
     except Exception:
         return 0
 
+def superadmins_count(active_only: bool = True) -> int:
+    try:
+        if active_only:
+            df = fetch_df("SELECT COUNT(*) AS n FROM users WHERE role='SUPERADMIN' AND is_active=1")
+        else:
+            df = fetch_df("SELECT COUNT(*) AS n FROM users WHERE role='SUPERADMIN'")
+        return int(df["n"].iloc[0]) if not df.empty else 0
+    except Exception:
+        return 0
+
+def ensure_superadmin_exists():
+    try:
+        ensure_users_table()
+        if superadmins_count(active_only=False) > 0:
+            return
+        src = fetch_df("SELECT id FROM users WHERE role='ADMIN' ORDER BY is_active DESC, id ASC LIMIT 1")
+        if src.empty:
+            return
+        uid = int(src.iloc[0]["id"])
+        execute(
+            "UPDATE users SET role=?, perms_json=?, updated_at=datetime('now') WHERE id=?",
+            ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
+        )
+    except Exception:
+        pass
+
 
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
@@ -2241,6 +2726,8 @@ def has_perm(perm: str) -> bool:
     u = current_user()
     if not u:
         return False
+    if str(u.get("role") or "").upper() == "SUPERADMIN":
+        return True
     return bool(u.get("perms", {}).get(perm, False))
 
 def require_perm(perm: str):
@@ -2272,7 +2759,7 @@ def auth_gate_ui():
             render_brand_logo(width=260)
         except Exception:
             pass
-        st.markdown('<div class="auth-title">Control documental de faenas</div>', unsafe_allow_html=True)
+        st.markdown('<div class="auth-title">SEGAV ERP</div>', unsafe_allow_html=True)
         st.markdown('<div class="auth-sub">Accede con tu usuario y contraseña para gestionar mandantes, faenas, trabajadores y exportaciones.</div>', unsafe_allow_html=True)
         st.markdown('<span class="auth-badge">🔒 Acceso seguro · Roles y poderes</span>', unsafe_allow_html=True)
         st.markdown("")
@@ -2283,19 +2770,20 @@ def auth_gate_ui():
 
         # Asegura tabla users
         ensure_users_table()
+        ensure_superadmin_exists()
 
-        # Seed automático del ADMIN por defecto si la tabla está vacía
+        # Seed automático del SUPERADMIN por defecto si la tabla está vacía
         if users_count() == 0:
             DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
             DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
             try:
                 salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
-                perms_json = json.dumps(ROLE_TEMPLATES["ADMIN"])
+                perms_json = json.dumps(SUPERADMIN_PERMS)
                 execute(
                     "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "ADMIN", perms_json),
+                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
                 )
-                auto_backup_db("users_seed_default_admin")
+                auto_backup_db("users_seed_default_superadmin")
             except Exception:
                 # Si ya existe o hay algún problema, continuamos hacia login
                 pass
@@ -2573,7 +3061,7 @@ def pendientes_empresa_faena(faena_id: int):
     """Lista de documentos de empresa requeridos faltantes para una faena."""
     df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
     present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
-    missing = [d for d in DOC_EMPRESA_REQUERIDOS if d not in present]
+    missing = [d for d in get_empresa_required_doc_types() if d not in present]
     return missing
 
 
@@ -3215,7 +3703,7 @@ with st.sidebar:
         render_brand_logo(width=170)
     except Exception:
         pass
-    st.markdown("**Control documental**")
+    st.markdown("**SEGAV ERP**")
     u = current_user()
     if u:
         st.caption(f"👤 {u['username']} · {u['role']}")
@@ -3327,7 +3815,7 @@ with st.sidebar:
         auth_logout()
 
 current_section = st.session_state.get("nav_page", "Dashboard")
-st.title(f"{APP_NAME} — {current_section}")
+st.title(f"{erp_brand_name()} — {current_section}")
 
 
 
@@ -4270,7 +4758,7 @@ def _page_trabajadores_impl():
             rut = rut_input("RUT", key="trabajador_create_rut", placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
             nombres = st.text_input("Nombres", placeholder="Juan", key="trabajador_create_nombres")
             apellidos = st.text_input("Apellidos", placeholder="Pérez", key="trabajador_create_apellidos")
-            cargo = st.text_input("Cargo", placeholder="Operador Harvester", key="trabajador_create_cargo")
+            cargo = st.selectbox("Cargo", segav_cargo_labels(active_only=True), key="trabajador_create_cargo")
             centro_costo = st.text_input("Centro de costo (opcional)", placeholder="FAENA", key="trabajador_create_cc")
             email = st.text_input("Email (opcional)", key="trabajador_create_email")
             fecha_contrato = st.date_input("Fecha de contrato (opcional)", value=None, key="trabajador_create_fc")
@@ -4342,14 +4830,7 @@ def _page_trabajadores_impl():
             rut_new = rut_input("RUT", key=f"{edit_prefix}_rut", value=str(row["rut"] or ""), placeholder="12.345.678-9", help="Escribe el RUT sin preocuparte por puntos o guion. La app lo formatea sola.")
             nombres_new = st.text_input("Nombres", key=f"{edit_prefix}_nombres")
             apellidos_new = st.text_input("Apellidos", key=f"{edit_prefix}_apellidos")
-            cargo_base_options = [
-                "OPERADOR DE MAQUINARIA FORESTAL",
-                "MOTOSIERRISTA",
-                "ESTROBERO",
-                "ADMINISTRATIVO",
-                "MECANICO",
-                "ASERRADERO",
-            ]
+            cargo_base_options = segav_cargo_labels(active_only=True)
             cargo_actual = str(st.session_state.get(f"{edit_prefix}_cargo", "") or "").strip()
             cargo_options = cargo_base_options.copy()
             if cargo_actual and cargo_actual not in cargo_options:
@@ -4765,10 +5246,10 @@ def _page_documentos_empresa_impl():
 
     df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
     tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
-    faltan = [d for d in DOC_EMPRESA_SUGERIDOS if d not in tipos_presentes]
+    faltan = [d for d in get_empresa_required_doc_types() if d not in tipos_presentes]
 
     c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Tipos requeridos", len(DOC_EMPRESA_SUGERIDOS))
+    c1.metric("Tipos requeridos", len(get_empresa_required_doc_types()))
     c2.metric("Tipos presentes", len(set(tipos_presentes)))
     c3.metric("Faltan requeridos", len(faltan))
 
@@ -4781,11 +5262,11 @@ def _page_documentos_empresa_impl():
 
     with tab1:
         st.caption("Tipos requeridos base:")
-        st.code("\n".join(doc_tipo_label(d) for d in DOC_EMPRESA_SUGERIDOS))
+        st.code("\n".join(doc_tipo_label(d) for d in get_empresa_required_doc_types()))
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_SUGERIDOS + ["OTRO"], format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
+            tipo = st.selectbox("Tipo", get_empresa_required_doc_types() + ["OTRO"], format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
 
@@ -4933,11 +5414,11 @@ def _page_documentos_empresa_faena_impl():
         (int(faena_id), int(anio_sel), int(mes_sel)),
     )
     tipos_presentes = set(docs_periodo["doc_tipo"].astype(str).tolist()) if not docs_periodo.empty else set()
-    faltan = [d for d in DOC_EMPRESA_MENSUALES if d not in tipos_presentes]
+    faltan = [d for d in get_empresa_monthly_doc_types() if d not in tipos_presentes]
 
     c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Requeridos mensuales", len(DOC_EMPRESA_MENSUALES))
-    c2.metric("Tipos cargados en el período", len([d for d in DOC_EMPRESA_MENSUALES if d in tipos_presentes]))
+    c1.metric("Requeridos mensuales", len(get_empresa_monthly_doc_types()))
+    c2.metric("Tipos cargados en el período", len([d for d in get_empresa_monthly_doc_types() if d in tipos_presentes]))
     c3.metric("Faltan en el período", len(faltan))
 
     if faltan:
@@ -4949,12 +5430,12 @@ def _page_documentos_empresa_faena_impl():
 
     with tab1:
         st.caption("Tipos mensuales requeridos:")
-        st.code("\n".join(doc_tipo_label(d) for d in DOC_EMPRESA_MENSUALES))
+        st.code("\n".join(doc_tipo_label(d) for d in get_empresa_monthly_doc_types()))
         st.caption("Para LIQUIDACIONES_SUELDO_MES puedes subir uno o varios archivos del mismo período.")
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", DOC_EMPRESA_MENSUALES + ["OTRO"], key="emp_faena_tipo", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
+            tipo = st.selectbox("Tipo", get_empresa_monthly_doc_types() + ["OTRO"], key="emp_faena_tipo", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input(
                 "Si eliges OTRO, escribe el nombre",
@@ -5677,7 +6158,7 @@ def _page_export_zip_impl():
 
 # Consolidación definitiva: se mantiene una sola implementación real por pantalla
 def page_sgsst():
-    ui_header("Mi Empresa / SGSST", "Primera versión visible del ERP preventivo: integra gestión legal y preventiva sin reemplazar lo que ya existe.")
+    ui_header("Mi Empresa / SGSST", "Núcleo comercializable de SEGAV ERP: configurable para cualquier empresa, sin reemplazar lo ya existente.")
     ensure_sgsst_seed_data()
 
     company_df = fetch_df("SELECT * FROM sgsst_empresa ORDER BY id LIMIT 1")
@@ -5707,7 +6188,9 @@ def page_sgsst():
 
     tabs = st.tabs([
         "🏢 Resumen",
+        "⚙️ Configuración ERP",
         "🏭 Ficha empresa",
+        "🧩 Catálogos",
         "⚖️ Matriz legal",
         "📅 Programa anual",
         "⚠️ MIPER",
@@ -5718,21 +6201,45 @@ def page_sgsst():
     ])
 
     with tabs[0]:
+        cfg = segav_erp_config_map()
+        clientes_df = segav_clientes_df()
+        current_client_key = current_segav_client_key()
+        current_client = {}
+        if clientes_df is not None and not clientes_df.empty:
+            rowc = clientes_df[clientes_df['cliente_key'].astype(str) == str(current_client_key)]
+            if rowc.empty:
+                rowc = clientes_df.iloc[[0]]
+            current_client = rowc.iloc[0].to_dict()
+        faenas_activas = int(fetch_value("SELECT COUNT(*) FROM faenas WHERE COALESCE(estado,'ACTIVA')='ACTIVA'", default=0) or 0)
+        total_trab = int(fetch_value("SELECT COUNT(*) FROM trabajadores", default=0) or 0)
+        total_clientes = int(len(clientes_df)) if clientes_df is not None else 0
+        total_cargos = int(len(segav_cargos_df())) if segav_cargos_df() is not None else 0
+        total_docs_empresa = len(get_empresa_required_doc_types())
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Clientes activos", total_clientes)
+        k2.metric("Faenas activas", faenas_activas)
+        k3.metric("Trabajadores", total_trab)
+        k4.metric("Cargos parametrizados", total_cargos)
+        k5.metric("Docs empresa base", total_docs_empresa)
+
         left, right = st.columns([1.2, 1])
         with left:
             st.markdown("### Vista ejecutiva")
             resumen = [
-                ("Razón social", company.get("razon_social") or "Sin definir"),
+                ("ERP", cfg.get("erp_name", "SEGAV ERP")),
+                ("Vertical", cfg.get("erp_vertical", "General")),
+                ("Plantilla actual", cfg.get("template_actual", "GENERAL")),
+                ("Cliente actual", current_client.get("cliente_nombre") or cfg.get("cliente_actual") or "Sin definir"),
+                ("Razón social operativa", company.get("razon_social") or "Sin definir"),
                 ("Organismo administrador", company.get("organismo_admin") or "Sin definir"),
                 ("Prevencionista", company.get("prevencionista") or "Sin definir"),
-                ("Canal denuncias", company.get("canal_denuncias") or "Sin definir"),
                 ("Dotación total", company.get("dotacion_total") or 0),
-                ("Política", f"Versión {company.get('politica_version') or 's/d'} · {company.get('politica_fecha') or 'sin fecha'}"),
             ]
             for label, value in resumen:
                 st.write(f"**{label}:** {value}")
             st.info(
-                "Esta primera versión ERP monta una capa SGSST sobre la app actual: empresa, matriz legal, programa preventivo, MIPER, DS 594, incidentes y capacitaciones.",
+                "SEGAV ERP ya cuenta con capa comercial configurable: catálogos, clientes, plantillas por rubro y parámetros por cliente, sin eliminar la operación actual.",
                 icon="🧭",
             )
         with right:
@@ -5743,7 +6250,8 @@ def page_sgsst():
                 {"Indicador": "Ley 16.744 / Dotación", "Estado": cphs_msg},
                 {"Indicador": "DS 44", "Estado": "Base ERP visible cargada"},
                 {"Indicador": "DS 594", "Estado": "Checklist inicial habilitado"},
-                {"Indicador": "Auditoría", "Estado": "Bitácora de acciones habilitada"},
+                {"Indicador": "Multiempresa", "Estado": cfg.get("multiempresa", "SI")},
+                {"Indicador": "Implementación", "Estado": cfg.get("modo_implementacion", "CONFIGURABLE")},
             ])
             st.dataframe(estado_rows, use_container_width=True, hide_index=True)
             b1, b2, b3 = st.columns(3)
@@ -5757,7 +6265,217 @@ def page_sgsst():
                 if st.button("Ir a Trabajadores", use_container_width=True, key="sgsst_go_trab"):
                     go("Trabajadores")
 
+        st.markdown("### Dashboard comercial / ERP")
+        dash_rows = pd.DataFrame([
+            {"Bloque": "Producto", "Valor": cfg.get("erp_slogan", "") or "Sin definir"},
+            {"Bloque": "Cliente actual", "Valor": current_client.get("cliente_nombre") or cfg.get("cliente_actual") or "Sin definir"},
+            {"Bloque": "RUT cliente", "Valor": current_client.get("rut") or clean_rut(company.get("rut") or "") or "Sin definir"},
+            {"Bloque": "Vertical actual", "Valor": cfg.get("erp_vertical", "General")},
+            {"Bloque": "Modo comercial", "Valor": cfg.get("multiempresa", "SI")},
+            {"Bloque": "Plantilla activa", "Valor": cfg.get("template_actual", "GENERAL")},
+        ])
+        st.dataframe(dash_rows, use_container_width=True, hide_index=True)
+
     with tabs[1]:
+        st.markdown("### Configuración ERP")
+        cfg = segav_erp_config_map()
+        z1, z2 = st.columns(2)
+        with z1:
+            erp_name = st.text_input("Nombre comercial", value=cfg.get("erp_name", "SEGAV ERP"), key="segav_cfg_name")
+            erp_slogan = st.text_area("Propuesta de valor", value=cfg.get("erp_slogan", "ERP comercializable de cumplimiento, prevención y operación documental"), height=90, key="segav_cfg_slogan")
+            erp_vertical = st.text_input("Vertical / rubro base", value=cfg.get("erp_vertical", "General"), key="segav_cfg_vertical")
+        with z2:
+            multiempresa = st.selectbox("Modo comercial", ["SI", "NO"], index=0 if cfg.get("multiempresa", "SI") == "SI" else 1, key="segav_cfg_multi")
+            cliente_actual = st.text_input("Cliente / empresa actual", value=cfg.get("cliente_actual", company.get("razon_social") or "Empresa actual"), key="segav_cfg_cliente")
+            impl_opts = ["CONFIGURABLE", "VERTICAL FORESTAL", "CORPORATIVO"]
+            modo_impl = st.selectbox("Implementación", impl_opts, index=impl_opts.index(cfg.get("modo_implementacion", "CONFIGURABLE")) if cfg.get("modo_implementacion", "CONFIGURABLE") in impl_opts else 0, key="segav_cfg_impl")
+        if st.button("Guardar configuración ERP", key="segav_cfg_save", type="primary"):
+            now = datetime.now().isoformat(timespec='seconds')
+            payload = {
+                "erp_name": erp_name.strip() or "SEGAV ERP",
+                "erp_slogan": erp_slogan.strip(),
+                "erp_vertical": erp_vertical.strip() or "General",
+                "multiempresa": multiempresa,
+                "cliente_actual": cliente_actual.strip(),
+                "modo_implementacion": modo_impl,
+            }
+            for k, v in payload.items():
+                execute("DELETE FROM segav_erp_config WHERE config_key=?", (k,))
+                execute("INSERT INTO segav_erp_config(config_key, config_value, updated_at) VALUES(?,?,?)", (k, str(v), now))
+            clear_app_caches()
+            sgsst_log("Configuración ERP", "Guardar", f"Configuración comercial actualizada: {payload.get('erp_name')}")
+            st.success("Configuración ERP guardada.")
+            st.rerun()
+        st.markdown("---")
+        st.markdown("### Plantillas por rubro")
+        tpl_df = segav_templates_df()
+        if tpl_df is not None and not tpl_df.empty:
+            st.dataframe(tpl_df[["template_key", "template_label", "vertical", "description", "activo"]].rename(columns={"template_key":"Código", "template_label":"Plantilla", "vertical":"Vertical", "description":"Descripción", "activo":"Activa"}), use_container_width=True, hide_index=True)
+        tpl_options = tpl_df["template_key"].tolist() if tpl_df is not None and not tpl_df.empty else list(ERP_TEMPLATE_PRESETS.keys())
+        current_tpl = cfg.get("template_actual", tpl_options[0] if tpl_options else "GENERAL")
+        if current_tpl not in tpl_options and tpl_options:
+            current_tpl = tpl_options[0]
+        tpl_sel = st.selectbox("Plantilla a visualizar/aplicar", tpl_options, index=tpl_options.index(current_tpl) if tpl_options else 0, key="segav_tpl_sel") if tpl_options else None
+        if tpl_sel:
+            payload = segav_template_payload(tpl_sel)
+            p1, p2 = st.columns([1.1, 1])
+            with p1:
+                st.write(f"**Descripción:** {payload.get('description') or 'Sin descripción'}")
+                st.write(f"**Vertical:** {payload.get('vertical') or 'Sin definir'}")
+                st.write(f"**Cargos incluidos:** {', '.join(payload.get('cargos', [])) or 'Sin cargos'}")
+            with p2:
+                preview_rows = []
+                for cargo_name, docs in (payload.get('cargo_rules') or {}).items():
+                    preview_rows.append({"Cargo": cargo_name, "Documentos": doc_tipo_join(docs)})
+                if preview_rows:
+                    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+            if st.button("Aplicar plantilla al catálogo ERP", key="segav_apply_tpl"):
+                ok, msg = apply_segav_template(tpl_sel)
+                if ok:
+                    sgsst_log("Configuración ERP", "Aplicar plantilla", tpl_sel)
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        st.markdown("---")
+        st.markdown("### Clientes / Multiempresa")
+        cli_df = segav_clientes_df()
+        if cli_df is not None and not cli_df.empty:
+            st.dataframe(cli_df[["cliente_key", "cliente_nombre", "rut", "vertical", "modo_implementacion", "activo"]].rename(columns={"cliente_key":"Código", "cliente_nombre":"Cliente", "rut":"RUT", "vertical":"Vertical", "modo_implementacion":"Implementación", "activo":"Activo"}), use_container_width=True, hide_index=True)
+        c1, c2, c3 = st.columns(3)
+        cli_name = c1.text_input("Nuevo cliente / empresa", key="segav_cli_name")
+        cli_rut = c2.text_input("RUT cliente", key="segav_cli_rut")
+        cli_vertical = c3.text_input("Vertical cliente", value=cfg.get("erp_vertical", "General"), key="segav_cli_vertical")
+        c4, c5, c6 = st.columns(3)
+        cli_contacto = c4.text_input("Contacto", key="segav_cli_contacto")
+        cli_email = c5.text_input("Email", key="segav_cli_email")
+        cli_obs = c6.text_input("Observaciones", key="segav_cli_obs")
+        if st.button("Registrar cliente ERP", key="segav_add_cliente"):
+            if not cli_name.strip():
+                st.error("Debes indicar el nombre del cliente.")
+            else:
+                now = datetime.now().isoformat(timespec='seconds')
+                cliente_key = make_erp_key(cli_name, prefix='cli_')
+                execute("DELETE FROM segav_erp_clientes WHERE cliente_key=?", (cliente_key,))
+                execute("INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (cliente_key, cli_name.strip(), clean_rut(cli_rut), cli_vertical.strip() or cfg.get('erp_vertical', 'General'), modo_impl, 1, cli_contacto.strip(), cli_email.strip(), cli_obs.strip(), now, now))
+                for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
+                    execute("INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM segav_erp_parametros_cliente WHERE cliente_key=? AND param_key=?)", (cliente_key, param_key, str(param_value), now, cliente_key, param_key))
+                clear_app_caches()
+                sgsst_log("Clientes ERP", "Agregar", cli_name.strip())
+                st.success("Cliente ERP registrado.")
+                st.rerun()
+        cli_keys = cli_df["cliente_key"].tolist() if cli_df is not None and not cli_df.empty else []
+        current_client_key_cfg = segav_erp_value("current_client_key", cli_keys[0] if cli_keys else "")
+        if cli_keys:
+            if current_client_key_cfg not in cli_keys:
+                current_client_key_cfg = cli_keys[0]
+            cli_active = st.selectbox("Cliente activo en el ERP", cli_keys, index=cli_keys.index(current_client_key_cfg), key="segav_cli_active", format_func=lambda x: str(cli_df[cli_df['cliente_key']==x].iloc[0]['cliente_nombre']))
+            if st.button("Usar como cliente actual", key="segav_set_cli_active"):
+                nombre_cli = str(cli_df[cli_df['cliente_key']==cli_active].iloc[0]['cliente_nombre'])
+                set_segav_erp_config_value("current_client_key", cli_active)
+                set_segav_erp_config_value("cliente_actual", nombre_cli)
+                clear_app_caches()
+                sgsst_log("Clientes ERP", "Activar", nombre_cli)
+                st.success("Cliente actual actualizado.")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("### Parámetros por cliente")
+        cli_keys = cli_df["cliente_key"].tolist() if cli_df is not None and not cli_df.empty else []
+        param_client_key = None
+        if cli_keys:
+            default_cli = segav_erp_value("current_client_key", cli_keys[0])
+            if default_cli not in cli_keys:
+                default_cli = cli_keys[0]
+            param_client_key = st.selectbox("Cliente a parametrizar", cli_keys, index=cli_keys.index(default_cli), key="segav_param_cliente", format_func=lambda x: str(cli_df[cli_df['cliente_key']==x].iloc[0]['cliente_nombre']))
+        if param_client_key:
+            cli_params = segav_cliente_params(param_client_key)
+            pp1, pp2, pp3, pp4 = st.columns(4)
+            p_1 = pp1.selectbox("Multi faena", ["SI", "NO"], index=0 if cli_params.get("usa_multi_faena", "SI") == "SI" else 1, key="segav_param_multi_faena")
+            p_2 = pp2.selectbox("Docs empresa mensuales", ["SI", "NO"], index=0 if cli_params.get("usa_docs_empresa_mensuales", "SI") == "SI" else 1, key="segav_param_docs_mensuales")
+            p_3 = pp3.selectbox("MIPER", ["SI", "NO"], index=0 if cli_params.get("usa_miper", "SI") == "SI" else 1, key="segav_param_miper")
+            p_4 = pp4.selectbox("DS 594", ["SI", "NO"], index=0 if cli_params.get("usa_ds594", "SI") == "SI" else 1, key="segav_param_ds594")
+            pp5, pp6, pp7, pp8 = st.columns(4)
+            p_5 = pp5.selectbox("Ley 16.744", ["SI", "NO"], index=0 if cli_params.get("usa_ley_16744", "SI") == "SI" else 1, key="segav_param_ley")
+            p_6 = pp6.selectbox("Capacitaciones / ODI", ["SI", "NO"], index=0 if cli_params.get("usa_capacitaciones_odi", "SI") == "SI" else 1, key="segav_param_cap")
+            p_7 = pp7.selectbox("Auditoría", ["SI", "NO"], index=0 if cli_params.get("usa_auditoria", "SI") == "SI" else 1, key="segav_param_aud")
+            p_8 = pp8.selectbox("Branding", ["ESTANDAR", "CLIENTE"], index=0 if cli_params.get("branding_cliente", "ESTANDAR") == "ESTANDAR" else 1, key="segav_param_brand")
+            if st.button("Guardar parámetros del cliente", key="segav_save_cliente_params"):
+                now = datetime.now().isoformat(timespec='seconds')
+                payload = {
+                    "usa_multi_faena": p_1,
+                    "usa_docs_empresa_mensuales": p_2,
+                    "usa_miper": p_3,
+                    "usa_ds594": p_4,
+                    "usa_ley_16744": p_5,
+                    "usa_capacitaciones_odi": p_6,
+                    "usa_auditoria": p_7,
+                    "branding_cliente": p_8,
+                }
+                for pk, pv in payload.items():
+                    execute("DELETE FROM segav_erp_parametros_cliente WHERE cliente_key=? AND param_key=?", (param_client_key, pk))
+                    execute("INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) VALUES(?,?,?,?)", (param_client_key, pk, str(pv), now))
+                clear_app_caches()
+                sgsst_log("Clientes ERP", "Guardar parámetros", param_client_key)
+                st.success("Parámetros del cliente guardados.")
+                st.rerun()
+
+        st.info("Esta capa vuelve a SEGAV ERP configurable y comercializable para cualquier empresa: nombre, vertical, modo multiempresa, plantillas por rubro, clientes y parámetros por cliente.")
+
+    with tabs[3]:
+        st.markdown("### Catálogos configurables")
+        st.write("#### Cargos del ERP")
+        cargos_df = segav_cargos_df()
+        if cargos_df is not None and not cargos_df.empty:
+            st.dataframe(cargos_df.rename(columns={"cargo_key":"Código", "cargo_label":"Cargo", "sort_order":"Orden", "activo":"Activo"}), use_container_width=True, hide_index=True)
+        cadd1, cadd2, cadd3 = st.columns([1.4, 0.8, 0.8])
+        cargo_new_label = cadd1.text_input("Nuevo cargo", key="segav_new_cargo_label")
+        cargo_new_order = cadd2.number_input("Orden", min_value=1, value=int((len(cargos_df) if cargos_df is not None else 0) + 1), step=1, key="segav_new_cargo_order")
+        cargo_new_active = cadd3.selectbox("Activo", ["SI", "NO"], key="segav_new_cargo_active")
+        if st.button("Agregar cargo al catálogo", key="segav_add_cargo"):
+            if not cargo_new_label.strip():
+                st.error("Debes indicar el nombre del cargo.")
+            else:
+                cargo_key = cargo_new_label.strip().upper()
+                now = datetime.now().isoformat(timespec='seconds')
+                execute("DELETE FROM segav_erp_cargos WHERE cargo_key=?", (cargo_key,))
+                execute("INSERT INTO segav_erp_cargos(cargo_key, cargo_label, sort_order, activo, updated_at) VALUES(?,?,?,?,?)", (cargo_key, cargo_key, int(cargo_new_order), 1 if cargo_new_active == "SI" else 0, now))
+                clear_app_caches()
+                sgsst_log("Catálogos ERP", "Agregar cargo", cargo_key)
+                st.success("Cargo agregado al catálogo.")
+                st.rerun()
+
+        cargo_labels = segav_cargo_labels(active_only=False)
+        cargo_sel = st.selectbox("Cargo a parametrizar", cargo_labels, key="segav_docs_cargo_sel")
+        current_docs = segav_cargo_rules().get(cargo_sel, DOC_OBLIGATORIOS)
+        docs_selected = st.multiselect("Documentos obligatorios por cargo", list(DOC_TIPO_LABELS.keys()), default=current_docs, key="segav_docs_cargo_multi", format_func=doc_tipo_label)
+        if st.button("Guardar documentos por cargo", key="segav_docs_cargo_save"):
+            now = datetime.now().isoformat(timespec='seconds')
+            execute("DELETE FROM segav_erp_docs_cargo WHERE cargo_key=?", (cargo_sel,))
+            for idx, doc_tipo in enumerate(docs_selected, start=1):
+                execute("INSERT INTO segav_erp_docs_cargo(cargo_key, doc_tipo, sort_order, updated_at) VALUES(?,?,?,?)", (cargo_sel, doc_tipo, idx, now))
+            clear_app_caches()
+            sgsst_log("Catálogos ERP", "Guardar docs cargo", f"{cargo_sel}: {', '.join(docs_selected)}")
+            st.success("Documentación obligatoria por cargo actualizada.")
+            st.rerun()
+
+        st.write("#### Documentos empresa / mandante / faena")
+        emp_df = segav_empresa_docs_df()
+        if emp_df is not None and not emp_df.empty:
+            st.dataframe(emp_df.rename(columns={"doc_tipo":"Tipo", "obligatorio":"Obligatorio", "mensual":"Mensual", "por_mandante":"Por mandante", "por_faena":"Por faena", "sort_order":"Orden"}), use_container_width=True, hide_index=True)
+        emp_docs_selected = st.multiselect("Documentos requeridos empresa/faena", list(DOC_TIPO_LABELS.keys()), default=get_empresa_monthly_doc_types(), key="segav_docs_empresa_multi", format_func=doc_tipo_label)
+        if st.button("Guardar documentos empresa/faena", key="segav_docs_empresa_save"):
+            now = datetime.now().isoformat(timespec='seconds')
+            execute("DELETE FROM segav_erp_docs_empresa", ())
+            for idx, doc_tipo in enumerate(emp_docs_selected, start=1):
+                execute("INSERT INTO segav_erp_docs_empresa(doc_tipo, obligatorio, mensual, por_mandante, por_faena, sort_order, updated_at) VALUES(?,?,?,?,?,?,?)", (doc_tipo, 1, 1, 1, 1, idx, now))
+            clear_app_caches()
+            sgsst_log("Catálogos ERP", "Guardar docs empresa", ', '.join(emp_docs_selected))
+            st.success("Documentos empresa/faena actualizados.")
+            st.rerun()
+
+    with tabs[2]:
         st.markdown("### Ficha empresa")
         e1, e2 = st.columns(2)
         with e1:
@@ -5798,7 +6516,7 @@ def page_sgsst():
             st.success("Ficha empresa guardada.")
             st.rerun()
 
-    with tabs[2]:
+    with tabs[4]:
         st.markdown("### Matriz legal")
         f1, f2 = st.columns([1, 1])
         norma_sel = f1.selectbox("Norma", ["(Todas)"] + SGSST_NORMAS, key="sgsst_matriz_norma")
@@ -5864,7 +6582,7 @@ def page_sgsst():
                     st.success("Base legal verificada/cargada.")
                     st.rerun()
 
-    with tabs[3]:
+    with tabs[5]:
         st.markdown("### Programa anual preventivo")
         anio_view = st.number_input("Año", min_value=2024, max_value=2100, value=date.today().year, step=1, key="sgsst_prog_anio_view")
         df_prog = fetch_df(
@@ -5904,7 +6622,7 @@ def page_sgsst():
                 st.success("Actividad incorporada al programa anual.")
                 st.rerun()
 
-    with tabs[4]:
+    with tabs[6]:
         st.markdown("### MIPER por faena, proceso y cargo")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
         faena_opts = [None] + faenas_df["id"].tolist() if not faenas_df.empty else [None]
@@ -5927,7 +6645,7 @@ def page_sgsst():
             m_faena = st.selectbox("Faena", faena_opts, key="sgsst_miper_faena", format_func=lambda x: "(Empresa)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
             proceso = st.text_input("Proceso", key="sgsst_miper_proceso")
             tarea = st.text_input("Tarea", key="sgsst_miper_tarea")
-            cargo = st.selectbox("Cargo", CARGO_DOCS_ORDER, key="sgsst_miper_cargo")
+            cargo = st.selectbox("Cargo", segav_cargo_labels(active_only=True), key="sgsst_miper_cargo")
         with m2:
             peligro = st.text_area("Peligro", key="sgsst_miper_peligro", height=80)
             riesgo = st.text_area("Riesgo", key="sgsst_miper_riesgo", height=80)
@@ -5955,7 +6673,7 @@ def page_sgsst():
                 st.success("Riesgo incorporado a la MIPER.")
                 st.rerun()
 
-    with tabs[5]:
+    with tabs[7]:
         st.markdown("### Inspecciones DS 594")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
         faena_opts = [None] + faenas_df["id"].tolist() if not faenas_df.empty else [None]
@@ -5991,7 +6709,7 @@ def page_sgsst():
                 st.success("Inspección registrada.")
                 st.rerun()
 
-    with tabs[6]:
+    with tabs[8]:
         st.markdown("### Accidentes e incidentes")
         trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos, nombres")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
@@ -6035,7 +6753,7 @@ def page_sgsst():
                 st.success("Evento registrado.")
                 st.rerun()
 
-    with tabs[7]:
+    with tabs[9]:
         st.markdown("### Capacitaciones y ODI")
         trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos, nombres")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
@@ -6079,7 +6797,7 @@ def page_sgsst():
                 st.success("Registro guardado.")
                 st.rerun()
 
-    with tabs[8]:
+    with tabs[10]:
         st.markdown("### Bitácora de auditoría")
         aud_df = fetch_df("SELECT id, created_at, modulo, accion, detalle, usuario FROM sgsst_auditoria ORDER BY id DESC LIMIT 200")
         st.dataframe(aud_df, use_container_width=True, hide_index=True)
@@ -6226,7 +6944,7 @@ def page_backup_restore():
                 st.error(f"No se pudo restaurar: {e}")
 
 def page_admin_usuarios():
-    ui_header("Administración de Usuarios", "Solo ADMIN puede crear, editar o eliminar usuarios y sus poderes.")
+    ui_header("Administración de Usuarios", "Como SUPERADMIN puedes ver y gestionar todas las funciones. Más adelante podrás decidir qué ve cada usuario.")
     require_perm("manage_users")
     ensure_users_table()
 
@@ -6250,10 +6968,14 @@ def page_admin_usuarios():
 
         c1, c2, c3 = st.columns(3)
         with c1:
+            role_options = list(USER_ROLE_OPTIONS)
+            current_role = (row.get("role") or "OPERADOR").upper()
+            if current_role not in role_options:
+                role_options.append(current_role)
             new_role = st.selectbox(
                 "Rol",
-                ["ADMIN", "OPERADOR", "LECTOR"],
-                index=["ADMIN","OPERADOR","LECTOR"].index((row.get("role") or "OPERADOR").upper()),
+                role_options,
+                index=role_options.index(current_role),
                 key="adm_role_sel",
             )
             active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key="adm_active")
@@ -6272,17 +6994,27 @@ def page_admin_usuarios():
         cols = st.columns(3)
         keys = list(DEFAULT_PERMS.keys())
         new_perms = {}
+        super_mode = (new_role or "").upper() == "SUPERADMIN"
+        if super_mode:
+            st.info("El rol SUPERADMIN ve todas las funciones del ERP por defecto.")
         for i, k in enumerate(keys):
             with cols[i % 3]:
-                new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}")
+                new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}", disabled=super_mode)
 
         if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
             try:
-                # Seguridad: no permitir que un ADMIN pierda el poder de administrar usuarios
-                if (new_role or "").upper() == "ADMIN":
+                # Seguridad: SUPERADMIN y ADMIN conservan acceso de administración
+                if (new_role or "").upper() == "SUPERADMIN":
+                    new_perms = SUPERADMIN_PERMS.copy()
+                elif (new_role or "").upper() == "ADMIN":
                     new_perms["manage_users"] = True
 
-                # Evita desactivar al último ADMIN activo
+                # Evita desactivar al último SUPERADMIN activo
+                if (row.get("role") or "").upper() == "SUPERADMIN" and (not active) and superadmins_count(active_only=True) <= 1:
+                    st.error("No puedes desactivar al último SUPERADMIN activo.")
+                    st.stop()
+
+                # Evita desactivar al último ADMIN activo cuando no es SUPERADMIN
                 if (row.get("role") or "").upper() == "ADMIN" and (new_role or "").upper() == "ADMIN" and (not active) and admins_count(active_only=True) <= 1:
                     st.error("No puedes desactivar al último ADMIN activo.")
                     st.stop()
@@ -6314,6 +7046,10 @@ def page_admin_usuarios():
             if cu and int(cu["id"]) == int(uid):
                 st.error("No puedes eliminar tu propio usuario.")
                 st.stop()
+            # Evita eliminar al último SUPERADMIN activo
+            if (row.get("role") or "").upper() == "SUPERADMIN" and superadmins_count(active_only=True) <= 1:
+                st.error("No puedes eliminar al último SUPERADMIN activo.")
+                st.stop()
             # Evita eliminar al último ADMIN activo
             if (row.get("role") or "").upper() == "ADMIN" and admins_count(active_only=True) <= 1:
                 st.error("No puedes eliminar al último ADMIN activo.")
@@ -6329,7 +7065,7 @@ def page_admin_usuarios():
     with tab2:
         with st.form("form_create_user", clear_on_submit=True):
             username = st.text_input("Usuario", placeholder="ej: operador1")
-            role = st.selectbox("Rol", ["OPERADOR", "LECTOR", "ADMIN"])
+            role = st.selectbox("Rol", USER_ROLE_OPTIONS)
             pw1 = st.text_input("Contraseña", type="password")
             pw2 = st.text_input("Repetir contraseña", type="password")
             st.markdown("#### Poderes")
@@ -6343,8 +7079,10 @@ def page_admin_usuarios():
             ok = st.form_submit_button("Crear usuario", type="primary", use_container_width=True)
 
         if ok:
-            # Seguridad: si creas un ADMIN, asegúrate de que conserve el poder de administrar usuarios
-            if (role or "").upper() == "ADMIN":
+            # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
+            if (role or "").upper() == "SUPERADMIN":
+                perms = SUPERADMIN_PERMS.copy()
+            elif (role or "").upper() == "ADMIN":
                 perms["manage_users"] = True
 
             u = (username or "").strip()

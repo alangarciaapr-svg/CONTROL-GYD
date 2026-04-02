@@ -1,4 +1,4 @@
-# Control Documental de Faenas (v8.4.39)
+# SEGAV ERP (v8.4.40)
 
 Estado de esta base:
 - Backend compatible con SQLite local o Supabase/Postgres.
@@ -18,7 +18,7 @@ Notas operativas:
 - Para subir o borrar archivos en Storage usa una secret/service key real en `SUPABASE_SERVICE_ROLE_KEY`.
 
 
-Primera versión ERP / SGSST incorporada:
+Base ERP / SGSST incorporada:
 - Nuevo módulo **Mi Empresa / SGSST** en el menú lateral.
 - Ficha empresa editable.
 - Matriz legal base para **DS 44**, **Ley 16.744** y **DS 594**.
@@ -28,3 +28,10 @@ Primera versión ERP / SGSST incorporada:
 - Accidentes e incidentes.
 - Capacitaciones y ODI.
 - Bitácora de auditoría del módulo ERP.
+
+
+Nueva capa comercializable v8.4.40:
+- Branding base cambiado a **SEGAV ERP**.
+- Configuración ERP editable: nombre comercial, vertical, modo multiempresa y cliente actual.
+- Catálogos configurables de cargos y documentos obligatorios por cargo.
+- Documentos empresa/faena parametrizables para adaptar el ERP a cualquier cliente.
