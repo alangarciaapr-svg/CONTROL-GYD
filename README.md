@@ -1,37 +1,72 @@
-# SEGAV ERP (v8.4.40)
+# SEGAV ERP (v8.4.52)
 
-Estado de esta base:
-- Backend compatible con SQLite local o Supabase/Postgres.
-- Storage con rutas sanitizadas, carga/borrado administrativo y fallback local.
-- Export ZIP, documentos por empresa/faena/trabajador, asignaciones y respaldos heredados.
+Base operativa preparada para uso y despliegue.
 
-Cambios consolidados recientes:
-- Eliminada la duplicidad principal de pantallas críticas.
-- Asignaciones y documentos ajustados para Postgres/Supabase.
-- Límite de carga por archivo en 1,5 MB con compresión ZIP automática cuando alcanza.
-- Eliminación de documentos con limpieza de BD y archivo físico cuando ya no quedan referencias.
-- Diagnóstico de backend/Storage más claro en Backup / Restore.
+## Qué incluye esta versión
+- ERP **SEGAV ERP** con acceso por usuarios y roles.
+- Backend compatible con **SQLite local** o **Supabase/Postgres**.
+- Soporte para **Supabase Storage** con fallback local.
+- Gestión de **mandantes, contratos, faenas, trabajadores, asignaciones y documentos**.
+- Módulo **Mi Empresa / SGSST** con base para DS 44, Ley 16.744 y DS 594.
+- Exportación ZIP, backups y restore.
 
-Notas operativas:
-- En Streamlit Community Cloud el filesystem local no es persistente garantizado entre reinicios.
-- Si trabajas con Supabase/Postgres, la fuente de verdad es la base online y Storage.
-- Para subir o borrar archivos en Storage usa una secret/service key real en `SUPABASE_SERVICE_ROLE_KEY`.
+## Estructura mínima del proyecto
+- `streamlit_app.py`
+- `core_db.py`
+- `requirements.txt`
+- `.streamlit/config.toml`
+- `.streamlit/secrets.toml.example`
+- `segav_core/`
+- `run_local.bat`
+- `run_local.sh`
+- `check_setup.py`
 
+## Inicio rápido local (SQLite)
+1. Instala Python 3.11 o superior.
+2. Crea y activa un entorno virtual.
+3. Instala dependencias:
+   - `pip install -r requirements.txt`
+4. Opcional: ejecuta validación previa:
+   - `python check_setup.py`
+5. Inicia la app:
+   - `python -m streamlit run streamlit_app.py`
 
-Base ERP / SGSST incorporada:
-- Nuevo módulo **Mi Empresa / SGSST** en el menú lateral.
-- Ficha empresa editable.
-- Matriz legal base para **DS 44**, **Ley 16.744** y **DS 594**.
-- Programa anual preventivo.
-- MIPER inicial por faena / proceso / cargo.
-- Inspecciones DS 594.
-- Accidentes e incidentes.
-- Capacitaciones y ODI.
-- Bitácora de auditoría del módulo ERP.
+También puedes usar:
+- Windows: `run_local.bat`
+- Linux/macOS: `bash run_local.sh`
 
+## Acceso inicial
+Si la tabla `users` está vacía, la app siembra un SUPERADMIN por defecto con:
+- Usuario: `a.garcia`
+- Contraseña: `225188`
 
-Nueva capa comercializable v8.4.40:
-- Branding base cambiado a **SEGAV ERP**.
-- Configuración ERP editable: nombre comercial, vertical, modo multiempresa y cliente actual.
-- Catálogos configurables de cargos y documentos obligatorios por cargo.
-- Documentos empresa/faena parametrizables para adaptar el ERP a cualquier cliente.
+**Cámbiala inmediatamente después del primer ingreso**.
+
+## Uso con Supabase / Streamlit Cloud
+Copia `.streamlit/secrets.toml.example` como base para tu archivo de secretos y completa lo que corresponda.
+
+Variables soportadas:
+- `SUPABASE_DB_URL`
+- `SUPABASE_DB_HOST`
+- `SUPABASE_DB_PORT`
+- `SUPABASE_DB_NAME`
+- `SUPABASE_DB_USER`
+- `SUPABASE_DB_PASSWORD`
+- `SUPABASE_URL`
+- `SUPABASE_STORAGE_BUCKET`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_ANON_KEY`
+- `DEFAULT_ADMIN_USER`
+- `DEFAULT_ADMIN_PASS`
+
+## Recomendación operativa
+- Para pruebas rápidas usa **SQLite local**.
+- Para operación real usa **Supabase/Postgres + Storage**.
+- En Streamlit Cloud no confíes en el filesystem local como almacenamiento permanente.
+
+## Verificación hecha en esta entrega
+- Compilación Python correcta con `py_compile` para `streamlit_app.py`, `core_db.py` y módulos de `segav_core`.
+- Se agregaron archivos de arranque, ejemplo de secretos, verificación de entorno y paquete limpio para GitHub/despliegue.
+
+## Nota honesta
+Esta entrega queda **lista para instalar, subir a GitHub y desplegar**, pero la validación completa de la interfaz en ejecución depende de correrla en un entorno con Streamlit instalado y tus secretos reales configurados.
