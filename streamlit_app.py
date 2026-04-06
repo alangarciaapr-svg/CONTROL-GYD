@@ -191,6 +191,10 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         backfill_multiempresa_cliente_key()
     except Exception:
         pass
+    try:
+        ensure_user_client_access_table()
+    except Exception:
+        pass
     return True
 
 def _qmark_to_pct(sql: str) -> str:
@@ -2285,6 +2289,9 @@ def segav_clientes_df():
 
 
 def current_segav_client_key() -> str:
+    session_key = str(st.session_state.get('active_cliente_key') or '').strip()
+    if session_key:
+        return session_key
     return segav_erp_value('current_client_key', '')
 
 
@@ -2784,6 +2791,75 @@ def require_perm(perm: str):
     if not has_perm(perm):
         st.error("No tienes permisos para acceder a esta sección.")
         st.stop()
+
+
+def is_superadmin() -> bool:
+    u = current_user()
+    if not u:
+        return False
+    return str(u.get("role") or "").upper() == "SUPERADMIN"
+
+
+def ensure_user_client_access_table():
+    if DB_BACKEND == "postgres":
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_client_access (
+                user_id BIGINT NOT NULL,
+                cliente_key TEXT NOT NULL,
+                is_company_admin BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (user_id, cliente_key)
+            );
+            """
+        )
+        execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
+        execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
+        return
+    execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_client_access (
+            user_id INTEGER NOT NULL,
+            cliente_key TEXT NOT NULL,
+            is_company_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, cliente_key)
+        );
+        """
+    )
+    execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
+    execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
+
+
+def visible_clientes_df():
+    try:
+        ensure_user_client_access_table()
+    except Exception:
+        pass
+    df = segav_clientes_df()
+    if df is None or df.empty:
+        return df
+    if "activo" in df.columns:
+        df = df[df["activo"].fillna(1).astype(int) == 1]
+    if is_superadmin():
+        return df
+    u = current_user() or {}
+    user_id = int(u.get("id") or 0)
+    if user_id <= 0:
+        return df
+    try:
+        acc_df = fetch_df("SELECT cliente_key FROM user_client_access WHERE user_id=?", (user_id,))
+        if acc_df is None or acc_df.empty:
+            return df
+        allowed = set(acc_df["cliente_key"].astype(str).tolist())
+        if not allowed:
+            return df.iloc[0:0]
+        return df[df["cliente_key"].astype(str).isin(allowed)]
+    except Exception:
+        return df
+
 
 def auth_gate_ui():
     """Pantalla de inicio: login con roles. Si la base está vacía, crea ADMIN por defecto."""
@@ -3725,6 +3801,8 @@ PAGES = [
 ]
 
 VISIBLE_PAGES = list(PAGES)
+if is_superadmin():
+    VISIBLE_PAGES.append("SuperAdmin / Empresas")
 if has_perm("manage_users"):
     VISIBLE_PAGES.append("Admin Usuarios")
 
@@ -3762,7 +3840,7 @@ with st.sidebar:
         st.caption(f"👤 {u['username']} · {u['role']}")
 
     try:
-        _cli_df = segav_clientes_df()
+        _cli_df = visible_clientes_df()
         if _cli_df is not None and not _cli_df.empty:
             _cli_df = _cli_df[_cli_df["activo"].fillna(1).astype(int) == 1] if "activo" in _cli_df.columns else _cli_df
             _cli_keys = _cli_df["cliente_key"].astype(str).tolist()
@@ -3779,8 +3857,7 @@ with st.sidebar:
                 )
                 if _cli_selected != _current_cli:
                     _cli_name = str(_cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]["cliente_nombre"])
-                    set_segav_erp_config_value("current_client_key", _cli_selected)
-                    set_segav_erp_config_value("cliente_actual", _cli_name)
+                    st.session_state['active_cliente_key'] = _cli_selected
                     clear_app_caches()
                     st.rerun()
                 _current_row = _cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]
@@ -3804,6 +3881,7 @@ with st.sidebar:
         "Documentos Trabajador": "📎 Docs Trabajador",
         "Export (ZIP)": "📦 Export",
         "Backup / Restore": "💾 Backup",
+        "SuperAdmin / Empresas": "🌐 SuperAdmin / Empresas",
         "Admin Usuarios": "🔐 Usuarios",
     }
 
@@ -7224,6 +7302,7 @@ from segav_core import ops_exports as _ops_exports
 from segav_core import ops_sgsst as _ops_sgsst
 from segav_core import ops_compliance as _ops_compliance
 from segav_core import ops_dashboard as _ops_dashboard
+from segav_core import ops_superadmin as _ops_superadmin
 
 
 def page_dashboard():
@@ -7271,7 +7350,29 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=fetch_df, fetch_value=fetch_value, execute=execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join)
+    return _ops_sgsst.page_sgsst(fetch_df=fetch_df, fetch_value=fetch_value, execute=execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+
+
+def page_superadmin_empresas():
+    return _ops_superadmin.page_superadmin_empresas(
+        st=st,
+        ui_header=ui_header,
+        fetch_df=fetch_df,
+        fetch_value=fetch_value,
+        execute=execute,
+        clear_app_caches=clear_app_caches,
+        segav_clientes_df=segav_clientes_df,
+        visible_clientes_df=visible_clientes_df,
+        current_segav_client_key=current_segav_client_key,
+        make_erp_key=make_erp_key,
+        clean_rut=clean_rut,
+        ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS,
+        set_segav_erp_config_value=set_segav_erp_config_value,
+        sgsst_log=sgsst_log,
+        current_user=current_user,
+        is_superadmin=is_superadmin,
+        ensure_user_client_access_table=ensure_user_client_access_table,
+    )
 
 
 PAGE_PERM_ROUTE = {
@@ -7319,6 +7420,11 @@ elif p == "Export (ZIP)":
     page_export_zip()
 elif p == "Backup / Restore":
     page_backup_restore()
+elif p == "SuperAdmin / Empresas":
+    if not is_superadmin():
+        st.error("Esta sección es exclusiva para SUPERADMIN.")
+        st.stop()
+    page_superadmin_empresas()
 elif p == "Admin Usuarios":
     page_admin_usuarios()
 else:

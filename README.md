@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.56)
+# SEGAV ERP (v8.4.57)
 
 Base operativa preparada para uso y despliegue.
 
@@ -73,3 +73,10 @@ Variables soportadas:
 
 ## Nota honesta
 Esta entrega queda **lista para instalar, subir a GitHub y desplegar**, pero la validación completa de la interfaz en ejecución depende de correrla en un entorno con Streamlit instalado y tus secretos reales configurados.
+
+
+Novedades v8.4.57:
+- Nuevo panel exclusivo **SuperAdmin / Empresas** para ver todas las empresas del ERP.
+- CRUD de empresas desde un panel centralizado.
+- Asignación de administradores por empresa mediante vínculos usuario/empresa.
+- Selector de empresa activa por sesión para no depender de una configuración global única.
