@@ -72,6 +72,7 @@ from segav_core.formatters import (
     split_nombre_completo,
 )
 from segav_core.ui import inject_css, ui_header, ui_tip
+from segav_core.bootstrap import bootstrap_once as _bootstrap_once
 
 # ----------------------------
 # Config
