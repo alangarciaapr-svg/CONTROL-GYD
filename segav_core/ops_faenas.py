@@ -6,15 +6,6 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ui import ui_header, ui_tip
-from segav_core.erp_state import current_segav_client_key
-
-
-def _tenant_key() -> str:
-    return str(current_segav_client_key() or "").strip()
-
-
-def _tp(*extra):
-    return (_tenant_key(), *extra)
 
 
 def page_mandantes(*, fetch_df, execute, auto_backup_db):
@@ -23,17 +14,17 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
     k1, k2, k3 = st.columns(3)
     with k1:
         try:
-            st.metric("Mandantes", int(fetch_df("SELECT COUNT(*) AS n FROM mandantes WHERE COALESCE(cliente_key,'')=?", _tp())["n"].iloc[0]))
+            st.metric("Mandantes", int(fetch_df("SELECT COUNT(*) AS n FROM mandantes")["n"].iloc[0]))
         except Exception:
             st.metric("Mandantes", 0)
     with k2:
         try:
-            st.metric("Contratos de faena", int(fetch_df("SELECT COUNT(*) AS n FROM contratos_faena WHERE COALESCE(cliente_key,'')=?", _tp())["n"].iloc[0]))
+            st.metric("Contratos de faena", int(fetch_df("SELECT COUNT(*) AS n FROM contratos_faena")["n"].iloc[0]))
         except Exception:
             st.metric("Contratos de faena", 0)
     with k3:
         try:
-            st.metric("Faenas", int(fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=?", _tp())["n"].iloc[0]))
+            st.metric("Faenas", int(fetch_df("SELECT COUNT(*) AS n FROM faenas")["n"].iloc[0]))
         except Exception:
             st.metric("Faenas", 0)
 
@@ -45,14 +36,13 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
             SELECT
                 m.id,
                 m.nombre,
-                (SELECT COUNT(*) FROM contratos_faena cf WHERE cf.mandante_id=m.id AND COALESCE(cf.cliente_key,'')=?) AS contratos,
-                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id AND COALESCE(f.cliente_key,'')=?) AS faenas_total,
-                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id AND COALESCE(f.cliente_key,'')=? AND f.estado='ACTIVA') AS faenas_activas
+                (SELECT COUNT(*) FROM contratos_faena cf WHERE cf.mandante_id=m.id) AS contratos,
+                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id) AS faenas_total,
+                (SELECT COUNT(*) FROM faenas f WHERE f.mandante_id=m.id AND f.estado='ACTIVA') AS faenas_activas
             FROM mandantes m
-            WHERE COALESCE(m.cliente_key,'')=?
             ORDER BY m.id DESC
             """
-        , (_tenant_key(), _tenant_key(), _tenant_key(), _tenant_key()))
+        )
 
         q = st.text_input("Buscar mandante", placeholder="Escribe nombre…", key="mand_q")
         out = df.copy()
@@ -91,11 +81,11 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                     """
                     SELECT id, nombre, estado, fecha_inicio, fecha_termino
                     FROM faenas
-                    WHERE mandante_id=? AND COALESCE(cliente_key,'')=?
+                    WHERE mandante_id=?
                     ORDER BY id DESC
                     LIMIT 10
                     """,
-                    (int(mid), _tenant_key()),
+                    (int(mid),),
                 )
                 if fa.empty:
                     st.caption("Sin faenas asociadas.")
@@ -122,7 +112,7 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                 st.warning("Ingresa un nombre de mandante.")
             else:
                 try:
-                    execute("INSERT INTO mandantes(cliente_key, nombre) VALUES(?,?)", (_tenant_key(), nombre_clean))
+                    execute("INSERT INTO mandantes(nombre) VALUES(?)", (nombre_clean,))
                     st.success("Mandante creado.")
                     auto_backup_db("mandante")
                     st.rerun()
@@ -134,7 +124,7 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                         st.error(f"No se pudo crear: {e}")
 
     with tab_manage:
-        df_all = fetch_df("SELECT id, nombre FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY id DESC", _tp())
+        df_all = fetch_df("SELECT id, nombre FROM mandantes ORDER BY id DESC")
         if df_all.empty:
             st.info("No hay mandantes para gestionar.")
         else:
@@ -156,7 +146,7 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                     st.error("El nombre no puede estar vacío.")
                 else:
                     try:
-                        execute("UPDATE mandantes SET nombre=? WHERE id=? AND COALESCE(cliente_key,'')=?", (nn, int(mid), _tenant_key()))
+                        execute("UPDATE mandantes SET nombre=? WHERE id=?", (nn, int(mid)))
                         st.success("Mandante actualizado.")
                         auto_backup_db("mandante_edit")
                         st.rerun()
@@ -169,7 +159,7 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
 
             st.divider()
             st.markdown("### 🗑️ Eliminar")
-            dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE mandante_id=? AND COALESCE(cliente_key,'')=?", (int(mid),))
+            dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE mandante_id=?", (int(mid),))
             n_faenas = int(dep["n"].iloc[0]) if not dep.empty else 0
             if n_faenas > 0:
                 st.warning(f"No se puede eliminar porque tiene {n_faenas} faena(s) asociada(s). Primero reasigna o elimina esas faenas.")
@@ -180,7 +170,7 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                         st.error("Debes confirmar antes de eliminar.")
                         st.stop()
                     try:
-                        execute("DELETE FROM mandantes WHERE id=? AND COALESCE(cliente_key,'')=?", (int(mid), _tenant_key()))
+                        execute("DELETE FROM mandantes WHERE id=?", (int(mid),))
                         st.success("Mandante eliminado.")
                         auto_backup_db("mandante_delete")
                         st.rerun()
@@ -203,7 +193,7 @@ def page_contratos_faena(
     load_file_anywhere,
 ):
     ui_header("Contratos de Faena", "Crea, edita o elimina contratos por mandante. Puedes adjuntar archivo al contrato.")
-    mand = fetch_df("SELECT * FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY nombre", _tp())
+    mand = fetch_df("SELECT * FROM mandantes ORDER BY nombre")
     if mand.empty:
         ui_tip("Primero crea un mandante.")
         return
@@ -251,7 +241,7 @@ def page_contratos_faena(
                         st.info(payload["compression_note"])
 
                 execute(
-                    "INSERT INTO contratos_faena(cliente_key, mandante_id, nombre, fecha_inicio, fecha_termino, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO contratos_faena(mandante_id, nombre, fecha_inicio, fecha_termino, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         int(mandante_id),
                         nombre.strip(),
@@ -277,10 +267,9 @@ def page_contratos_faena(
                    CASE WHEN cf.file_path IS NULL THEN '(sin archivo)' ELSE 'OK' END AS archivo
             FROM contratos_faena cf
             JOIN mandantes m ON m.id=cf.mandante_id
-            WHERE COALESCE(cf.cliente_key,'')=?
             ORDER BY cf.id DESC
             """
-        , _tp())
+        )
 
         if df.empty:
             st.info("No hay contratos.")
@@ -375,7 +364,7 @@ def page_contratos_faena(
         st.markdown("### 🗑️ Eliminar contrato")
         st.caption("Si este contrato está asociado a faenas existentes, al eliminarlo esas faenas quedarán con contrato en blanco (contrato_faena_id = NULL).")
 
-        dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE contrato_faena_id=? AND COALESCE(cliente_key,'')=?", (int(contrato_id), _tenant_key()))
+        dep = fetch_df("SELECT COUNT(*) AS n FROM faenas WHERE contrato_faena_id=?", (int(contrato_id),))
         dep_n = int(dep["n"].iloc[0]) if not dep.empty else 0
 
         st.warning(f"Faenas asociadas a este contrato: {dep_n}")
@@ -388,7 +377,7 @@ def page_contratos_faena(
             try:
                 refs = fetch_file_refs("contratos_faena", "id=?", (int(contrato_id),))
                 execute("UPDATE faenas SET contrato_faena_id=NULL WHERE contrato_faena_id=?", (int(contrato_id),))
-                execute("DELETE FROM contratos_faena WHERE id=? AND COALESCE(cliente_key,'')=?", (int(contrato_id), _tenant_key()))
+                execute("DELETE FROM contratos_faena WHERE id=?", (int(contrato_id),))
                 cleanup_issues = cleanup_deleted_file_refs(refs)
                 if cleanup_issues:
                     st.warning("Contrato eliminado, pero hubo problemas al limpiar el archivo asociado: " + " | ".join(cleanup_issues))
@@ -417,7 +406,7 @@ def page_faenas(
     ESTADOS_FAENA,
 ):
     ui_header("Faenas", "Crea, edita y gestiona faenas por mandante. Registra fechas/estado y carga anexos si aplica.")
-    mand = fetch_df("SELECT * FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY nombre", _tp())
+    mand = fetch_df("SELECT * FROM mandantes ORDER BY nombre")
     if mand.empty:
         ui_tip("Primero crea un mandante.")
         return
@@ -475,7 +464,7 @@ def page_faenas(
                 st.stop()
             try:
                 execute(
-                    "INSERT INTO faenas(cliente_key, mandante_id, contrato_faena_id, nombre, ubicacion, fecha_inicio, fecha_termino, estado) VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO faenas(mandante_id, contrato_faena_id, nombre, ubicacion, fecha_inicio, fecha_termino, estado) VALUES(?,?,?,?,?,?,?)",
                     (
                         int(mandante_id),
                         int(contrato_id) if contrato_id else None,
@@ -550,10 +539,9 @@ def page_faenas(
             FROM faenas f
             JOIN mandantes m ON m.id=f.mandante_id
             LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-            WHERE COALESCE(f.cliente_key,'')=?
             ORDER BY f.id DESC
             """
-        , _tp())
+        )
 
         if base.empty:
             st.info("No hay faenas.")
@@ -582,8 +570,8 @@ def page_faenas(
             )
             sha = sha256_bytes(payload["file_bytes"])
             execute(
-                "INSERT INTO faena_anexos(cliente_key, faena_id, nombre, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (_tenant_key(), int(faena_id), payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO faena_anexos(faena_id, nombre, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
+                (int(faena_id), payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             if payload["compressed"] and payload.get("compression_note"):
                 st.info(payload["compression_note"])
@@ -591,7 +579,7 @@ def page_faenas(
             auto_backup_db("anexo_faena")
             st.rerun()
 
-        anexos = fetch_df("SELECT id, nombre, created_at FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id DESC", (int(faena_id), _tenant_key()))
+        anexos = fetch_df("SELECT id, nombre, created_at FROM faena_anexos WHERE faena_id=? ORDER BY id DESC", (int(faena_id),))
         st.caption("Anexos cargados")
         st.dataframe(anexos if not anexos.empty else pd.DataFrame([{"info": "(sin anexos)"}]), use_container_width=True)
 
@@ -603,10 +591,9 @@ def page_faenas(
             FROM faenas f
             JOIN mandantes m ON m.id=f.mandante_id
             LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-            WHERE COALESCE(f.cliente_key,'')=?
             ORDER BY f.id DESC
             """
-        , _tp())
+        )
         if base.empty:
             st.info("No hay faenas para editar.")
             return
@@ -658,7 +645,7 @@ def page_faenas(
                 st.stop()
             try:
                 execute(
-                    "UPDATE faenas SET nombre=?, ubicacion=?, fecha_inicio=?, fecha_termino=?, estado=?, contrato_faena_id=? WHERE id=? AND COALESCE(cliente_key,'')=?",
+                    "UPDATE faenas SET nombre=?, ubicacion=?, fecha_inicio=?, fecha_termino=?, estado=?, contrato_faena_id=? WHERE id=?",
                     (
                         nombre_new.strip(),
                         ubic_new.strip(),
@@ -666,7 +653,7 @@ def page_faenas(
                         str(ft_new) if ft_new else None,
                         estado_new,
                         int(contrato_new) if contrato_new else None,
-                        int(fid), _tenant_key(),
+                        int(fid),
                     ),
                 )
                 st.success("Faena actualizada.")
@@ -679,8 +666,8 @@ def page_faenas(
         st.markdown("### 🗑️ Eliminar faena")
         st.caption("Se eliminará la faena y sus anexos/asignaciones asociadas. Los trabajadores NO se eliminan.")
 
-        dep1 = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
-        dep2 = fetch_df("SELECT COUNT(*) AS n FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
+        dep1 = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE faena_id=?", (int(fid),))
+        dep2 = fetch_df("SELECT COUNT(*) AS n FROM faena_anexos WHERE faena_id=?", (int(fid),))
         n_asg = int(dep1["n"].iloc[0]) if not dep1.empty else 0
         n_anx = int(dep2["n"].iloc[0]) if not dep2.empty else 0
 
@@ -693,12 +680,12 @@ def page_faenas(
                 st.stop()
             try:
                 refs = []
-                refs.extend(fetch_file_refs("faena_anexos", "faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key())))
-                refs.extend(fetch_file_refs("faena_empresa_documentos", "faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key())))
-                execute("DELETE FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
-                execute("DELETE FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
-                execute("DELETE FROM asignaciones WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
-                execute("DELETE FROM faenas WHERE id=? AND COALESCE(cliente_key,'')=?", (int(fid), _tenant_key()))
+                refs.extend(fetch_file_refs("faena_anexos", "faena_id=?", (int(fid),)))
+                refs.extend(fetch_file_refs("faena_empresa_documentos", "faena_id=?", (int(fid),)))
+                execute("DELETE FROM faena_anexos WHERE faena_id=?", (int(fid),))
+                execute("DELETE FROM faena_empresa_documentos WHERE faena_id=?", (int(fid),))
+                execute("DELETE FROM asignaciones WHERE faena_id=?", (int(fid),))
+                execute("DELETE FROM faenas WHERE id=?", (int(fid),))
                 cleanup_issues = cleanup_deleted_file_refs(refs)
                 if cleanup_issues:
                     st.warning("Faena eliminada, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))

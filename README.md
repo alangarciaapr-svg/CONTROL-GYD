@@ -1,8 +1,10 @@
-# SEGAV ERP (v8.4.54)
+# SEGAV ERP (v8.4.56)
 
 Base operativa preparada para uso y despliegue.
 
 ## Qué incluye esta versión
+- **Dashboard ejecutivo comercial** con score gerencial, semáforo por empresa activa, agenda de vencimientos y vista multiempresa para perfil administrativo.
+- Nuevo acceso visible a **Cumplimiento / Alertas** desde la navegación lateral.
 - ERP **SEGAV ERP** con acceso por usuarios y roles.
 - Base de **multiempresa operativa** con cliente activo y aislamiento inicial por `cliente_key` en operación documental y control de faenas/personal.
 - Backend compatible con **SQLite local** o **Supabase/Postgres**.

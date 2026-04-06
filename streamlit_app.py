@@ -3710,6 +3710,7 @@ if current_user() is None:
 # ----------------------------
 PAGES = [
     "Dashboard",
+    "Cumplimiento / Alertas",
     "Mi Empresa / SGSST",
     "Mandantes",
     "Contratos de Faena",
@@ -3791,6 +3792,7 @@ with st.sidebar:
     # Navegación (simple)
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
+        "Cumplimiento / Alertas": "🚨 Cumplimiento / Alertas",
         "Mi Empresa / SGSST": "🧭 ERP / SGSST",
         "Mandantes": "🏢 Mandantes",
         "Contratos de Faena": "📄 Contratos",
@@ -4103,6 +4105,14 @@ def page_dashboard():
             st.bar_chart(mdf)
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+def page_dashboard():
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+
+
+def page_compliance_alerts():
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
+
 
 def page_mandantes():
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante. Aquí puedes crear, editar y revisar su avance.")
@@ -7212,6 +7222,16 @@ from segav_core import ops_personal as _ops_personal
 from segav_core import ops_docs as _ops_docs
 from segav_core import ops_exports as _ops_exports
 from segav_core import ops_sgsst as _ops_sgsst
+from segav_core import ops_compliance as _ops_compliance
+from segav_core import ops_dashboard as _ops_dashboard
+
+
+def page_dashboard():
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+
+
+def page_compliance_alerts():
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
 
 
 def page_mandantes():
@@ -7256,6 +7276,7 @@ def page_sgsst():
 
 PAGE_PERM_ROUTE = {
     "Dashboard": "view_dashboard",
+    "Cumplimiento / Alertas": "view_sgsst",
     "Mi Empresa / SGSST": "view_sgsst",
     "Mandantes": "view_mandantes",
     "Contratos de Faena": "view_contratos",
@@ -7274,6 +7295,8 @@ if p in PAGE_PERM_ROUTE:
 
 if p == "Dashboard":
     page_dashboard()
+elif p == "Cumplimiento / Alertas":
+    page_compliance_alerts()
 elif p == "Mi Empresa / SGSST":
     page_sgsst()
 elif p == "Mandantes":
