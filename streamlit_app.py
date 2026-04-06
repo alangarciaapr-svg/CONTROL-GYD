@@ -2833,9 +2833,47 @@ def ensure_user_client_access_table():
     execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_user_client_access_table_once(_db_backend: str, _dsn_fingerprint: str):
+    ensure_user_client_access_table()
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_active_tenant_scaffold_once(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    ensure_active_tenant_scaffold()
+    return True
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    tkey = str(tenant_key or '').strip()
+    try:
+        if tkey:
+            return fetch_df(
+                """
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+                FROM faenas f
+                JOIN mandantes m ON m.id=f.mandante_id
+                WHERE COALESCE(f.cliente_key,'')=?
+                ORDER BY f.id DESC
+                """,
+                (tkey,),
+            )
+        return fetch_df(
+            """
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+            """
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
 def visible_clientes_df():
     try:
-        ensure_user_client_access_table()
+        ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     except Exception:
         pass
     df = segav_clientes_df()
@@ -3802,7 +3840,7 @@ PAGES = [
 
 VISIBLE_PAGES = list(PAGES)
 if is_superadmin():
-    VISIBLE_PAGES.append("SuperAdmin / Empresas")
+    VISIBLE_PAGES = ["SuperAdmin / Empresas", *VISIBLE_PAGES]
 if has_perm("manage_users"):
     VISIBLE_PAGES.append("Admin Usuarios")
 
@@ -3840,6 +3878,7 @@ with st.sidebar:
         st.caption(f"👤 {u['username']} · {u['role']}")
 
     try:
+        ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
         _cli_df = visible_clientes_df()
         if _cli_df is not None and not _cli_df.empty:
             _cli_df = _cli_df[_cli_df["activo"].fillna(1).astype(int) == 1] if "activo" in _cli_df.columns else _cli_df
@@ -3848,19 +3887,20 @@ with st.sidebar:
                 _current_cli = current_segav_client_key() or _cli_keys[0]
                 if _current_cli not in _cli_keys:
                     _current_cli = _cli_keys[0]
+                _cli_name_map = {str(r["cliente_key"]): str(r["cliente_nombre"]) for _, r in _cli_df.iterrows()}
+                _cli_row_map = {str(r["cliente_key"]): r for _, r in _cli_df.iterrows()}
                 _cli_selected = st.selectbox(
                     "Empresa activa",
                     _cli_keys,
                     index=_cli_keys.index(_current_cli),
                     key="sidebar_cliente_activo",
-                    format_func=lambda x: str(_cli_df[_cli_df["cliente_key"].astype(str) == str(x)].iloc[0]["cliente_nombre"]),
+                    format_func=lambda x: _cli_name_map.get(str(x), str(x)),
                 )
                 if _cli_selected != _current_cli:
-                    _cli_name = str(_cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]["cliente_nombre"])
                     st.session_state['active_cliente_key'] = _cli_selected
                     clear_app_caches()
                     st.rerun()
-                _current_row = _cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]
+                _current_row = _cli_row_map.get(str(_cli_selected), _cli_df.iloc[0])
                 _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
                 st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
     except Exception:
@@ -3896,11 +3936,7 @@ with st.sidebar:
     # Contexto (colapsable)
     with st.expander("🔎 Contexto (Faena)", expanded=False):
         try:
-            _fa = fetch_df("""
-                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-                ORDER BY f.id DESC
-            """)
+            _fa = get_sidebar_faena_context_df(DB_BACKEND, PG_DSN_FINGERPRINT, current_segav_client_key())
         except Exception:
             _fa = pd.DataFrame()
 
@@ -3989,7 +4025,7 @@ except Exception:
 
 
 try:
-    ensure_active_tenant_scaffold()
+    ensure_active_tenant_scaffold_once(DB_BACKEND, PG_DSN_FINGERPRINT, current_tenant_key())
 except Exception:
     pass
 
@@ -4185,11 +4221,11 @@ def page_dashboard():
         st.markdown("</div>", unsafe_allow_html=True)
 
 def page_dashboard():
-    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
 
 
 def page_compliance_alerts():
-    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
 
 
 def page_mandantes():
@@ -7306,11 +7342,11 @@ from segav_core import ops_superadmin as _ops_superadmin
 
 
 def page_dashboard():
-    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
 
 
 def page_compliance_alerts():
-    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
 
 
 def page_mandantes():
@@ -7371,7 +7407,7 @@ def page_superadmin_empresas():
         sgsst_log=sgsst_log,
         current_user=current_user,
         is_superadmin=is_superadmin,
-        ensure_user_client_access_table=ensure_user_client_access_table,
+        ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
     )
 
 
