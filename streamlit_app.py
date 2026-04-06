@@ -31,7 +31,11 @@ import unicodedata
 # ----------------------------
 # Config
 # ----------------------------
-st.set_page_config(page_title="SEGAV ERP", layout="wide")
+LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
+if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+    st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
+else:
+    st.set_page_config(page_title="SEGAV ERP", layout="wide")
 
 APP_NAME = "SEGAV ERP"
 DB_PATH = "app.db"
@@ -183,6 +187,10 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     init_db()
     ensure_segav_erp_tables()
     ensure_segav_erp_seed_data()
+    try:
+        backfill_multiempresa_cliente_key()
+    except Exception:
+        pass
     return True
 
 def _qmark_to_pct(sql: str) -> str:
@@ -534,8 +542,9 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
-    local_path = save_file(folder_parts, file_name, file_bytes)
-    object_path = _storage_object_path(folder_parts, file_name)
+    scoped_folder_parts = tenantize_folder_parts(folder_parts)
+    local_path = save_file(scoped_folder_parts, file_name, file_bytes)
+    object_path = _storage_object_path(scoped_folder_parts, file_name)
 
     bucket = STORAGE_BUCKET if storage_admin_enabled() else None
     if storage_admin_enabled():
@@ -779,8 +788,8 @@ SGSST_MATRIZ_BASE = [
 ]
 
 ASSIGNACION_INSERT_SQL = """
-INSERT INTO asignaciones(faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado)
-VALUES(?,?,?,?,?,?)
+INSERT INTO asignaciones(cliente_key, faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado)
+VALUES(?,?,?,?,?,?,?)
 ON CONFLICT DO NOTHING
 """
 
@@ -1011,12 +1020,8 @@ def fetch_value(q: str, params=(), default=None, fresh: bool = False):
 
 
 def fetch_assigned_workers(faena_id: int, fresh: bool = True):
-    """Devuelve trabajadores asignados a una faena.
-
-    Usa lectura sin cache por defecto para evitar que Documentos Trabajador
-    muestre una lista antigua justo después de asignar personal.
-    Tolera estados NULL/vacíos/minúsculas y solo excluye asignaciones cerradas.
-    """
+    """Devuelve trabajadores asignados a una faena para la empresa activa."""
+    tenant_key = current_tenant_key()
     q = '''
         SELECT DISTINCT
                t.id,
@@ -1028,30 +1033,35 @@ def fetch_assigned_workers(faena_id: int, fresh: bool = True):
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
+          AND COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
           AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
         ORDER BY t.apellidos, t.nombres, t.id
     '''
     reader = fetch_df_uncached if fresh else fetch_df
-    return reader(q, (int(faena_id),))
+    return reader(q, (int(faena_id), tenant_key, tenant_key))
+
 
 def get_global_counts():
-    """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
+    """Devuelve conteos básicos filtrados por empresa activa."""
+    tenant_key = current_tenant_key()
     try:
         row = fetch_df(
             """
             SELECT
-                (SELECT COUNT(*) FROM mandantes) AS mandantes,
-                (SELECT COUNT(*) FROM contratos_faena) AS contratos_faena,
-                (SELECT COUNT(*) FROM faenas) AS faenas,
-                (SELECT COUNT(*) FROM faenas WHERE estado='ACTIVA') AS faenas_activas,
-                (SELECT COUNT(*) FROM trabajadores) AS trabajadores,
-                (SELECT COUNT(*) FROM asignaciones) AS asignaciones,
-                (SELECT COUNT(*) FROM trabajador_documentos) AS docs,
-                (SELECT COUNT(*) FROM empresa_documentos) AS docs_empresa,
-                (SELECT COUNT(*) FROM faena_empresa_documentos) AS docs_empresa_faena,
-                (SELECT COUNT(*) FROM export_historial) AS exports,
-                (SELECT COUNT(*) FROM export_historial_mes) AS exports_mes
-            """
+                (SELECT COUNT(*) FROM mandantes WHERE COALESCE(cliente_key,'')=?) AS mandantes,
+                (SELECT COUNT(*) FROM contratos_faena WHERE COALESCE(cliente_key,'')=?) AS contratos_faena,
+                (SELECT COUNT(*) FROM faenas WHERE COALESCE(cliente_key,'')=?) AS faenas,
+                (SELECT COUNT(*) FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA') AS faenas_activas,
+                (SELECT COUNT(*) FROM trabajadores WHERE COALESCE(cliente_key,'')=?) AS trabajadores,
+                (SELECT COUNT(*) FROM asignaciones WHERE COALESCE(cliente_key,'')=?) AS asignaciones,
+                (SELECT COUNT(*) FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?) AS docs,
+                (SELECT COUNT(*) FROM empresa_documentos WHERE COALESCE(cliente_key,'')=?) AS docs_empresa,
+                (SELECT COUNT(*) FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=?) AS docs_empresa_faena,
+                (SELECT COUNT(*) FROM export_historial WHERE COALESCE(cliente_key,'')=?) AS exports,
+                (SELECT COUNT(*) FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?) AS exports_mes
+            """,
+            (tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key),
         )
         if row.empty:
             return {}
@@ -1059,24 +1069,25 @@ def get_global_counts():
     except Exception:
         out = {}
         pairs = [
-            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes"),
-            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena"),
-            ("faenas", "SELECT COUNT(*) AS n FROM faenas"),
-            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'"),
-            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
-            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
-            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
-            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos"),
-            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos"),
-            ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
-            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes"),
+            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes WHERE COALESCE(cliente_key,'')=?"),
+            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA'"),
+            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores WHERE COALESCE(cliente_key,'')=?"),
+            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones WHERE COALESCE(cliente_key,'')=?"),
+            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("exports", "SELECT COUNT(*) AS n FROM export_historial WHERE COALESCE(cliente_key,'')=?"),
+            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?"),
         ]
         for key, sql in pairs:
             try:
-                out[key] = int(fetch_df(sql)["n"].iloc[0])
+                out[key] = int(fetch_df(sql, (tenant_key,))["n"].iloc[0])
             except Exception:
                 out[key] = 0
         return out
+
 
 def norm_col(s: str) -> str:
     s = (s or "").strip().lower()
@@ -1470,6 +1481,7 @@ def init_db():
         ensure_core_tables_postgres()
         ensure_sgsst_tables_postgres()
         ensure_storage_columns_postgres()
+        ensure_multiempresa_columns_postgres()
         sync_postgres_core_sequences()
         ensure_sgsst_seed_data()
         return
@@ -1643,6 +1655,7 @@ def init_db():
 
         ensure_storage_columns_sqlite(c)
         ensure_sgsst_tables_sqlite(c)
+        ensure_multiempresa_columns_sqlite(c)
         c.commit()
     ensure_sgsst_seed_data()
 
@@ -1952,50 +1965,37 @@ def ensure_sgsst_tables_sqlite(c):
 
 def ensure_sgsst_seed_data():
     try:
-        if int(fetch_value("SELECT COUNT(*) FROM sgsst_empresa", default=0) or 0) == 0:
+        tenant_key = current_tenant_key()
+        if int(fetch_value("SELECT COUNT(*) FROM sgsst_empresa WHERE COALESCE(cliente_key,'')=?", (tenant_key,), default=0) or 0) == 0:
             execute(
                 """
-                INSERT INTO sgsst_empresa(razon_social, rut, direccion, actividad, organismo_admin, representantes, prevencionista, canal_denuncias, dotacion_total, politica_version, politica_fecha, observaciones, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO sgsst_empresa(cliente_key, razon_social, rut, direccion, actividad, organismo_admin, representantes, prevencionista, canal_denuncias, dotacion_total, politica_version, politica_fecha, observaciones, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    "Empresa demo",
-                    "",
-                    "",
-                    "General",
-                    "Organismo administrador",
-                    "",
-                    "",
-                    "",
-                    0,
-                    "1.0",
-                    date.today().isoformat(),
-                    "Base inicial de SEGAV ERP / SGSST configurable para cualquier empresa.",
-                    datetime.now().isoformat(timespec='seconds'),
-                    datetime.now().isoformat(timespec='seconds'),
+                    tenant_key,
+                    segav_erp_value('cliente_actual', 'Empresa demo') if 'segav_erp_value' in globals() else 'Empresa demo',
+                    '', '',
+                    segav_erp_value('erp_vertical', 'General') if 'segav_erp_value' in globals() else 'General',
+                    'Organismo administrador', '', '', '', 0, '1.0', date.today().isoformat(),
+                    'Base inicial de SEGAV ERP / SGSST configurable para cualquier empresa.',
+                    datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds'),
                 ),
             )
-        existing = fetch_df("SELECT norma, tema, obligacion FROM sgsst_matriz_legal")
+        existing = fetch_df("SELECT norma, tema, obligacion FROM sgsst_matriz_legal WHERE COALESCE(cliente_key,'')=?", (tenant_key,))
         existing_keys = set()
         if existing is not None and not existing.empty:
-            existing_keys = set(
-                (str(r[0] or ""), str(r[1] or ""), str(r[2] or ""))
-                for r in existing[["norma", "tema", "obligacion"]].itertuples(index=False, name=None)
-            )
+            existing_keys = set((str(r[0] or ''), str(r[1] or ''), str(r[2] or '')) for r in existing[["norma", "tema", "obligacion"]].itertuples(index=False, name=None))
         for item in SGSST_MATRIZ_BASE:
-            key = (item["norma"], item["tema"], item["obligacion"])
+            key = (item['norma'], item['tema'], item['obligacion'])
             if key in existing_keys:
                 continue
             execute(
                 """
-                INSERT INTO sgsst_matriz_legal(norma, articulo, tema, obligacion, aplica_a, periodicidad, responsable, evidencia, estado, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO sgsst_matriz_legal(cliente_key, norma, articulo, tema, obligacion, aplica_a, periodicidad, responsable, evidencia, estado, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (
-                    item.get("norma"), item.get("articulo"), item.get("tema"), item.get("obligacion"), item.get("aplica_a"),
-                    item.get("periodicidad"), item.get("responsable"), item.get("evidencia"), item.get("estado"),
-                    datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds'),
-                ),
+                (tenant_key, item.get('norma'), item.get('articulo'), item.get('tema'), item.get('obligacion'), item.get('aplica_a'), item.get('periodicidad'), item.get('responsable'), item.get('evidencia'), item.get('estado'), datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds')),
             )
     except Exception:
         pass
@@ -2288,6 +2288,80 @@ def current_segav_client_key() -> str:
     return segav_erp_value('current_client_key', '')
 
 
+def current_tenant_key() -> str:
+    key = str(current_segav_client_key() or '').strip()
+    if key:
+        return key
+    try:
+        cli_df = segav_clientes_df()
+        if cli_df is not None and not cli_df.empty:
+            active_df = cli_df
+            if 'activo' in active_df.columns:
+                active_df = active_df[active_df['activo'].fillna(1).astype(int) == 1]
+            if not active_df.empty:
+                key = str(active_df.iloc[0].get('cliente_key') or '').strip()
+                if key:
+                    return key
+    except Exception:
+        pass
+    return ''
+
+
+def tenantize_folder_parts(folder_parts):
+    parts = list(folder_parts or [])
+    tkey = current_tenant_key()
+    if not tkey:
+        return parts
+    return ['clientes', storage_safe_segment(tkey), *parts]
+
+
+MULTIEMPRESA_TABLES = [
+    'mandantes', 'contratos_faena', 'faenas', 'faena_anexos', 'trabajadores', 'asignaciones',
+    'trabajador_documentos', 'empresa_documentos', 'faena_empresa_documentos', 'export_historial',
+    'export_historial_mes', 'sgsst_empresa', 'sgsst_matriz_legal', 'sgsst_programa_anual',
+    'sgsst_miper', 'sgsst_inspecciones', 'sgsst_incidentes', 'sgsst_capacitaciones', 'sgsst_auditoria',
+]
+
+
+def ensure_multiempresa_columns_postgres():
+    if DB_BACKEND != 'postgres':
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            execute(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS cliente_key TEXT;")
+        except Exception:
+            pass
+
+
+def ensure_multiempresa_columns_sqlite(c):
+    if DB_BACKEND == 'postgres':
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            migrate_add_columns_if_missing(c, table, {'cliente_key': 'TEXT'})
+        except Exception:
+            pass
+
+
+def backfill_multiempresa_cliente_key():
+    tkey = current_tenant_key()
+    if not tkey:
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            execute(f"UPDATE {table} SET cliente_key=? WHERE cliente_key IS NULL OR TRIM(cliente_key)=''", (tkey,))
+        except Exception:
+            pass
+
+
+def ensure_active_tenant_scaffold():
+    backfill_multiempresa_cliente_key()
+    try:
+        ensure_sgsst_seed_data()
+    except Exception:
+        pass
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_segav_cliente_params_df(_backend: str, _dsn: str, cliente_key: str):
     if not cliente_key:
@@ -2359,8 +2433,8 @@ def sgsst_log(modulo: str, accion: str, detalle: str = ""):
         user = "sistema"
     try:
         execute(
-            "INSERT INTO sgsst_auditoria(modulo, accion, detalle, usuario, created_at) VALUES(?,?,?,?,?)",
-            (modulo, accion, detalle, user, datetime.now().isoformat(timespec='seconds')),
+            "INSERT INTO sgsst_auditoria(cliente_key, modulo, accion, detalle, usuario, created_at) VALUES(?,?,?,?,?,?)",
+            (current_tenant_key(), modulo, accion, detalle, user, datetime.now().isoformat(timespec='seconds')),
         )
     except Exception:
         pass
@@ -2374,6 +2448,12 @@ LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-made
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_login_logo_bytes():
+    if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+        try:
+            with open(LOCAL_BRAND_LOGO_PATH, "rb") as fp:
+                return fp.read()
+        except Exception:
+            pass
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 def render_brand_logo(width: int = 220):
@@ -2578,13 +2658,13 @@ def sync_postgres_core_sequences():
 
 
 def _trabajador_get_id(cur_or_conn, rut: str):
-    row = cursor_execute(cur_or_conn, "SELECT id FROM trabajadores WHERE rut=? ORDER BY id LIMIT 1", (rut,)).fetchone()
+    row = cursor_execute(cur_or_conn, "SELECT id FROM trabajadores WHERE rut=? AND COALESCE(cliente_key,'')=? ORDER BY id LIMIT 1", (rut, current_tenant_key())).fetchone()
     return int(row[0]) if row else None
 
 
 def _trabajador_insert_or_update(cur_or_conn, *, rut: str, nombres: str, apellidos: str, cargo: str = "", centro_costo: str = "", email: str = "", fecha_contrato=None, vigencia_examen=None, overwrite: bool = True, existing_id=None):
-    """Inserta/actualiza trabajadores sin depender de una secuencia sana en Postgres."""
     rut = clean_rut(rut)
+    tenant_key = current_tenant_key()
     existing_id = int(existing_id) if existing_id not in (None, "") else None
     if existing_id is None:
         existing_id = _trabajador_get_id(cur_or_conn, rut)
@@ -2593,56 +2673,26 @@ def _trabajador_insert_or_update(cur_or_conn, *, rut: str, nombres: str, apellid
 
     if existing_id is not None:
         if overwrite:
-            cursor_execute(
-                cur_or_conn,
-                """
-                UPDATE trabajadores
-                   SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                 WHERE id=?
-                """,
-                (*payload, int(existing_id)),
-            )
-            return "updated", int(existing_id)
-        return "skipped", int(existing_id)
+            cursor_execute(cur_or_conn, "UPDATE trabajadores SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=? AND COALESCE(cliente_key,'')=?", (*payload, int(existing_id), tenant_key))
+            return 'updated', int(existing_id)
+        return 'skipped', int(existing_id)
 
-    if DB_BACKEND == "postgres":
+    if DB_BACKEND == 'postgres':
         cursor_execute(cur_or_conn, "SELECT pg_advisory_xact_lock(hashtext('trabajadores_manual_id_insert'));")
         existing_id = _trabajador_get_id(cur_or_conn, rut)
         if existing_id is not None:
             if overwrite:
-                cursor_execute(
-                    cur_or_conn,
-                    """
-                    UPDATE trabajadores
-                       SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                     WHERE id=?
-                    """,
-                    (*payload, int(existing_id)),
-                )
-                return "updated", int(existing_id)
-            return "skipped", int(existing_id)
+                cursor_execute(cur_or_conn, "UPDATE trabajadores SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=? AND COALESCE(cliente_key,'')=?", (*payload, int(existing_id), tenant_key))
+                return 'updated', int(existing_id)
+            return 'skipped', int(existing_id)
         row = cursor_execute(cur_or_conn, "SELECT COALESCE(MAX(id), 0) + 1 FROM trabajadores").fetchone()
         next_id = int(row[0]) if row and row[0] is not None else 1
-        cursor_execute(
-            cur_or_conn,
-            """
-            INSERT INTO trabajadores(id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-            VALUES(?,?,?,?,?,?,?,?,?)
-            """,
-            (next_id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-        )
-        return "inserted", next_id
+        cursor_execute(cur_or_conn, "INSERT INTO trabajadores(id, cliente_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen) VALUES(?,?,?,?,?,?,?,?,?,?)", (next_id, tenant_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen))
+        return 'inserted', next_id
 
-    cursor_execute(
-        cur_or_conn,
-        """
-        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-        VALUES(?,?,?,?,?,?,?,?)
-        """,
-        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-    )
+    cursor_execute(cur_or_conn, "INSERT INTO trabajadores(cliente_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen) VALUES(?,?,?,?,?,?,?,?,?)", (tenant_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen))
     new_id = _trabajador_get_id(cur_or_conn, rut)
-    return "inserted", int(new_id) if new_id is not None else None
+    return 'inserted', int(new_id) if new_id is not None else None
 
 
 def ensure_storage_columns_sqlite(c):
@@ -3024,22 +3074,25 @@ def validate_faena_dates(inicio: date, termino, estado: str):
     return errors
 
 def pendientes_obligatorios(faena_id: int):
+    tenant_key = current_tenant_key()
     asign = fetch_df('''
         SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos, t.cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
+          AND COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
           AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         ORDER BY t.apellidos, t.nombres
-    ''', (faena_id,))
+    ''', (faena_id, tenant_key, tenant_key))
     out = {}
     if asign.empty:
         return out
 
     ids = asign["trabajador_id"].astype(int).tolist()
     docs_all = fetch_df(
-        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
-        tuple(ids),
+        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=? AND trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
+        (tenant_key, *tuple(ids)),
     )
 
     docs_map = {}
@@ -3059,7 +3112,8 @@ def pendientes_obligatorios(faena_id: int):
 
 def pendientes_empresa_faena(faena_id: int):
     """Lista de documentos de empresa requeridos faltantes para una faena."""
-    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
+    tenant_key = current_tenant_key()
+    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(faena_id), tenant_key))
     present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     missing = [d for d in get_empresa_required_doc_types() if d not in present]
     return missing
@@ -3067,14 +3121,16 @@ def pendientes_empresa_faena(faena_id: int):
 
 
 def faena_progress_table():
+    tenant_key = current_tenant_key()
 
     faenas = fetch_df("""
         SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
                m.nombre AS mandante
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
+        WHERE COALESCE(f.cliente_key,'')=?
         ORDER BY f.id DESC
-    """)
+    """, (tenant_key,))
     if faenas.empty:
         return faenas
 
@@ -3083,58 +3139,50 @@ def faena_progress_table():
         SELECT a.faena_id, a.trabajador_id, COALESCE(t.cargo,'') AS cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-        """
+        WHERE COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
+          AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
+        """,
+        (tenant_key, tenant_key),
     )
     if asg.empty:
-        faenas["trabajadores"] = 0
-        faenas["trab_ok"] = 0
-        faenas["cobertura_docs_pct"] = 0.0
-        faenas["faltantes_total"] = 0
+        faenas['trabajadores'] = 0
+        faenas['trab_ok'] = 0
+        faenas['cobertura_docs_pct'] = 0.0
+        faenas['faltantes_total'] = 0
         return faenas
 
-    ids = asg["trabajador_id"].astype(int).unique().tolist()
+    ids = asg['trabajador_id'].astype(int).unique().tolist()
     docs_all = fetch_df(
-        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
-        tuple(ids),
-    ) if ids else pd.DataFrame(columns=["trabajador_id", "doc_tipo"])
+        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=? AND trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
+        (tenant_key, *tuple(ids)),
+    ) if ids else pd.DataFrame(columns=['trabajador_id', 'doc_tipo'])
 
     docs_map = {}
     if not docs_all.empty:
-        for tid, grp in docs_all.groupby("trabajador_id"):
-            docs_map[int(tid)] = set(grp["doc_tipo"].astype(str).tolist())
+        for tid, grp in docs_all.groupby('trabajador_id'):
+            docs_map[int(tid)] = set(grp['doc_tipo'].astype(str).tolist())
 
     rows = []
     for _, r in asg.iterrows():
-        tid = int(r["trabajador_id"])
+        tid = int(r['trabajador_id'])
         req_docs = worker_required_docs_for_record(r)
         have = docs_map.get(tid, set())
         req_docs_present = sum(1 for d in req_docs if d in have)
-        rows.append({
-            "faena_id": int(r["faena_id"]),
-            "trabajador_id": tid,
-            "req_docs_present": req_docs_present,
-            "req_docs_total": len(req_docs),
-            "worker_ok": int(req_docs_present >= len(req_docs)),
-        })
+        rows.append({'faena_id': int(r['faena_id']), 'trabajador_id': tid, 'req_docs_present': req_docs_present, 'req_docs_total': len(req_docs), 'worker_ok': int(req_docs_present >= len(req_docs))})
 
     stats = pd.DataFrame(rows)
-    agg = stats.groupby("faena_id").agg(
-        trabajadores=("trabajador_id", "nunique"),
-        trab_ok=("worker_ok", "sum"),
-        req_docs_sum=("req_docs_present", "sum"),
-        req_docs_total=("req_docs_total", "sum"),
-    ).reset_index()
+    agg = stats.groupby('faena_id').agg(trabajadores=('trabajador_id', 'nunique'), trab_ok=('worker_ok', 'sum'), req_docs_sum=('req_docs_present', 'sum'), req_docs_total=('req_docs_total', 'sum')).reset_index()
+    agg['faltantes_total'] = agg['req_docs_total'] - agg['req_docs_sum']
+    agg['cobertura_docs_pct'] = (agg['req_docs_sum'] / agg['req_docs_total']).where(agg['req_docs_total'] > 0, 0.0) * 100.0
 
-    agg["faltantes_total"] = agg["req_docs_total"] - agg["req_docs_sum"]
-    agg["cobertura_docs_pct"] = (agg["req_docs_sum"] / agg["req_docs_total"]).where(agg["req_docs_total"] > 0, 0.0) * 100.0
-
-    out = faenas.merge(agg, how="left", on="faena_id")
-    out["trabajadores"] = out["trabajadores"].fillna(0).astype(int)
-    out["trab_ok"] = out["trab_ok"].fillna(0).astype(int)
-    out["faltantes_total"] = out["faltantes_total"].fillna(0).astype(int)
-    out["cobertura_docs_pct"] = out["cobertura_docs_pct"].fillna(0.0).astype(float)
+    out = faenas.merge(agg, how='left', on='faena_id')
+    out['trabajadores'] = out['trabajadores'].fillna(0).astype(int)
+    out['trab_ok'] = out['trab_ok'].fillna(0).astype(int)
+    out['faltantes_total'] = out['faltantes_total'].fillna(0).astype(int)
+    out['cobertura_docs_pct'] = out['cobertura_docs_pct'].fillna(0.0).astype(float)
     return out
+
 
 def parse_date_maybe(s):
     if s is None:
@@ -3177,8 +3225,8 @@ def export_zip_for_faena(
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
         LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-        WHERE f.id = ?
-    ''', (faena_id,))
+        WHERE f.id = ? AND COALESCE(f.cliente_key,'')=?
+    ''', (faena_id, current_tenant_key()))
     if faena.empty:
         raise ValueError("Faena no encontrada.")
     f = faena.iloc[0]
@@ -3243,7 +3291,7 @@ def export_zip_for_faena(
 
     # 01_Anexos_Faena
     if include_anexos:
-        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (faena_id,))
+        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (faena_id, current_tenant_key()))
         for _, a in anexos.iterrows():
             b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
             if b:
@@ -3252,7 +3300,7 @@ def export_zip_for_faena(
 
     # 02_Documentos_Empresa (global)
     if include_global_empresa_docs:
-        edocs = fetch_df("SELECT * FROM empresa_documentos ORDER BY id")
+        edocs = fetch_df("SELECT * FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? ORDER BY id", (current_tenant_key(),))
         for _, d in edocs.iterrows():
             if _set_emp_glob is not None and str(d.get("doc_tipo", "")) not in _set_emp_glob:
                 continue
@@ -3286,9 +3334,11 @@ def export_zip_for_faena(
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(a.cliente_key,'')=?
+              AND COALESCE(t.cliente_key,'')=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
-        ''', (faena_id,))
+        ''', (faena_id, current_tenant_key(), current_tenant_key()))
         for _, r in asign.iterrows():
             tid = int(r["trabajador_id"])
             if _set_trab_ids is not None and tid not in _set_trab_ids:
@@ -3296,7 +3346,7 @@ def export_zip_for_faena(
             tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
             selected_doc_ids = _trab_doc_map.get(tid, None)
 
-            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
+            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (tid, current_tenant_key()))
             for _, d in tdocs.iterrows():
                 did = int(d["id"])
                 if selected_doc_ids is not None:
@@ -3321,8 +3371,8 @@ def persist_export_mes(year_month: str, zip_bytes: bytes):
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial_mes(year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (str(year_month), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial_mes(cliente_key, year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (current_tenant_key(), str(year_month), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -3333,10 +3383,10 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
         '''
         SELECT f.id, f.nombre, f.estado, f.fecha_inicio, m.nombre AS mandante
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        WHERE substr(f.fecha_inicio,1,7)=?
+        WHERE COALESCE(f.cliente_key,'')=? AND substr(f.fecha_inicio,1,7)=?
         ORDER BY f.id DESC
         ''',
-        (ym,),
+        (current_tenant_key(), ym),
     )
     if faenas.empty:
         raise ValueError("No hay faenas para ese mes.")
@@ -3420,7 +3470,7 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             z.writestr(f"{prefix}/00_Contrato_Faena/{fn}", contrato_bytes)
 
         # 01 anexos
-        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (fid,))
+        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (fid, current_tenant_key()))
         for _, a in anexos.iterrows():
             b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
             if b:
@@ -3428,7 +3478,7 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
                 z.writestr(f"{prefix}/01_Anexos_Faena/{fn}", b)
 
         # 02 empresa por faena
-        fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id", (fid,))
+        fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (fid, current_tenant_key()))
         for _, d in fedocs.iterrows():
             b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
             if b:
@@ -3444,15 +3494,17 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(a.cliente_key,'')=?
+              AND COALESCE(t.cliente_key,'')=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
             ''',
-            (fid,),
+            (fid, current_tenant_key(), current_tenant_key()),
         )
         for _, r in asign.iterrows():
             tid = int(r["trabajador_id"])
             tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
-            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
+            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (tid, current_tenant_key()))
             for _, d in tdocs.iterrows():
                 b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
                 if b:
@@ -3471,8 +3523,8 @@ def persist_export(faena_id: int, zip_bytes: bytes, faena_nombre: str):
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial(faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (int(faena_id), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial(cliente_key, faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (current_tenant_key(), int(faena_id), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -3708,6 +3760,34 @@ with st.sidebar:
     if u:
         st.caption(f"👤 {u['username']} · {u['role']}")
 
+    try:
+        _cli_df = segav_clientes_df()
+        if _cli_df is not None and not _cli_df.empty:
+            _cli_df = _cli_df[_cli_df["activo"].fillna(1).astype(int) == 1] if "activo" in _cli_df.columns else _cli_df
+            _cli_keys = _cli_df["cliente_key"].astype(str).tolist()
+            if _cli_keys:
+                _current_cli = current_segav_client_key() or _cli_keys[0]
+                if _current_cli not in _cli_keys:
+                    _current_cli = _cli_keys[0]
+                _cli_selected = st.selectbox(
+                    "Empresa activa",
+                    _cli_keys,
+                    index=_cli_keys.index(_current_cli),
+                    key="sidebar_cliente_activo",
+                    format_func=lambda x: str(_cli_df[_cli_df["cliente_key"].astype(str) == str(x)].iloc[0]["cliente_nombre"]),
+                )
+                if _cli_selected != _current_cli:
+                    _cli_name = str(_cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]["cliente_nombre"])
+                    set_segav_erp_config_value("current_client_key", _cli_selected)
+                    set_segav_erp_config_value("cliente_actual", _cli_name)
+                    clear_app_caches()
+                    st.rerun()
+                _current_row = _cli_df[_cli_df["cliente_key"].astype(str) == str(_cli_selected)].iloc[0]
+                _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
+                st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
+    except Exception:
+        pass
+
     # Navegación (simple)
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
@@ -3816,8 +3896,22 @@ with st.sidebar:
 
 current_section = st.session_state.get("nav_page", "Dashboard")
 st.title(f"{erp_brand_name()} — {current_section}")
+try:
+    _clientes_top = segav_clientes_df()
+    _cli_key_top = current_segav_client_key()
+    if _clientes_top is not None and not _clientes_top.empty and _cli_key_top:
+        _row_top = _clientes_top[_clientes_top["cliente_key"].astype(str) == str(_cli_key_top)]
+        if not _row_top.empty:
+            _row_top = _row_top.iloc[0]
+            st.caption(f"Cliente activo: {_row_top.get('cliente_nombre') or 'Sin definir'} · Vertical: {_row_top.get('vertical') or segav_erp_value('erp_vertical', 'General')} · Modo: {_row_top.get('modo_implementacion') or segav_erp_value('modo_implementacion', 'CONFIGURABLE')}")
+except Exception:
+    pass
 
 
+try:
+    ensure_active_tenant_scaffold()
+except Exception:
+    pass
 
 # ----------------------------
 # Pages
@@ -7112,6 +7206,53 @@ def page_admin_usuarios():
 # Route
 # ----------------------------
 p = st.session_state.get("nav_page", "Dashboard")
+
+from segav_core import ops_faenas as _ops_faenas
+from segav_core import ops_personal as _ops_personal
+from segav_core import ops_docs as _ops_docs
+from segav_core import ops_exports as _ops_exports
+from segav_core import ops_sgsst as _ops_sgsst
+
+
+def page_mandantes():
+    return _ops_faenas.page_mandantes(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db)
+
+
+def page_contratos_faena():
+    return _ops_faenas.page_contratos_faena(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, load_file_anywhere=load_file_anywhere)
+
+
+def page_faenas():
+    return _ops_faenas.page_faenas(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, pendientes_obligatorios=pendientes_obligatorios)
+
+
+def page_trabajadores():
+    return _ops_personal.page_trabajadores(fetch_df=fetch_df, conn=conn, execute=execute, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, rut_input=rut_input, segav_cargo_labels=segav_cargo_labels, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, trabajador_insert_or_update=_trabajador_insert_or_update, apply_pending_trabajador_create_reset=_apply_pending_trabajador_create_reset, show_pending_trabajador_create_flash=_show_pending_trabajador_create_flash)
+
+
+def page_asignar_trabajadores():
+    return _ops_personal.page_asignar_trabajadores(fetch_df=fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update)
+
+
+def page_documentos_empresa():
+    return _ops_docs.page_documentos_empresa(fetch_df=fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_documentos_empresa_faena():
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=fetch_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, pendientes_empresa_faena_periodo=pendientes_empresa_faena_periodo, periodo_label=periodo_label, periodo_folder_segment=periodo_folder_segment, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, date=date, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_documentos_trabajador():
+    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=fetch_df, fetch_df_uncached=fetch_df_uncached, execute=execute, execute_rowcount=execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_export_zip():
+    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date)
+
+
+def page_sgsst():
+    return _ops_sgsst.page_sgsst(fetch_df=fetch_df, fetch_value=fetch_value, execute=execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join)
+
 
 PAGE_PERM_ROUTE = {
     "Dashboard": "view_dashboard",

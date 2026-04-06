@@ -6,6 +6,15 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ui import ui_header, ui_tip
+from segav_core.erp_state import current_segav_client_key
+
+
+def _tenant_key() -> str:
+    return str(current_segav_client_key() or "").strip()
+
+
+def _tp(*extra):
+    return (_tenant_key(), *extra)
 
 def page_trabajadores(
     *,
@@ -61,7 +70,7 @@ def page_trabajadores(
                     overwrite = st.checkbox("Sobrescribir si el RUT ya existe", value=True, key="ow_excel_trab")
 
                     if st.button("Importar Excel ahora", type="primary", key="btn_import_excel_trab"):
-                        existing_set = set(fetch_df("SELECT rut FROM trabajadores")["rut"].astype(str).tolist())
+                        existing_set = set(fetch_df("SELECT rut FROM trabajadores WHERE COALESCE(cliente_key,'')=?", _tp())["rut"].astype(str).tolist())
 
                         rows = inserted = updated = skipped = 0
                         has_cargo = "cargo" in df.columns
@@ -185,7 +194,7 @@ def page_trabajadores(
                     st.error(f"No se pudo guardar: {e}")
 
         with t_edit:
-            df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores ORDER BY apellidos, nombres")
+            df = fetch_df("SELECT id, rut, apellidos, nombres, cargo, centro_costo, email, fecha_contrato, vigencia_examen FROM trabajadores WHERE COALESCE(cliente_key,'')=? ORDER BY apellidos, nombres", _tp())
             if df.empty:
                 st.info("No hay trabajadores aún.")
                 return
@@ -257,9 +266,9 @@ def page_trabajadores(
             st.markdown("### 🗑️ Eliminar trabajador")
             st.caption("Se eliminarán también sus asignaciones a faenas y sus documentos. La app intentará limpiar además los archivos físicos que ya no queden referenciados.")
 
-            dep_asg = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
-            dep_docs = fetch_df("SELECT COUNT(*) AS n FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
-            dep_faenas = fetch_df("SELECT COUNT(DISTINCT faena_id) AS n FROM asignaciones WHERE trabajador_id=?", (int(tid),))
+            dep_asg = fetch_df("SELECT COUNT(*) AS n FROM asignaciones WHERE trabajador_id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
+            dep_docs = fetch_df("SELECT COUNT(*) AS n FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
+            dep_faenas = fetch_df("SELECT COUNT(DISTINCT faena_id) AS n FROM asignaciones WHERE trabajador_id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
 
             n_asg = int(dep_asg["n"].iloc[0]) if not dep_asg.empty else 0
             n_docs = int(dep_docs["n"].iloc[0]) if not dep_docs.empty else 0
@@ -274,9 +283,9 @@ def page_trabajadores(
                     st.stop()
                 try:
                     refs = fetch_file_refs("trabajador_documentos", "trabajador_id=?", (int(tid),))
-                    execute("DELETE FROM asignaciones WHERE trabajador_id=?", (int(tid),))
-                    execute("DELETE FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
-                    execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
+                    execute("DELETE FROM asignaciones WHERE trabajador_id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
+                    execute("DELETE FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
+                    execute("DELETE FROM trabajadores WHERE id=? AND COALESCE(cliente_key,'')=?", (int(tid), _tenant_key()))
                     cleanup_issues = cleanup_deleted_file_refs(refs)
                     if cleanup_issues:
                         st.warning("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
@@ -364,8 +373,9 @@ def page_asignar_trabajadores(
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+        WHERE COALESCE(f.cliente_key,'')=?
         ORDER BY f.id DESC
-    ''')
+    ''', _tp())
     if faenas.empty:
         ui_tip("Crea faenas primero.")
         return
@@ -386,12 +396,12 @@ def page_asignar_trabajadores(
     # Tab 1: asignar existentes
     # -------------------------
     with tab1:
-        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        trab = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores WHERE COALESCE(cliente_key,'')=? ORDER BY apellidos, nombres", _tp())
         if trab.empty:
             ui_tip("Crea trabajadores primero (o usa 'Importar Excel y asignar').")
             return
 
-        asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=?", (int(faena_id),))
+        asignados = fetch_df("SELECT trabajador_id FROM asignaciones WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(faena_id), _tenant_key()))
         asignados_ids = set(asignados["trabajador_id"].tolist()) if not asignados.empty else set()
         disponibles = trab[~trab["id"].isin(asignados_ids)].copy()
 
@@ -420,7 +430,7 @@ def page_asignar_trabajadores(
                         cur = cursor_execute(
                             c,
                             ASSIGNACION_INSERT_SQL,
-                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                            (_tenant_key(), int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
                         )
                         try:
                             rc = int(cur.rowcount or 0)
@@ -475,7 +485,7 @@ def page_asignar_trabajadores(
                     cargo_faena_all = st.text_input("Cargo en faena (opcional, aplica a todos)", key="cargo_faena_all")
 
                     if st.button("Importar y asignar a esta faena", type="primary"):
-                        existing = fetch_df("SELECT rut, id FROM trabajadores")
+                        existing = fetch_df("SELECT rut, id FROM trabajadores WHERE COALESCE(cliente_key,'')=?", _tp())
                         rut_to_id = {str(r["rut"]): int(r["id"]) for _, r in existing.iterrows()} if not existing.empty else {}
 
                         rows = inserted = updated = skipped = assigned = 0
@@ -541,7 +551,7 @@ def page_asignar_trabajadores(
                                     if tid_saved:
                                         rut_to_id[rut] = int(tid_saved)
                                     else:
-                                        rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=?", (rut,)).fetchone()
+                                        rid = cursor_execute(c, "SELECT id FROM trabajadores WHERE rut=? AND COALESCE(cliente_key,'')=?", (rut, _tenant_key())).fetchone()
                                         if rid:
                                             rut_to_id[rut] = int(rid[0])
 
@@ -550,7 +560,7 @@ def page_asignar_trabajadores(
                                     cur_asg = cursor_execute(
                                         c,
                                         ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                        (_tenant_key(), int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
                                     try:
                                         assigned += int(cur_asg.rowcount or 0)
@@ -734,7 +744,7 @@ def page_documentos_trabajador(
                     else:
                         st.success(f"{k} — OK")
     else:
-        trab = fetch_df_uncached("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        trab = fetch_df_uncached("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores WHERE COALESCE(cliente_key,'')=? ORDER BY apellidos, nombres", _tp())
         if trab.empty:
             ui_tip("Crea trabajadores primero.")
             return
@@ -748,8 +758,8 @@ def page_documentos_trabajador(
 
     # Estado documental del trabajador (global: se reutiliza entre faenas)
     docs = fetch_df(
-        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id DESC",
-        (int(tid),),
+        "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY id DESC",
+        (int(tid), _tenant_key()),
     )
     trabajador_row = trab[trab["id"] == tid].iloc[0]
     req_docs = worker_required_docs_for_record(trabajador_row)
@@ -807,9 +817,9 @@ def page_documentos_trabajador(
 
                 execute(
 
-                    "INSERT INTO trabajador_documentos(trabajador_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO trabajador_documentos(cliente_key, trabajador_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
 
-                    (int(tid), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                    (_tenant_key(), int(tid), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
 
                 )
 
@@ -823,9 +833,9 @@ def page_documentos_trabajador(
 
                         "UPDATE trabajador_documentos SET file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
 
-                        "WHERE trabajador_id=? AND doc_tipo=? AND nombre_archivo=?",
+                        "WHERE COALESCE(cliente_key,'')=? AND trabajador_id=? AND doc_tipo=? AND nombre_archivo=?",
 
-                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo, payload["file_name"]),
+                        (file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), _tenant_key(), int(tid), doc_tipo, payload["file_name"]),
 
                     )
 
@@ -835,9 +845,9 @@ def page_documentos_trabajador(
 
                             "UPDATE trabajador_documentos SET nombre_archivo=?, file_path=?, bucket=?, object_path=?, sha256=?, created_at=? "
 
-                            "WHERE trabajador_id=? AND doc_tipo=?",
+                            "WHERE COALESCE(cliente_key,'')=? AND trabajador_id=? AND doc_tipo=?",
 
-                            (payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), int(tid), doc_tipo),
+                            (payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds"), _tenant_key(), int(tid), doc_tipo),
 
                         )
 

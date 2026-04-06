@@ -1,11 +1,12 @@
-# SEGAV ERP (v8.4.52)
+# SEGAV ERP (v8.4.54)
 
 Base operativa preparada para uso y despliegue.
 
 ## Qué incluye esta versión
 - ERP **SEGAV ERP** con acceso por usuarios y roles.
+- Base de **multiempresa operativa** con cliente activo y aislamiento inicial por `cliente_key` en operación documental y control de faenas/personal.
 - Backend compatible con **SQLite local** o **Supabase/Postgres**.
-- Soporte para **Supabase Storage** con fallback local.
+- Soporte para **Supabase Storage** con fallback local y rutas separadas por cliente activo.
 - Gestión de **mandantes, contratos, faenas, trabajadores, asignaciones y documentos**.
 - Módulo **Mi Empresa / SGSST** con base para DS 44, Ley 16.744 y DS 594.
 - Exportación ZIP, backups y restore.

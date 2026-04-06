@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from segav_core.erp_state import current_segav_client_key
+
+
+def _tenant_key() -> str:
+    return str(current_segav_client_key() or "").strip()
+
+
+def _tp(*extra):
+    return (_tenant_key(), *extra)
+
+
 def page_export_zip(
     *,
     st,
@@ -24,8 +35,9 @@ def page_export_zip(
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+        WHERE COALESCE(f.cliente_key,'')=?
         ORDER BY f.id DESC
-    ''')
+    ''', _tp())
     if faenas.empty:
         ui_tip("Crea una faena primero.")
         return
@@ -80,10 +92,10 @@ def page_export_zip(
         st.divider()
         st.markdown("#### (Opcional) Filtrar por tipo de documento")
 
-        emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
+        emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? ORDER BY doc_tipo", _tp())
         emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
 
-        emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo", (int(faena_id),))
+        emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY doc_tipo", (int(faena_id), _tenant_key()))
         emp_faena_list = emp_faena_types["doc_tipo"].dropna().astype(str).tolist() if not emp_faena_types.empty else []
 
         trab_types = fetch_df('''
@@ -91,9 +103,11 @@ def page_export_zip(
             FROM trabajador_documentos td
             JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(a.cliente_key,'')=?
+              AND COALESCE(td.cliente_key,'')=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY td.doc_tipo
-        ''', (int(faena_id),))
+        ''', (int(faena_id), _tenant_key(), _tenant_key()))
         trab_list = trab_types["doc_tipo"].dropna().astype(str).tolist() if not trab_types.empty else []
 
         colf1, colf2, colf3 = st.columns(3)
@@ -126,8 +140,8 @@ def page_export_zip(
 
         if inc_emp_faena:
             emp_docs = fetch_df(
-                "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, nombre_archivo, id",
-                (int(faena_id),),
+                "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY doc_tipo, nombre_archivo, id",
+                (int(faena_id), _tenant_key()),
             )
             use_specific_emp_docs = st.checkbox(
                 "Elegir documentos específicos de empresa para esta faena",
@@ -163,9 +177,11 @@ def page_export_zip(
                 FROM asignaciones a
                 JOIN trabajadores t ON t.id=a.trabajador_id
                 WHERE a.faena_id=?
+                  AND COALESCE(a.cliente_key,'')=?
+                  AND COALESCE(t.cliente_key,'')=?
                   AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
                 ORDER BY t.apellidos, t.nombres
-            ''', (int(faena_id),))
+            ''', (int(faena_id), _tenant_key(), _tenant_key()))
             use_specific_workers = st.checkbox(
                 "Elegir trabajadores específicos y sus documentos",
                 value=False,
@@ -192,8 +208,8 @@ def page_export_zip(
                     selected_trab_doc_map = {}
                     for tid in selected_trab_ids:
                         docs_worker = fetch_df(
-                            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
-                            (int(tid),),
+                            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY doc_tipo, nombre_archivo, id",
+                            (int(tid), _tenant_key()),
                         )
                         with st.expander(f"Documentos de {worker_labels.get(int(tid), tid)}", expanded=False):
                             if docs_worker.empty:
@@ -259,8 +275,10 @@ def page_export_zip(
                    eh.size_bytes, eh.created_at
             FROM export_historial eh
             LEFT JOIN faenas f ON f.id = eh.faena_id
+            WHERE COALESCE(eh.cliente_key,'')=?
             ORDER BY eh.id DESC
-            """
+            """,
+            _tp()
         )
         if hist.empty:
             st.info("Aún no hay ZIPs exportados.")
@@ -330,8 +348,10 @@ def page_export_zip(
             """
             SELECT id, year_month, file_path, bucket, object_path, size_bytes, created_at
             FROM export_historial_mes
+            WHERE COALESCE(cliente_key,'')=?
             ORDER BY id DESC
-            """
+            """,
+            _tp()
         )
         if hist_mes.empty:
             st.caption("Aún no hay exportaciones mensuales guardadas.")

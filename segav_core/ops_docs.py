@@ -3,6 +3,15 @@ from __future__ import annotations
 import streamlit as st
 
 from segav_core.ui import ui_header
+from segav_core.erp_state import current_segav_client_key
+
+
+def _tenant_key() -> str:
+    return str(current_segav_client_key() or "").strip()
+
+
+def _tp(*extra):
+    return (_tenant_key(), *extra)
 
 
 def page_documentos_empresa(
@@ -25,7 +34,7 @@ def page_documentos_empresa(
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos requeridos base son liquidaciones de sueldo, F30, F30-1 y certificado de accidentabilidad; además puedes crear tus propios tipos con OTRO.")
 
-    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
+    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? ORDER BY id DESC", _tp())
     tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     faltan = [d for d in get_empresa_required_doc_types() if d not in tipos_presentes]
 
@@ -63,8 +72,8 @@ def page_documentos_empresa(
             file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
             sha = sha256_bytes(payload["file_bytes"])
             execute(
-                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO empresa_documentos(cliente_key, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (_tenant_key(), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             if payload["compressed"] and payload.get("compression_note"):
                 st.info(payload["compression_note"])
@@ -161,9 +170,10 @@ def page_documentos_empresa_faena(
         """
         SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+        WHERE COALESCE(f.cliente_key,'')=?
         ORDER BY f.id DESC
         """
-    )
+    , _tp())
     if faenas.empty:
         ui_tip("Crea una faena primero.")
         return
@@ -211,7 +221,7 @@ def page_documentos_empresa_faena(
     )
 
     docs_periodo = fetch_df(
-        "SELECT id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY id DESC",
+        "SELECT id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? AND COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY id DESC",
         (int(faena_id), int(anio_sel), int(mes_sel)),
     )
     tipos_presentes = set(docs_periodo["doc_tipo"].astype(str).tolist()) if not docs_periodo.empty else set()
@@ -268,7 +278,7 @@ def page_documentos_empresa_faena(
             sha = sha256_bytes(payload["file_bytes"])
 
             execute(
-                "INSERT INTO faena_empresa_documentos(faena_id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO faena_empresa_documentos(cliente_key, faena_id, mandante_id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (int(faena_id), int(mandante_id), int(anio_sel), int(mes_sel), doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             if payload["compressed"] and payload.get("compression_note"):
@@ -332,8 +342,8 @@ def page_documentos_empresa_faena(
 
     with tab3:
         historial = fetch_df(
-            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
-            (int(faena_id),),
+            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
+            (int(faena_id), _tenant_key()),
         )
         if historial.empty:
             st.info("(sin historial de documentos empresa por faena)")
