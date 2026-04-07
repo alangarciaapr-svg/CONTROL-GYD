@@ -12,40 +12,7 @@ def _dep_count(fetch_value, table: str, cliente_key: str) -> int:
         return 0
 
 
-def _delete_client_records(fetch_value, execute, fetch_file_refs, cleanup_deleted_file_refs, cliente_key: str):
-    file_tables = [
-        'contratos_faena', 'faena_anexos', 'trabajador_documentos', 'empresa_documentos',
-        'faena_empresa_documentos', 'export_historial', 'export_historial_mes'
-    ]
-    refs = []
-    for table in file_tables:
-        try:
-            refs.extend(fetch_file_refs(table, "COALESCE(cliente_key,'')=?", (cliente_key,)))
-        except Exception:
-            pass
-    delete_order = [
-        'sgsst_alertas', 'sgsst_capacitaciones', 'sgsst_incidentes', 'sgsst_inspecciones', 'sgsst_miper',
-        'sgsst_programa_anual', 'sgsst_matriz_legal', 'sgsst_empresa', 'sgsst_auditoria',
-        'faena_empresa_documentos', 'trabajador_documentos', 'empresa_documentos', 'faena_anexos',
-        'asignaciones', 'trabajadores', 'faenas', 'contratos_faena', 'mandantes', 'export_historial', 'export_historial_mes'
-    ]
-    deleted = {}
-    for table in delete_order:
-        try:
-            count = int(fetch_value(f"SELECT COUNT(*) FROM {table} WHERE COALESCE(cliente_key,'')=?", (cliente_key,), default=0) or 0)
-            execute(f"DELETE FROM {table} WHERE COALESCE(cliente_key,'')=?", (cliente_key,))
-        except Exception:
-            count = 0
-        deleted[table] = count
-    cleanup_issues = []
-    try:
-        cleanup_issues = cleanup_deleted_file_refs(refs)
-    except Exception as exc:
-        cleanup_issues = [str(exc)]
-    return deleted, cleanup_issues
-
-
-def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, clear_app_caches, segav_clientes_df, visible_clientes_df, current_segav_client_key, make_erp_key, clean_rut, ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value, sgsst_log, current_user, is_superadmin, ensure_user_client_access_table, fetch_file_refs, cleanup_deleted_file_refs, set_active_cliente_key):
+def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, clear_app_caches, segav_clientes_df, visible_clientes_df, current_segav_client_key, make_erp_key, clean_rut, ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value, sgsst_log, current_user, is_superadmin, ensure_user_client_access_table):
     if not is_superadmin():
         st.error("Esta sección es exclusiva para SUPERADMIN.")
         st.stop()
@@ -147,10 +114,9 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                             "INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) VALUES(?,?,?,?)",
                             (cliente_key, param_key, str(param_value), now),
                         )
-                    set_active_cliente_key(cliente_key)
                     clear_app_caches()
                     sgsst_log("SuperAdmin / Empresas", "Crear empresa", f"{new_name.strip()} ({cliente_key})")
-                    st.success("Empresa creada correctamente. Parte sin registros ni datos cargados.")
+                    st.success("Empresa creada correctamente.")
                     st.rerun()
 
         st.markdown("---")
@@ -191,23 +157,6 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                     st.session_state["active_cliente_key"] = edit_key
                     clear_app_caches()
                     st.success("Empresa activa de esta sesión actualizada.")
-                    st.rerun()
-
-            st.markdown("### Limpieza de registros")
-            st.caption("Usa esta acción para dejar la empresa en blanco sin eliminarla del catálogo. Se borran los registros operativos y SGSST asociados a esa empresa.")
-            clear_confirm = st.checkbox("Confirmo que quiero limpiar todos los registros de esta empresa", key="sa_confirm_clear_empresa")
-            if st.button("Limpiar registros", key="sa_btn_clear_empresa"):
-                if not clear_confirm:
-                    st.error("Debes confirmar la limpieza total de registros.")
-                else:
-                    deleted_counts, cleanup_issues = _delete_client_records(fetch_value, execute, fetch_file_refs, cleanup_deleted_file_refs, edit_key)
-                    clear_app_caches()
-                    sgsst_log("SuperAdmin / Empresas", "Limpiar registros", edit_key)
-                    total_deleted = sum(int(v or 0) for v in deleted_counts.values())
-                    if cleanup_issues:
-                        st.warning(f"Registros eliminados: {total_deleted}. Hubo observaciones al limpiar archivos: {' | '.join(cleanup_issues)}")
-                    else:
-                        st.success(f"Empresa limpiada correctamente. Registros eliminados: {total_deleted}. La empresa queda en blanco para comenzar desde cero.")
                     st.rerun()
 
             st.markdown("### Eliminación controlada")
