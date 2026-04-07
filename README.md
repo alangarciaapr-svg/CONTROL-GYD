@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.69)
+# SEGAV ERP (v8.4.70)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
@@ -92,3 +92,11 @@ Novedades v8.4.69:
 - Los datos heredados se reasignan una sola vez a la empresa histórica (Maderas GyD) y ya no se mueven a SEGAV al cambiar la empresa activa.
 - Las empresas nuevas parten vacías sin heredar documentación ni registros previos.
 - La pantalla de inicio se reordenó: hero azul a la derecha, login a la izquierda y logo bajo el cuadro de inicio de sesión.
+
+
+
+Fase de saneamiento v8.4.70:
+- Se eliminaron definiciones duplicadas antiguas de páginas en `streamlit_app.py`, conservando solo los wrappers activos hacia `segav_core`.
+- Se limpió el sombreado/confusión de `bootstrap_app` y un import no usado.
+- Se incorporó diagnóstico liviano para algunos fallos no críticos que antes quedaban totalmente silenciosos.
+- Se mantuvo la funcionalidad visible sin quitar módulos.
