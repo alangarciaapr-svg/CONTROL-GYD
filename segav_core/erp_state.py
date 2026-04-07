@@ -124,6 +124,9 @@ def segav_clientes_df():
 
 
 def current_segav_client_key() -> str:
+    session_key = str(st.session_state.get('active_cliente_key') or '').strip()
+    if session_key:
+        return session_key
     return segav_erp_value('current_client_key', '')
 
 
