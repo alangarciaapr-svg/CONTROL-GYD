@@ -2351,19 +2351,94 @@ def ensure_multiempresa_columns_sqlite(c):
             pass
 
 
+def _resolve_cliente_key_by_patterns(df, patterns):
+    if df is None or df.empty:
+        return ''
+    for _, row in df.iterrows():
+        nm = normalize_text(row.get('cliente_nombre') or '')
+        for pats in patterns:
+            if all(p in nm for p in pats):
+                return str(row.get('cliente_key') or '').strip()
+    return ''
+
+
+def resolve_legacy_owner_client_key() -> str:
+    stored = str(segav_erp_value('legacy_owner_client_key', '') or '').strip()
+    try:
+        df = segav_clientes_df()
+    except Exception:
+        df = pd.DataFrame()
+    if stored and df is not None and not df.empty and stored in df['cliente_key'].astype(str).tolist():
+        return stored
+    if df is None or df.empty:
+        return stored
+    patterns = [
+        ('maderas', 'gyd'),
+        ('maderas', 'galvez'),
+        ('maderas', 'genova'),
+        ('sociedad', 'maderera'),
+        ('maderas',),
+        ('gyd',),
+    ]
+    key = _resolve_cliente_key_by_patterns(df, patterns)
+    if not key:
+        non_segav = df[~df['cliente_nombre'].astype(str).map(normalize_text).str.contains('segav', na=False)]
+        if not non_segav.empty:
+            key = str(non_segav.iloc[0].get('cliente_key') or '').strip()
+        else:
+            key = str(df.iloc[0].get('cliente_key') or '').strip()
+    return key
+
+
+def resolve_segav_client_key() -> str:
+    try:
+        df = segav_clientes_df()
+    except Exception:
+        return ''
+    if df is None or df.empty:
+        return ''
+    return _resolve_cliente_key_by_patterns(df, [('segav',)])
+
+
 def backfill_multiempresa_cliente_key():
-    tkey = current_tenant_key()
-    if not tkey:
+    legacy_owner_key = resolve_legacy_owner_client_key()
+    if not legacy_owner_key:
         return
+    try:
+        if str(segav_erp_value('legacy_owner_client_key', '') or '').strip() != legacy_owner_key:
+            set_segav_erp_config_value('legacy_owner_client_key', legacy_owner_key)
+    except Exception:
+        pass
+    already_done = str(segav_erp_value('legacy_backfill_v2_done', 'NO') or 'NO').strip().upper() == 'SI'
+    if already_done:
+        return
+    segav_key = resolve_segav_client_key()
     for table in MULTIEMPRESA_TABLES:
         try:
-            execute(f"UPDATE {table} SET cliente_key=? WHERE cliente_key IS NULL OR TRIM(cliente_key)=''", (tkey,))
+            execute(f"UPDATE {table} SET cliente_key=? WHERE cliente_key IS NULL OR TRIM(cliente_key)=''", (legacy_owner_key,))
         except Exception:
             pass
+        if segav_key and segav_key != legacy_owner_key:
+            try:
+                segav_count = int(fetch_value(f"SELECT COUNT(*) FROM {table} WHERE COALESCE(cliente_key,'')=?", (segav_key,), default=0) or 0)
+                owner_count = int(fetch_value(f"SELECT COUNT(*) FROM {table} WHERE COALESCE(cliente_key,'')=?", (legacy_owner_key,), default=0) or 0)
+                if segav_count > 0 and owner_count == 0:
+                    execute(f"UPDATE {table} SET cliente_key=? WHERE COALESCE(cliente_key,'')=?", (legacy_owner_key, segav_key))
+            except Exception:
+                pass
+    try:
+        clear_app_caches()
+    except Exception:
+        pass
+    try:
+        set_segav_erp_config_value('legacy_backfill_v2_done', 'SI')
+    except Exception:
+        pass
 
 
 def ensure_active_tenant_scaffold():
-    backfill_multiempresa_cliente_key()
+    # Las empresas nuevas deben partir vacías: no reasignar datos al cambiar de tenant.
+    return True
 
 
 TENANT_SCOPE_TABLES = tuple(MULTIEMPRESA_TABLES)
@@ -3169,6 +3244,21 @@ def auth_gate_ui():
             font-size:12px;
             line-height:1.5;
         }
+        .segav-auth-login-logo{
+            margin-top:18px;
+            padding-top:18px;
+            border-top:1px solid rgba(148,163,184,0.22);
+            display:flex;
+            justify-content:center;
+            align-items:center;
+        }
+        .segav-auth-login-note{
+            margin-top:10px;
+            text-align:center;
+            color:#64748b;
+            font-size:12px;
+            line-height:1.45;
+        }
         @media (max-width: 980px){
             .segav-auth-hero,.segav-auth-login{min-height:auto;}
             .segav-auth-points,.segav-auth-mini{grid-template-columns:1fr;}
@@ -3203,22 +3293,9 @@ def auth_gate_ui():
     """
 
     st.markdown('<div class="segav-auth-shell">', unsafe_allow_html=True)
-    left_col, right_col = st.columns([1.18, 0.82], gap="large")
+    left_col, right_col = st.columns([0.82, 1.18], gap="large")
 
     with left_col:
-        st.markdown(hero_html, unsafe_allow_html=True)
-        render_brand_logo(width=250)
-        hero_bytes = get_login_hero_bytes()
-        if hero_bytes:
-            hero_b64 = _b64e(hero_bytes)
-            st.markdown(
-                f'<div class="segav-auth-hero-media"><img alt="SEGAV ERP Hero" src="data:image/svg+xml;base64,{hero_b64}"></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("Imagen principal no disponible. El branding y el acceso siguen operativos.")
-
-    with right_col:
         st.markdown(login_intro_html, unsafe_allow_html=True)
         ensure_users_table()
         ensure_superadmin_exists()
@@ -3261,9 +3338,25 @@ def auth_gate_ui():
             st.rerun()
 
         st.markdown(
-            '<div class="segav-auth-footnote">¿Olvidaste tu contraseña? Solicita reinicio al administrador correspondiente. Para usuarios que solo revisan información, usa <b>LECTOR</b>. Para operación diaria, <b>OPERADOR</b>.</div></div>',
+            '<div class="segav-auth-footnote">¿Olvidaste tu contraseña? Solicita reinicio al administrador correspondiente. Para usuarios que solo revisan información, usa <b>LECTOR</b>. Para operación diaria, <b>OPERADOR</b>.</div>',
             unsafe_allow_html=True,
         )
+        st.markdown('<div class="segav-auth-login-logo">', unsafe_allow_html=True)
+        render_brand_logo(width=185)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="segav-auth-login-note">SEGAV ERP · Plataforma multiempresa de control documental, cumplimiento y gestión preventiva.</div></div>', unsafe_allow_html=True)
+
+    with right_col:
+        st.markdown(hero_html, unsafe_allow_html=True)
+        hero_bytes = get_login_hero_bytes()
+        if hero_bytes:
+            hero_b64 = _b64e(hero_bytes)
+            st.markdown(
+                f'<div class="segav-auth-hero-media"><img alt="SEGAV ERP Hero" src="data:image/svg+xml;base64,{hero_b64}"></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Imagen principal no disponible. El branding y el acceso siguen operativos.")
 
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
