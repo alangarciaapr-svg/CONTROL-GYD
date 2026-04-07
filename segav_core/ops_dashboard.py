@@ -7,7 +7,7 @@ from typing import Callable
 import pandas as pd
 import streamlit as st
 
-from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema
+from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once
 
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
@@ -232,11 +232,12 @@ def page_dashboard(
     current_name = str(current_client.get("cliente_nombre") or "Empresa activa")
 
     try:
-        ensure_multiempresa_compliance_schema(
-            db_backend=DB_BACKEND,
-            execute=execute,
-            conn=conn,
-            current_client_key=current_key,
+        ensure_multiempresa_compliance_schema_once(
+            DB_BACKEND,
+            str(PG_DSN_FINGERPRINT or "none"),
+            current_key,
+            execute,
+            conn,
         )
         if callable(clear_app_caches):
             clear_app_caches()

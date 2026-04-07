@@ -4,6 +4,19 @@ import io
 import zipfile
 import hashlib
 import base64
+import sqlite3
+
+# Postgres (Supabase)
+try:
+    import psycopg
+except Exception:
+    psycopg = None
+
+try:
+    from psycopg_pool import ConnectionPool
+except Exception:
+    ConnectionPool = None
+
 import shutil
 from datetime import date, datetime, timedelta
 
@@ -15,71 +28,183 @@ import json
 import secrets
 import unicodedata
 
-from core_db import (
-    DB_BACKEND,
-    PG_DSN,
-    PG_DSN_FINGERPRINT,
-    _get_cfg,
-    _qmark_to_pct,
-    clear_app_caches,
-    conn,
-    cursor_execute,
-    execute,
-    execute_rowcount,
-    executemany,
-    fetch_df,
-    fetch_df_uncached,
-    fetch_row,
-    fetch_value,
-    migrate_add_columns_if_missing,
-)
-from segav_core.app_config import APP_NAME, APP_VERSION, DB_PATH, UPLOAD_ROOT, MAX_UPLOAD_FILE_BYTES, UPLOAD_HELP_TEXT
-from segav_core.catalogs import (
-    ASSIGNACION_INSERT_SQL,
-    CARGO_DOCS_ORDER,
-    CARGO_DOCS_RULES,
-    DOC_EMPRESA_MENSUALES,
-    DOC_EMPRESA_REQUERIDOS,
-    DOC_EMPRESA_SUGERIDOS,
-    DOC_OBLIGATORIOS,
-    DOC_TIPO_LABELS,
-    DOCS_MOTOSIERRISTA,
-    DOCS_OPERARIO_MAQUINARIA_FORESTAL,
-    ERP_CLIENT_PARAM_DEFAULTS,
-    ERP_TEMPLATE_PRESETS,
-    ESTADOS_FAENA,
-    MESES_ES,
-    REQ_DOCS_N,
-    SGSST_ESTADOS,
-    SGSST_GRAVEDADES,
-    SGSST_MATRIZ_BASE,
-    SGSST_NORMAS,
-    SGSST_RESULTADOS,
-    SGSST_TIPOS_CAP,
-    SGSST_TIPOS_EVENTO,
-)
-from segav_core.formatters import (
-    clean_rut,
-    format_rut_chileno,
-    human_file_size,
-    make_erp_key,
-    norm_col,
-    normalize_text,
-    periodo_folder_segment,
-    periodo_label,
-    periodo_ym,
-    safe_name,
-    split_nombre_completo,
-)
-from segav_core.ui import inject_css, ui_header, ui_tip
-from segav_core.bootstrap import bootstrap_once as _bootstrap_once
-
 # ----------------------------
 # Config
 # ----------------------------
-st.set_page_config(page_title="SEGAV ERP", layout="wide")
+LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
+if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+    st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
+else:
+    st.set_page_config(page_title="SEGAV ERP", layout="wide")
+
+APP_NAME = "SEGAV ERP"
+DB_PATH = "app.db"
+UPLOAD_ROOT = "uploads"  # En Streamlit Community Cloud: filesystem NO es persistente garantizado entre reboots.
+MAX_UPLOAD_FILE_BYTES = int(1.5 * 1024 * 1024)
+UPLOAD_HELP_TEXT = (
+    "Máximo por archivo: 1,5 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
+    "Si aun así excede el límite, redúcelo antes de subirlo. Sugerencia: puedes comprimirlo en iLovePDF."
+)
 
 
+# Fingerprints/cache helpers
+def _fingerprint(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
+
+PG_DSN_FINGERPRINT = "none"
+# ----------------------------
+# Database backend selector (SQLite local vs Supabase Postgres)
+# ----------------------------
+
+def _get_cfg(name: str, default=None):
+    v = os.environ.get(name)
+    if v is not None and str(v).strip() != "":
+        return v
+    try:
+        if name in st.secrets:
+            return st.secrets.get(name)
+    except Exception:
+        pass
+    return default
+
+def _normalize_pg_dsn(dsn: str) -> str:
+    dsn = (dsn or "").strip().strip("'").strip('\"')
+    if not dsn:
+        return dsn
+    dsn = dsn.replace("\n", "").replace("\r", "")
+    if dsn.startswith("postgres://"):
+        dsn = "postgresql://" + dsn[len("postgres://"):]
+    if "sslmode=" not in dsn:
+        joiner = "&" if "?" in dsn else "?"
+        dsn = dsn + f"{joiner}sslmode=require"
+    if "connect_timeout=" not in dsn:
+        joiner = "&" if "?" in dsn else "?"
+        dsn = dsn + f"{joiner}connect_timeout=10"
+    return dsn
+
+def _build_pg_dsn_from_parts() -> str:
+    host = str(_get_cfg("SUPABASE_DB_HOST", _get_cfg("PGHOST", "")) or "").strip().strip("'").strip('\"')
+    port = str(_get_cfg("SUPABASE_DB_PORT", _get_cfg("PGPORT", "5432")) or "5432").strip()
+    dbname = str(_get_cfg("SUPABASE_DB_NAME", _get_cfg("PGDATABASE", "postgres")) or "postgres").strip().strip("'").strip('\"')
+    user = str(_get_cfg("SUPABASE_DB_USER", _get_cfg("PGUSER", "")) or "").strip().strip("'").strip('\"')
+    password = str(_get_cfg("SUPABASE_DB_PASSWORD", _get_cfg("PGPASSWORD", "")) or "").strip().strip("'").strip('\"')
+    if not (host and user and password):
+        return ""
+    parts = [
+        f"host={host}",
+        f"port={port or '5432'}",
+        f"dbname={dbname or 'postgres'}",
+        f"user={user}",
+        f"password={password}",
+        "sslmode=require",
+        "connect_timeout=10",
+    ]
+    return " ".join(parts)
+
+raw_pg_dsn = _get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", ""))
+PG_DSN = _normalize_pg_dsn(raw_pg_dsn) or _build_pg_dsn_from_parts()
+PG_DSN_FINGERPRINT = _fingerprint(PG_DSN) if PG_DSN else "none"
+DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+
+@st.cache_resource(show_spinner=False)
+def get_http_session():
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_brand_logo_bytes(url: str):
+    if not url:
+        return None
+    try:
+        resp = get_http_session().get(url, timeout=8)
+        if resp.status_code == 200:
+            return resp.content
+    except Exception:
+        return None
+    return None
+
+def storage_safe_segment(value: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    raw = raw.split("/")[-1]
+    raw = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    if "." in raw:
+        stem, ext = raw.rsplit(".", 1)
+        ext = "." + re.sub(r"[^A-Za-z0-9]+", "", ext)[:12]
+    else:
+        stem, ext = raw, ""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "archivo"
+    stem = stem[:120]
+    return f"{stem}{ext}"
+
+def _storage_object_path(folder_parts, file_name: str) -> str:
+    safe_parts = []
+    for part in (folder_parts or []):
+        txt = str(part or "").strip().replace("\\", "/")
+        for chunk in [c for c in txt.split("/") if c]:
+            safe_parts.append(storage_safe_segment(chunk))
+    safe_parts.append(storage_safe_segment(file_name))
+    return "/".join(safe_parts)
+
+def _cacheable_params(params):
+    if params is None:
+        return tuple()
+    if isinstance(params, dict):
+        return tuple(sorted((str(k), _cacheable_params(v)) for k, v in params.items()))
+    if isinstance(params, (list, tuple, set)):
+        return tuple(_cacheable_params(x) for x in params)
+    if isinstance(params, (str, int, float, bool, bytes, type(None))):
+        return params
+    return str(params)
+
+
+def clear_app_caches():
+    try:
+        _cached_fetch_df.clear()
+    except Exception:
+        pass
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_fetch_df(db_backend: str, dsn_fingerprint: str, q: str, params_cache):
+    params = tuple(params_cache) if isinstance(params_cache, tuple) else params_cache
+    if db_backend == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+def _is_select_query(q: str) -> bool:
+    txt = re.sub(r"/\*.*?\*/", " ", q or "", flags=re.S)
+    txt = re.sub(r"--.*?$", " ", txt, flags=re.M).strip().lower()
+    return txt.startswith("select") or txt.startswith("with")
+
+@st.cache_resource(show_spinner=False)
+def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
+    ensure_dirs()
+    init_db()
+    ensure_segav_erp_tables()
+    ensure_segav_erp_seed_data()
+    try:
+        backfill_multiempresa_cliente_key()
+    except Exception:
+        pass
+    try:
+        ensure_user_client_access_table()
+    except Exception:
+        pass
+    return True
+
+def _qmark_to_pct(sql: str) -> str:
+    # Convert SQLite '?' placeholders to psycopg '%s' (only outside single quotes)
+    if "?" not in sql:
+        return sql
+    parts = sql.split("'")
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].replace("?", "%s")
+    return "'".join(parts)
 
 # ----------------------------
 # Supabase Storage (documentos online)
@@ -323,12 +448,38 @@ def storage_delete(object_path: str):
     _storage_set_last_error(resp, url=url, method="storage_delete")
     raise RuntimeError(f"Storage delete failed (HTTP {resp.status_code}): {_storage_error_summary(resp)}")
 
+def human_file_size(num_bytes: int) -> str:
+    size = float(max(int(num_bytes or 0), 0))
+    units = ["B", "KB", "MB", "GB"]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} GB"
 
 
 def render_upload_help():
     st.caption("💡 " + UPLOAD_HELP_TEXT)
 
 
+def periodo_ym(anio: int | None, mes: int | None) -> str:
+    try:
+        return f"{int(anio):04d}-{int(mes):02d}"
+    except Exception:
+        return "SIN_PERIODO"
+
+
+def periodo_label(anio: int | None, mes: int | None) -> str:
+    try:
+        anio_i = int(anio)
+        mes_i = int(mes)
+        return f"{anio_i:04d}-{mes_i:02d} · {MESES_ES.get(mes_i, str(mes_i))}"
+    except Exception:
+        return "SIN PERÍODO"
+
+
+def periodo_folder_segment(anio: int | None, mes: int | None) -> str:
+    return safe_name(periodo_label(anio, mes).replace(" · ", "_"))
 
 
 def pendientes_empresa_faena_periodo(faena_id: int, anio: int, mes: int):
@@ -395,8 +546,9 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
-    local_path = save_file(folder_parts, file_name, file_bytes)
-    object_path = _storage_object_path(folder_parts, file_name)
+    scoped_folder_parts = tenantize_folder_parts(folder_parts)
+    local_path = save_file(scoped_folder_parts, file_name, file_bytes)
+    object_path = _storage_object_path(scoped_folder_parts, file_name)
 
     bucket = STORAGE_BUCKET if storage_admin_enabled() else None
     if storage_admin_enabled():
@@ -449,7 +601,201 @@ def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: s
 
 
 
+ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
+DOC_TIPO_LABELS = {
+    "CONTRATO_TRABAJO": "CONTRATO",
+    "REGISTRO_EPP": "REGISTRO DE EPP",
+    "ENTREGA_RIOHS": "REGISTRO ENTREGA DE RIOHS",
+    "IRL": "IRL",
+    "LICENCIA_CONDUCIR": "LICENCIA DE CONDUCIR",
+    "CEDULA_IDENTIDAD": "CÉDULA DE IDENTIDAD",
+    "CERTIFICACION_CORMA": "CERTIFICACIÓN CORMA",
+    "LIQUIDACIONES_SUELDO_MES": "LIQUIDACIONES DE SUELDO",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30": "CERTIFICADO DE ANTECEDENTES LABORALES F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1": "CERTIFICADO DE CUMPLIMIENTOS LABORALES Y PREVISIONALES F30-1",
+    "CERTIFICADO_ACCIDENTABILIDAD": "CERTIFICADO DE ACCIDENTABILIDAD",
+    "CERTIFICADO_CUMPLIMIENTO_LABORAL": "CERTIFICADO DE CUMPLIMIENTO LABORAL",
+    "CERTIFICADO_ADHESION_A_MUTUALIDAD": "CERTIFICADO DE ADHESIÓN A MUTUALIDAD",
+}
+DOC_OBLIGATORIOS = [
+    "CONTRATO_TRABAJO",
+    "REGISTRO_EPP",
+    "ENTREGA_RIOHS",
+    "IRL",
+]
+DOCS_OPERARIO_MAQUINARIA_FORESTAL = [
+    "LICENCIA_CONDUCIR",
+    "CEDULA_IDENTIDAD",
+]
+DOCS_MOTOSIERRISTA = [
+    "CERTIFICACION_CORMA",
+    "CEDULA_IDENTIDAD",
+]
+CARGO_DOCS_RULES = {
+    "OPERADOR DE MAQUINARIA FORESTAL": DOC_OBLIGATORIOS + DOCS_OPERARIO_MAQUINARIA_FORESTAL,
+    "MOTOSIERRISTA": DOC_OBLIGATORIOS + DOCS_MOTOSIERRISTA,
+    "ESTROBERO": list(DOC_OBLIGATORIOS),
+    "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+    "MECANICO": list(DOC_OBLIGATORIOS),
+    "ASERRADERO": list(DOC_OBLIGATORIOS),
+    "PLANTA": list(DOC_OBLIGATORIOS),
+}
+CARGO_DOCS_ORDER = [
+    "OPERADOR DE MAQUINARIA FORESTAL",
+    "MOTOSIERRISTA",
+    "ESTROBERO",
+    "ADMINISTRATIVO",
+    "MECANICO",
+    "ASERRADERO",
+    "PLANTA",
+]
+DOC_EMPRESA_SUGERIDOS = [
+    "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
+    "CERTIFICADO_ACCIDENTABILIDAD",
+]
+DOC_EMPRESA_REQUERIDOS = [
+    "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
+    "CERTIFICADO_ACCIDENTABILIDAD",
+]
+DOC_EMPRESA_MENSUALES = [
+    "LIQUIDACIONES_SUELDO_MES",
+    "CERTIFICADO_ANTECEDENTES_LABORALES_F30",
+    "CERTIFICADO_CUMPLIMIENTOS_LABORALES_PREVISIONALES_F30_1",
+    "CERTIFICADO_ACCIDENTABILIDAD",
+]
 
+ERP_CLIENT_PARAM_DEFAULTS = {
+    "usa_multi_faena": "SI",
+    "usa_docs_empresa_mensuales": "SI",
+    "usa_miper": "SI",
+    "usa_ds594": "SI",
+    "usa_ley_16744": "SI",
+    "usa_capacitaciones_odi": "SI",
+    "usa_auditoria": "SI",
+    "branding_cliente": "ESTANDAR",
+}
+
+ERP_TEMPLATE_PRESETS = {
+    "GENERAL": {
+        "label": "General",
+        "vertical": "General",
+        "description": "Base comercial multipropósito para servicios, administración y operación documental.",
+        "cargos": ["OPERARIO", "SUPERVISOR", "ADMINISTRATIVO", "MECANICO", "BODEGUERO", "PLANTA"],
+        "cargo_rules": {
+            "OPERARIO": list(DOC_OBLIGATORIOS),
+            "SUPERVISOR": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "BODEGUERO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "FORESTAL": {
+        "label": "Forestal",
+        "vertical": "Forestal",
+        "description": "Plantilla base para faenas forestales, con cargos y documentos obligatorios por rol.",
+        "cargos": list(CARGO_DOCS_ORDER) + ["SUPERVISOR DE FAENA"],
+        "cargo_rules": {
+            **{k: list(dict.fromkeys(v)) for k, v in CARGO_DOCS_RULES.items()},
+            "SUPERVISOR DE FAENA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "CONSTRUCCION": {
+        "label": "Construcción",
+        "vertical": "Construcción",
+        "description": "Plantilla para contratistas y subcontratistas con control de cuadrillas, conducción y documentación mensual.",
+        "cargos": ["OPERARIO", "CAPATAZ", "CONDUCTOR", "MECANICO", "ADMINISTRATIVO", "BODEGUERO", "PLANTA"],
+        "cargo_rules": {
+            "OPERARIO": list(DOC_OBLIGATORIOS),
+            "CAPATAZ": list(DOC_OBLIGATORIOS),
+            "CONDUCTOR": list(dict.fromkeys(DOC_OBLIGATORIOS + ["LICENCIA_CONDUCIR", "CEDULA_IDENTIDAD"])),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "BODEGUERO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "TRANSPORTE": {
+        "label": "Transporte",
+        "vertical": "Transporte",
+        "description": "Plantilla para operación con conductores, mantención y trazabilidad documental por servicio.",
+        "cargos": ["CONDUCTOR", "PEONETA", "MECANICO", "ADMINISTRATIVO", "PLANTA"],
+        "cargo_rules": {
+            "CONDUCTOR": list(dict.fromkeys(DOC_OBLIGATORIOS + ["LICENCIA_CONDUCIR", "CEDULA_IDENTIDAD"])),
+            "PEONETA": list(DOC_OBLIGATORIOS),
+            "MECANICO": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+    "SERVICIOS": {
+        "label": "Servicios",
+        "vertical": "Servicios",
+        "description": "Plantilla para empresas de servicios generales con configuración ligera y adaptable.",
+        "cargos": ["TECNICO", "SUPERVISOR", "ADMINISTRATIVO", "AUXILIAR", "PLANTA"],
+        "cargo_rules": {
+            "TECNICO": list(DOC_OBLIGATORIOS),
+            "SUPERVISOR": list(DOC_OBLIGATORIOS),
+            "ADMINISTRATIVO": list(DOC_OBLIGATORIOS),
+            "AUXILIAR": list(DOC_OBLIGATORIOS),
+            "PLANTA": list(DOC_OBLIGATORIOS),
+        },
+        "empresa_docs": list(DOC_EMPRESA_MENSUALES),
+        "params": dict(ERP_CLIENT_PARAM_DEFAULTS),
+    },
+}
+MESES_ES = {
+    1: "ENERO",
+    2: "FEBRERO",
+    3: "MARZO",
+    4: "ABRIL",
+    5: "MAYO",
+    6: "JUNIO",
+    7: "JULIO",
+    8: "AGOSTO",
+    9: "SEPTIEMBRE",
+    10: "OCTUBRE",
+    11: "NOVIEMBRE",
+    12: "DICIEMBRE",
+}
+REQ_DOCS_N = len(DOC_OBLIGATORIOS)
+
+SGSST_NORMAS = ["DS 44", "Ley 16.744", "DS 594", "Ley Karin", "Interno"]
+SGSST_ESTADOS = ["PENDIENTE", "EN CURSO", "CERRADO", "NO APLICA"]
+SGSST_RESULTADOS = ["CUMPLE", "NO CUMPLE", "OBSERVACIÓN"]
+SGSST_TIPOS_EVENTO = ["INCIDENTE", "ACCIDENTE DEL TRABAJO", "ACCIDENTE DE TRAYECTO", "ENFERMEDAD PROFESIONAL", "HALLAZGO"]
+SGSST_GRAVEDADES = ["BAJA", "MEDIA", "ALTA", "GRAVE/FATAL"]
+SGSST_TIPOS_CAP = ["ODI", "INDUCCIÓN", "CAPACITACIÓN", "CHARLA DE SEGURIDAD", "SIMULACRO"]
+SGSST_MATRIZ_BASE = [
+    {"norma": "DS 44", "articulo": "Sistema de gestión", "tema": "Implementación SGSST", "obligacion": "Mantener un sistema de gestión preventivo con instrumentos y seguimiento.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia / Prevención", "evidencia": "Manual SGSST, registros y seguimiento", "estado": "EN CURSO"},
+    {"norma": "DS 44", "articulo": "MIPER", "tema": "Matriz de riesgos", "obligacion": "Mantener identificación de peligros y evaluación de riesgos por faena, tarea y cargo.", "aplica_a": "Faenas / Cargos", "periodicidad": "Anual o por cambio", "responsable": "Prevención", "evidencia": "MIPER vigente", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Programa preventivo", "tema": "Programa anual", "obligacion": "Planificar actividades preventivas con responsables, plazos y evidencias.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Prevención", "evidencia": "Programa anual y cierres", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Información y capacitación", "tema": "ODI y formación", "obligacion": "Entregar información de riesgos y capacitación preventiva a trabajadores.", "aplica_a": "Trabajadores", "periodicidad": "Ingreso y periódica", "responsable": "Jefaturas / Prevención", "evidencia": "Registros ODI y capacitaciones", "estado": "EN CURSO"},
+    {"norma": "DS 44", "articulo": "Emergencias", "tema": "Plan de emergencia", "obligacion": "Disponer de plan de emergencias, simulacros y responsables.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Faenas", "evidencia": "Plan y registros de simulacro", "estado": "PENDIENTE"},
+    {"norma": "Ley 16.744", "articulo": "Seguro", "tema": "Organismo administrador", "obligacion": "Mantener afiliación y coordinación preventiva con organismo administrador.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia", "evidencia": "Certificado de adhesión", "estado": "EN CURSO"},
+    {"norma": "Ley 16.744", "articulo": "Accidentes y enfermedades", "tema": "Investigación", "obligacion": "Registrar, investigar y gestionar medidas correctivas de incidentes y accidentes.", "aplica_a": "Empresa / Faenas", "periodicidad": "Cada evento", "responsable": "Prevención / Jefatura", "evidencia": "Investigaciones y cierres", "estado": "PENDIENTE"},
+    {"norma": "Ley 16.744", "articulo": "Participación", "tema": "CPHS / Monitoreo dotación", "obligacion": "Monitorear obligación de CPHS según dotación y mantener registros si aplica.", "aplica_a": "Empresa", "periodicidad": "Mensual", "responsable": "Gerencia", "evidencia": "Actas / control de dotación", "estado": "EN CURSO"},
+    {"norma": "DS 594", "articulo": "Condiciones sanitarias", "tema": "Agua y servicios higiénicos", "obligacion": "Verificar agua potable, higiene, orden y aseo en lugares de trabajo.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Faena", "evidencia": "Checklist DS 594", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Condiciones ambientales", "tema": "Señalización, extintores y ambiente", "obligacion": "Controlar señalización, extintores, vías de circulación y condiciones ambientales.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Mantención", "evidencia": "Inspecciones y acciones", "estado": "PENDIENTE"},
+]
+
+ASSIGNACION_INSERT_SQL = """
+INSERT INTO asignaciones(cliente_key, faena_id, trabajador_id, cargo_faena, fecha_ingreso, fecha_egreso, estado)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT DO NOTHING
+"""
 
 # ----------------------------
 # Helpers
@@ -462,6 +808,17 @@ def doc_tipo_join(values) -> str:
     return ", ".join(doc_tipo_label(v) for v in values)
 
 
+def normalize_text(value) -> str:
+    s = str(value or "")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.strip().lower()
+
+
+def make_erp_key(value: str, prefix: str = "") -> str:
+    base = normalize_text(value)
+    base = re.sub(r"[^a-z0-9]+", "_", base).strip("_") or "item"
+    return f"{prefix}{base}" if prefix else base
 
 
 def canonical_cargo_label(cargo: str | None) -> str:
@@ -526,16 +883,149 @@ def cargo_docs_catalog_rows():
     return rows
 
 
+def inject_css():
+    st.markdown(
+        """
+        <style>
+        .block-container {padding-top: 1rem; padding-bottom: 2rem;}
+        /* Metric cards */
+        div[data-testid="stMetric"]{
+            padding: 14px 14px 10px 14px;
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 16px;
+        }
+        /* Dataframes */
+        div[data-testid="stDataFrame"]{
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+        /* Expander */
+        details[data-testid="stExpander"]{
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 14px;
+            padding: 6px 10px;
+        }
+        
+/* Buttons */
+div.stButton > button {
+    border-radius: 14px !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+}
+/* Sidebar spacing */
+section[data-testid="stSidebar"] .block-container {padding-top: 1rem;}
 
+        
+/* iOS-like look & feel */
+html, body, [class*="css"]  {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+section[data-testid="stSidebar"] { border-right: 1px solid rgba(49,51,63,0.12); }
+section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+
+/* Cards */
+.gyd-card {
+    background: rgba(255,255,255,0.72);
+    border: 1px solid rgba(49,51,63,0.10);
+    border-radius: 18px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    margin-bottom: 12px;
+}
+.gyd-muted { opacity: 0.75; }
+
+/* Buttons */
+div.stButton > button, div.stDownloadButton > button {
+    border-radius: 16px !important;
+    padding: 0.62rem 0.9rem !important;
+}
+
+/* Tabs */
+button[data-baseweb="tab"] {
+    border-radius: 14px;
+    margin-right: 6px;
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+/* Dataframe container */
+[data-testid="stDataFrame"] {
+    border-radius: 16px;
+    border: 1px solid rgba(49,51,63,0.10);
+    overflow: hidden;
+}
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    border: 1px solid rgba(49,51,63,0.10);
+    border-radius: 16px;
+    padding: 10px 12px;
+}
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def ui_header(title: str, desc: str = ""):
+    st.markdown(
+        f"""
+        <div class="gyd-card">
+            <div style="font-size:1.35rem; font-weight:700; line-height:1.25;">{title}</div>
+            {f'<div class="gyd-muted" style="margin-top:6px;">{desc}</div>' if desc else ''}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def ui_tip(text: str):
+    st.info(text, icon="ℹ️")
+
+def safe_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_") or "item"
+
+
+
+def fetch_df_uncached(q: str, params=()):
+    """SELECT sin cache para flujos que deben reflejar cambios inmediatamente."""
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+
+def fetch_row(q: str, params=(), fresh: bool = False):
+    df = fetch_df_uncached(q, params) if fresh else fetch_df(q, params)
+    if df is None or df.empty:
+        return None
+    return df.iloc[0]
+
+
+def fetch_value(q: str, params=(), default=None, fresh: bool = False):
+    row = fetch_row(q, params=params, fresh=fresh)
+    if row is None:
+        return default
+    try:
+        return row.iloc[0]
+    except Exception:
+        try:
+            return row[0]
+        except Exception:
+            return default
 
 
 def fetch_assigned_workers(faena_id: int, fresh: bool = True):
-    """Devuelve trabajadores asignados a una faena.
-
-    Usa lectura sin cache por defecto para evitar que Documentos Trabajador
-    muestre una lista antigua justo después de asignar personal.
-    Tolera estados NULL/vacíos/minúsculas y solo excluye asignaciones cerradas.
-    """
+    """Devuelve trabajadores asignados a una faena para la empresa activa."""
+    tenant_key = current_tenant_key()
     q = '''
         SELECT DISTINCT
                t.id,
@@ -547,30 +1037,35 @@ def fetch_assigned_workers(faena_id: int, fresh: bool = True):
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
+          AND COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
           AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
         ORDER BY t.apellidos, t.nombres, t.id
     '''
     reader = fetch_df_uncached if fresh else fetch_df
-    return reader(q, (int(faena_id),))
+    return reader(q, (int(faena_id), tenant_key, tenant_key))
+
 
 def get_global_counts():
-    """Devuelve conteos básicos para UI (tolerante a tablas vacías)."""
+    """Devuelve conteos básicos filtrados por empresa activa."""
+    tenant_key = current_tenant_key()
     try:
         row = fetch_df(
             """
             SELECT
-                (SELECT COUNT(*) FROM mandantes) AS mandantes,
-                (SELECT COUNT(*) FROM contratos_faena) AS contratos_faena,
-                (SELECT COUNT(*) FROM faenas) AS faenas,
-                (SELECT COUNT(*) FROM faenas WHERE estado='ACTIVA') AS faenas_activas,
-                (SELECT COUNT(*) FROM trabajadores) AS trabajadores,
-                (SELECT COUNT(*) FROM asignaciones) AS asignaciones,
-                (SELECT COUNT(*) FROM trabajador_documentos) AS docs,
-                (SELECT COUNT(*) FROM empresa_documentos) AS docs_empresa,
-                (SELECT COUNT(*) FROM faena_empresa_documentos) AS docs_empresa_faena,
-                (SELECT COUNT(*) FROM export_historial) AS exports,
-                (SELECT COUNT(*) FROM export_historial_mes) AS exports_mes
-            """
+                (SELECT COUNT(*) FROM mandantes WHERE COALESCE(cliente_key,'')=?) AS mandantes,
+                (SELECT COUNT(*) FROM contratos_faena WHERE COALESCE(cliente_key,'')=?) AS contratos_faena,
+                (SELECT COUNT(*) FROM faenas WHERE COALESCE(cliente_key,'')=?) AS faenas,
+                (SELECT COUNT(*) FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA') AS faenas_activas,
+                (SELECT COUNT(*) FROM trabajadores WHERE COALESCE(cliente_key,'')=?) AS trabajadores,
+                (SELECT COUNT(*) FROM asignaciones WHERE COALESCE(cliente_key,'')=?) AS asignaciones,
+                (SELECT COUNT(*) FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?) AS docs,
+                (SELECT COUNT(*) FROM empresa_documentos WHERE COALESCE(cliente_key,'')=?) AS docs_empresa,
+                (SELECT COUNT(*) FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=?) AS docs_empresa_faena,
+                (SELECT COUNT(*) FROM export_historial WHERE COALESCE(cliente_key,'')=?) AS exports,
+                (SELECT COUNT(*) FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?) AS exports_mes
+            """,
+            (tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key),
         )
         if row.empty:
             return {}
@@ -578,26 +1073,57 @@ def get_global_counts():
     except Exception:
         out = {}
         pairs = [
-            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes"),
-            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena"),
-            ("faenas", "SELECT COUNT(*) AS n FROM faenas"),
-            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE estado='ACTIVA'"),
-            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores"),
-            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones"),
-            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos"),
-            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos"),
-            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos"),
-            ("exports", "SELECT COUNT(*) AS n FROM export_historial"),
-            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes"),
+            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes WHERE COALESCE(cliente_key,'')=?"),
+            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA'"),
+            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores WHERE COALESCE(cliente_key,'')=?"),
+            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones WHERE COALESCE(cliente_key,'')=?"),
+            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("exports", "SELECT COUNT(*) AS n FROM export_historial WHERE COALESCE(cliente_key,'')=?"),
+            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?"),
         ]
         for key, sql in pairs:
             try:
-                out[key] = int(fetch_df(sql)["n"].iloc[0])
+                out[key] = int(fetch_df(sql, (tenant_key,))["n"].iloc[0])
             except Exception:
                 out[key] = 0
         return out
 
 
+def norm_col(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ñ","n")
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+def _rut_parts(rut: str):
+    raw = str(rut or "").strip().upper()
+    raw = re.sub(r"[^0-9K]", "", raw)
+    if not raw:
+        return "", ""
+    if len(raw) == 1:
+        return "", raw
+    body = raw[:-1].lstrip("0") or "0"
+    dv = raw[-1]
+    return body, dv
+
+
+def format_rut_chileno(rut: str) -> str:
+    body, dv = _rut_parts(rut)
+    if not body and not dv:
+        return ""
+    if not body:
+        return dv
+    rev = body[::-1]
+    grouped_rev = ".".join(rev[i:i+3] for i in range(0, len(rev), 3))
+    return f"{grouped_rev[::-1]}-{dv}"
+
+
+def clean_rut(rut: str) -> str:
+    return format_rut_chileno(rut)
 
 
 def _format_rut_session_value(key: str):
@@ -687,7 +1213,24 @@ def build_trabajadores_template_xlsx() -> bytes:
         instrucciones.to_excel(writer, sheet_name="Instrucciones", index=False)
     return out.getvalue()
 
-
+def split_nombre_completo(nombre: str):
+    nombre = (nombre or "").strip()
+    if not nombre:
+        return "", ""
+    toks = [t for t in re.split(r"\s+", nombre) if t]
+    if len(toks) >= 4:
+        apellidos = " ".join(toks[-2:])
+        nombres = " ".join(toks[:-2])
+    elif len(toks) == 3:
+        apellidos = toks[-1]
+        nombres = " ".join(toks[:-1])
+    elif len(toks) == 2:
+        apellidos = toks[-1]
+        nombres = toks[0]
+    else:
+        apellidos = ""
+        nombres = toks[0]
+    return nombres.strip(), apellidos.strip()
 
 def sha256_bytes(data: bytes) -> str:
     h = hashlib.sha256()
@@ -699,6 +1242,62 @@ def ensure_dirs():
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
+@st.cache_resource(show_spinner=False)
+def get_pg_pool(dsn: str):
+    if not dsn or psycopg is None or ConnectionPool is None:
+        return None
+    try:
+        pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=1,
+            max_size=8,
+            kwargs={"prepare_threshold": None},
+            timeout=10,
+        )
+        pool.wait(timeout=10)
+        return pool
+    except Exception:
+        return None
+
+def conn():
+    # Postgres (Supabase) if configured; otherwise SQLite local.
+    if DB_BACKEND == "postgres":
+        if psycopg is None:
+            raise RuntimeError("psycopg no está instalado, pero DB_BACKEND=postgres.")
+        if not PG_DSN:
+            raise RuntimeError("Falta SUPABASE_DB_URL (o PG_DSN) en Secrets/ENV.")
+        try:
+            pool = get_pg_pool(PG_DSN)
+            if pool is not None:
+                return pool.connection()
+            return psycopg.connect(PG_DSN, prepare_threshold=None)
+        except Exception as e:
+            msg = str(e).strip() or e.__class__.__name__
+            raise RuntimeError(
+                "No se pudo conectar a Postgres/Supabase. "
+                f"Detalle: {msg}. "
+                "Revisa SUPABASE_DB_URL o usa secretos separados SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_NAME, SUPABASE_DB_USER y SUPABASE_DB_PASSWORD."
+            ) from e
+    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    try:
+        c.execute("PRAGMA foreign_keys = ON;")
+    except Exception:
+        pass
+    return c
+
+def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
+    if DB_BACKEND == "postgres":
+        return
+    info = c.execute(f"PRAGMA table_info({table});").fetchall()
+    existing = {row[1] for row in info}
+    for col, coltype in cols_sql.items():
+        if col not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
+
+def cursor_execute(cur, q: str, params=()):
+    if DB_BACKEND == "postgres":
+        q = _qmark_to_pct(q).replace("datetime('now')", "now()")
+    return cur.execute(q, params)
 
 
 def ensure_core_tables_postgres():
@@ -886,6 +1485,7 @@ def init_db():
         ensure_core_tables_postgres()
         ensure_sgsst_tables_postgres()
         ensure_storage_columns_postgres()
+        ensure_multiempresa_columns_postgres()
         sync_postgres_core_sequences()
         ensure_sgsst_seed_data()
         return
@@ -1059,6 +1659,7 @@ def init_db():
 
         ensure_storage_columns_sqlite(c)
         ensure_sgsst_tables_sqlite(c)
+        ensure_multiempresa_columns_sqlite(c)
         c.commit()
     ensure_sgsst_seed_data()
 
@@ -1368,50 +1969,37 @@ def ensure_sgsst_tables_sqlite(c):
 
 def ensure_sgsst_seed_data():
     try:
-        if int(fetch_value("SELECT COUNT(*) FROM sgsst_empresa", default=0) or 0) == 0:
+        tenant_key = current_tenant_key()
+        if int(fetch_value("SELECT COUNT(*) FROM sgsst_empresa WHERE COALESCE(cliente_key,'')=?", (tenant_key,), default=0) or 0) == 0:
             execute(
                 """
-                INSERT INTO sgsst_empresa(razon_social, rut, direccion, actividad, organismo_admin, representantes, prevencionista, canal_denuncias, dotacion_total, politica_version, politica_fecha, observaciones, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO sgsst_empresa(cliente_key, razon_social, rut, direccion, actividad, organismo_admin, representantes, prevencionista, canal_denuncias, dotacion_total, politica_version, politica_fecha, observaciones, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    "Empresa demo",
-                    "",
-                    "",
-                    "General",
-                    "Organismo administrador",
-                    "",
-                    "",
-                    "",
-                    0,
-                    "1.0",
-                    date.today().isoformat(),
-                    "Base inicial de SEGAV ERP / SGSST configurable para cualquier empresa.",
-                    datetime.now().isoformat(timespec='seconds'),
-                    datetime.now().isoformat(timespec='seconds'),
+                    tenant_key,
+                    segav_erp_value('cliente_actual', 'Empresa demo') if 'segav_erp_value' in globals() else 'Empresa demo',
+                    '', '',
+                    segav_erp_value('erp_vertical', 'General') if 'segav_erp_value' in globals() else 'General',
+                    'Organismo administrador', '', '', '', 0, '1.0', date.today().isoformat(),
+                    'Base inicial de SEGAV ERP / SGSST configurable para cualquier empresa.',
+                    datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds'),
                 ),
             )
-        existing = fetch_df("SELECT norma, tema, obligacion FROM sgsst_matriz_legal")
+        existing = fetch_df("SELECT norma, tema, obligacion FROM sgsst_matriz_legal WHERE COALESCE(cliente_key,'')=?", (tenant_key,))
         existing_keys = set()
         if existing is not None and not existing.empty:
-            existing_keys = set(
-                (str(r[0] or ""), str(r[1] or ""), str(r[2] or ""))
-                for r in existing[["norma", "tema", "obligacion"]].itertuples(index=False, name=None)
-            )
+            existing_keys = set((str(r[0] or ''), str(r[1] or ''), str(r[2] or '')) for r in existing[["norma", "tema", "obligacion"]].itertuples(index=False, name=None))
         for item in SGSST_MATRIZ_BASE:
-            key = (item["norma"], item["tema"], item["obligacion"])
+            key = (item['norma'], item['tema'], item['obligacion'])
             if key in existing_keys:
                 continue
             execute(
                 """
-                INSERT INTO sgsst_matriz_legal(norma, articulo, tema, obligacion, aplica_a, periodicidad, responsable, evidencia, estado, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO sgsst_matriz_legal(cliente_key, norma, articulo, tema, obligacion, aplica_a, periodicidad, responsable, evidencia, estado, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (
-                    item.get("norma"), item.get("articulo"), item.get("tema"), item.get("obligacion"), item.get("aplica_a"),
-                    item.get("periodicidad"), item.get("responsable"), item.get("evidencia"), item.get("estado"),
-                    datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds'),
-                ),
+                (tenant_key, item.get('norma'), item.get('articulo'), item.get('tema'), item.get('obligacion'), item.get('aplica_a'), item.get('periodicidad'), item.get('responsable'), item.get('evidencia'), item.get('estado'), datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds')),
             )
     except Exception:
         pass
@@ -1701,7 +2289,84 @@ def segav_clientes_df():
 
 
 def current_segav_client_key() -> str:
+    session_key = str(st.session_state.get('active_cliente_key') or '').strip()
+    if session_key:
+        return session_key
     return segav_erp_value('current_client_key', '')
+
+
+def current_tenant_key() -> str:
+    key = str(current_segav_client_key() or '').strip()
+    if key:
+        return key
+    try:
+        cli_df = segav_clientes_df()
+        if cli_df is not None and not cli_df.empty:
+            active_df = cli_df
+            if 'activo' in active_df.columns:
+                active_df = active_df[active_df['activo'].fillna(1).astype(int) == 1]
+            if not active_df.empty:
+                key = str(active_df.iloc[0].get('cliente_key') or '').strip()
+                if key:
+                    return key
+    except Exception:
+        pass
+    return ''
+
+
+def tenantize_folder_parts(folder_parts):
+    parts = list(folder_parts or [])
+    tkey = current_tenant_key()
+    if not tkey:
+        return parts
+    return ['clientes', storage_safe_segment(tkey), *parts]
+
+
+MULTIEMPRESA_TABLES = [
+    'mandantes', 'contratos_faena', 'faenas', 'faena_anexos', 'trabajadores', 'asignaciones',
+    'trabajador_documentos', 'empresa_documentos', 'faena_empresa_documentos', 'export_historial',
+    'export_historial_mes', 'sgsst_empresa', 'sgsst_matriz_legal', 'sgsst_programa_anual',
+    'sgsst_miper', 'sgsst_inspecciones', 'sgsst_incidentes', 'sgsst_capacitaciones', 'sgsst_auditoria',
+]
+
+
+def ensure_multiempresa_columns_postgres():
+    if DB_BACKEND != 'postgres':
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            execute(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS cliente_key TEXT;")
+        except Exception:
+            pass
+
+
+def ensure_multiempresa_columns_sqlite(c):
+    if DB_BACKEND == 'postgres':
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            migrate_add_columns_if_missing(c, table, {'cliente_key': 'TEXT'})
+        except Exception:
+            pass
+
+
+def backfill_multiempresa_cliente_key():
+    tkey = current_tenant_key()
+    if not tkey:
+        return
+    for table in MULTIEMPRESA_TABLES:
+        try:
+            execute(f"UPDATE {table} SET cliente_key=? WHERE cliente_key IS NULL OR TRIM(cliente_key)=''", (tkey,))
+        except Exception:
+            pass
+
+
+def ensure_active_tenant_scaffold():
+    backfill_multiempresa_cliente_key()
+    try:
+        ensure_sgsst_seed_data()
+    except Exception:
+        pass
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1775,8 +2440,8 @@ def sgsst_log(modulo: str, accion: str, detalle: str = ""):
         user = "sistema"
     try:
         execute(
-            "INSERT INTO sgsst_auditoria(modulo, accion, detalle, usuario, created_at) VALUES(?,?,?,?,?)",
-            (modulo, accion, detalle, user, datetime.now().isoformat(timespec='seconds')),
+            "INSERT INTO sgsst_auditoria(cliente_key, modulo, accion, detalle, usuario, created_at) VALUES(?,?,?,?,?,?)",
+            (current_tenant_key(), modulo, accion, detalle, user, datetime.now().isoformat(timespec='seconds')),
         )
     except Exception:
         pass
@@ -1790,6 +2455,12 @@ LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-made
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_login_logo_bytes():
+    if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+        try:
+            with open(LOCAL_BRAND_LOGO_PATH, "rb") as fp:
+                return fp.read()
+        except Exception:
+            pass
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 def render_brand_logo(width: int = 220):
@@ -1994,13 +2665,13 @@ def sync_postgres_core_sequences():
 
 
 def _trabajador_get_id(cur_or_conn, rut: str):
-    row = cursor_execute(cur_or_conn, "SELECT id FROM trabajadores WHERE rut=? ORDER BY id LIMIT 1", (rut,)).fetchone()
+    row = cursor_execute(cur_or_conn, "SELECT id FROM trabajadores WHERE rut=? AND COALESCE(cliente_key,'')=? ORDER BY id LIMIT 1", (rut, current_tenant_key())).fetchone()
     return int(row[0]) if row else None
 
 
 def _trabajador_insert_or_update(cur_or_conn, *, rut: str, nombres: str, apellidos: str, cargo: str = "", centro_costo: str = "", email: str = "", fecha_contrato=None, vigencia_examen=None, overwrite: bool = True, existing_id=None):
-    """Inserta/actualiza trabajadores sin depender de una secuencia sana en Postgres."""
     rut = clean_rut(rut)
+    tenant_key = current_tenant_key()
     existing_id = int(existing_id) if existing_id not in (None, "") else None
     if existing_id is None:
         existing_id = _trabajador_get_id(cur_or_conn, rut)
@@ -2009,56 +2680,26 @@ def _trabajador_insert_or_update(cur_or_conn, *, rut: str, nombres: str, apellid
 
     if existing_id is not None:
         if overwrite:
-            cursor_execute(
-                cur_or_conn,
-                """
-                UPDATE trabajadores
-                   SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                 WHERE id=?
-                """,
-                (*payload, int(existing_id)),
-            )
-            return "updated", int(existing_id)
-        return "skipped", int(existing_id)
+            cursor_execute(cur_or_conn, "UPDATE trabajadores SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=? AND COALESCE(cliente_key,'')=?", (*payload, int(existing_id), tenant_key))
+            return 'updated', int(existing_id)
+        return 'skipped', int(existing_id)
 
-    if DB_BACKEND == "postgres":
+    if DB_BACKEND == 'postgres':
         cursor_execute(cur_or_conn, "SELECT pg_advisory_xact_lock(hashtext('trabajadores_manual_id_insert'));")
         existing_id = _trabajador_get_id(cur_or_conn, rut)
         if existing_id is not None:
             if overwrite:
-                cursor_execute(
-                    cur_or_conn,
-                    """
-                    UPDATE trabajadores
-                       SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=?
-                     WHERE id=?
-                    """,
-                    (*payload, int(existing_id)),
-                )
-                return "updated", int(existing_id)
-            return "skipped", int(existing_id)
+                cursor_execute(cur_or_conn, "UPDATE trabajadores SET nombres=?, apellidos=?, cargo=?, centro_costo=?, email=?, fecha_contrato=?, vigencia_examen=? WHERE id=? AND COALESCE(cliente_key,'')=?", (*payload, int(existing_id), tenant_key))
+                return 'updated', int(existing_id)
+            return 'skipped', int(existing_id)
         row = cursor_execute(cur_or_conn, "SELECT COALESCE(MAX(id), 0) + 1 FROM trabajadores").fetchone()
         next_id = int(row[0]) if row and row[0] is not None else 1
-        cursor_execute(
-            cur_or_conn,
-            """
-            INSERT INTO trabajadores(id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-            VALUES(?,?,?,?,?,?,?,?,?)
-            """,
-            (next_id, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-        )
-        return "inserted", next_id
+        cursor_execute(cur_or_conn, "INSERT INTO trabajadores(id, cliente_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen) VALUES(?,?,?,?,?,?,?,?,?,?)", (next_id, tenant_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen))
+        return 'inserted', next_id
 
-    cursor_execute(
-        cur_or_conn,
-        """
-        INSERT INTO trabajadores(rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen)
-        VALUES(?,?,?,?,?,?,?,?)
-        """,
-        (rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen),
-    )
+    cursor_execute(cur_or_conn, "INSERT INTO trabajadores(cliente_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen) VALUES(?,?,?,?,?,?,?,?,?)", (tenant_key, rut, nombres, apellidos, cargo, centro_costo, email, fecha_contrato, vigencia_examen))
     new_id = _trabajador_get_id(cur_or_conn, rut)
-    return "inserted", int(new_id) if new_id is not None else None
+    return 'inserted', int(new_id) if new_id is not None else None
 
 
 def ensure_storage_columns_sqlite(c):
@@ -2151,6 +2792,113 @@ def require_perm(perm: str):
         st.error("No tienes permisos para acceder a esta sección.")
         st.stop()
 
+
+def is_superadmin() -> bool:
+    u = current_user()
+    if not u:
+        return False
+    return str(u.get("role") or "").upper() == "SUPERADMIN"
+
+
+def ensure_user_client_access_table():
+    if DB_BACKEND == "postgres":
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_client_access (
+                user_id BIGINT NOT NULL,
+                cliente_key TEXT NOT NULL,
+                is_company_admin BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (user_id, cliente_key)
+            );
+            """
+        )
+        execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
+        execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
+        return
+    execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_client_access (
+            user_id INTEGER NOT NULL,
+            cliente_key TEXT NOT NULL,
+            is_company_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, cliente_key)
+        );
+        """
+    )
+    execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
+    execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_user_client_access_table_once(_db_backend: str, _dsn_fingerprint: str):
+    ensure_user_client_access_table()
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_active_tenant_scaffold_once(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    ensure_active_tenant_scaffold()
+    return True
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    tkey = str(tenant_key or '').strip()
+    try:
+        if tkey:
+            return fetch_df(
+                """
+                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+                FROM faenas f
+                JOIN mandantes m ON m.id=f.mandante_id
+                WHERE COALESCE(f.cliente_key,'')=?
+                ORDER BY f.id DESC
+                """,
+                (tkey,),
+            )
+        return fetch_df(
+            """
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+            """
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def visible_clientes_df():
+    try:
+        ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    except Exception:
+        pass
+    df = segav_clientes_df()
+    if df is None or df.empty:
+        return df
+    if "activo" in df.columns:
+        df = df[df["activo"].fillna(1).astype(int) == 1]
+    if is_superadmin():
+        return df
+    u = current_user() or {}
+    user_id = int(u.get("id") or 0)
+    if user_id <= 0:
+        return df
+    try:
+        acc_df = fetch_df("SELECT cliente_key FROM user_client_access WHERE user_id=?", (user_id,))
+        if acc_df is None or acc_df.empty:
+            return df
+        allowed = set(acc_df["cliente_key"].astype(str).tolist())
+        if not allowed:
+            return df.iloc[0:0]
+        return df[df["cliente_key"].astype(str).isin(allowed)]
+    except Exception:
+        return df
+
+
 def auth_gate_ui():
     """Pantalla de inicio: login con roles. Si la base está vacía, crea ADMIN por defecto."""
 
@@ -2233,7 +2981,62 @@ def auth_gate_ui():
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
+def fetch_df(q: str, params=()):
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
 
+def execute(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
+    with conn() as c:
+        c.execute(q, params)
+        c.commit()
+
+def execute_rowcount(q: str, params=()):
+    # Igual que execute(), pero devuelve rowcount (útil para UPDATE condicional)
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def executemany(q: str, seq_params):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
+            c.commit()
+            return
+    with conn() as c:
+        c.executemany(q, seq_params)
+        c.commit()
 
 def _safe_path_parts(parts):
     safe = []
@@ -2385,22 +3188,25 @@ def validate_faena_dates(inicio: date, termino, estado: str):
     return errors
 
 def pendientes_obligatorios(faena_id: int):
+    tenant_key = current_tenant_key()
     asign = fetch_df('''
         SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos, t.cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
         WHERE a.faena_id=?
+          AND COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
           AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
         ORDER BY t.apellidos, t.nombres
-    ''', (faena_id,))
+    ''', (faena_id, tenant_key, tenant_key))
     out = {}
     if asign.empty:
         return out
 
     ids = asign["trabajador_id"].astype(int).tolist()
     docs_all = fetch_df(
-        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
-        tuple(ids),
+        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=? AND trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
+        (tenant_key, *tuple(ids)),
     )
 
     docs_map = {}
@@ -2420,7 +3226,8 @@ def pendientes_obligatorios(faena_id: int):
 
 def pendientes_empresa_faena(faena_id: int):
     """Lista de documentos de empresa requeridos faltantes para una faena."""
-    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
+    tenant_key = current_tenant_key()
+    df = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=?", (int(faena_id), tenant_key))
     present = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     missing = [d for d in get_empresa_required_doc_types() if d not in present]
     return missing
@@ -2428,14 +3235,16 @@ def pendientes_empresa_faena(faena_id: int):
 
 
 def faena_progress_table():
+    tenant_key = current_tenant_key()
 
     faenas = fetch_df("""
         SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
                m.nombre AS mandante
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
+        WHERE COALESCE(f.cliente_key,'')=?
         ORDER BY f.id DESC
-    """)
+    """, (tenant_key,))
     if faenas.empty:
         return faenas
 
@@ -2444,58 +3253,50 @@ def faena_progress_table():
         SELECT a.faena_id, a.trabajador_id, COALESCE(t.cargo,'') AS cargo
         FROM asignaciones a
         JOIN trabajadores t ON t.id=a.trabajador_id
-        WHERE COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-        """
+        WHERE COALESCE(a.cliente_key,'')=?
+          AND COALESCE(t.cliente_key,'')=?
+          AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
+        """,
+        (tenant_key, tenant_key),
     )
     if asg.empty:
-        faenas["trabajadores"] = 0
-        faenas["trab_ok"] = 0
-        faenas["cobertura_docs_pct"] = 0.0
-        faenas["faltantes_total"] = 0
+        faenas['trabajadores'] = 0
+        faenas['trab_ok'] = 0
+        faenas['cobertura_docs_pct'] = 0.0
+        faenas['faltantes_total'] = 0
         return faenas
 
-    ids = asg["trabajador_id"].astype(int).unique().tolist()
+    ids = asg['trabajador_id'].astype(int).unique().tolist()
     docs_all = fetch_df(
-        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
-        tuple(ids),
-    ) if ids else pd.DataFrame(columns=["trabajador_id", "doc_tipo"])
+        "SELECT trabajador_id, doc_tipo FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=? AND trabajador_id IN (%s)" % ",".join(["?"]*len(ids)),
+        (tenant_key, *tuple(ids)),
+    ) if ids else pd.DataFrame(columns=['trabajador_id', 'doc_tipo'])
 
     docs_map = {}
     if not docs_all.empty:
-        for tid, grp in docs_all.groupby("trabajador_id"):
-            docs_map[int(tid)] = set(grp["doc_tipo"].astype(str).tolist())
+        for tid, grp in docs_all.groupby('trabajador_id'):
+            docs_map[int(tid)] = set(grp['doc_tipo'].astype(str).tolist())
 
     rows = []
     for _, r in asg.iterrows():
-        tid = int(r["trabajador_id"])
+        tid = int(r['trabajador_id'])
         req_docs = worker_required_docs_for_record(r)
         have = docs_map.get(tid, set())
         req_docs_present = sum(1 for d in req_docs if d in have)
-        rows.append({
-            "faena_id": int(r["faena_id"]),
-            "trabajador_id": tid,
-            "req_docs_present": req_docs_present,
-            "req_docs_total": len(req_docs),
-            "worker_ok": int(req_docs_present >= len(req_docs)),
-        })
+        rows.append({'faena_id': int(r['faena_id']), 'trabajador_id': tid, 'req_docs_present': req_docs_present, 'req_docs_total': len(req_docs), 'worker_ok': int(req_docs_present >= len(req_docs))})
 
     stats = pd.DataFrame(rows)
-    agg = stats.groupby("faena_id").agg(
-        trabajadores=("trabajador_id", "nunique"),
-        trab_ok=("worker_ok", "sum"),
-        req_docs_sum=("req_docs_present", "sum"),
-        req_docs_total=("req_docs_total", "sum"),
-    ).reset_index()
+    agg = stats.groupby('faena_id').agg(trabajadores=('trabajador_id', 'nunique'), trab_ok=('worker_ok', 'sum'), req_docs_sum=('req_docs_present', 'sum'), req_docs_total=('req_docs_total', 'sum')).reset_index()
+    agg['faltantes_total'] = agg['req_docs_total'] - agg['req_docs_sum']
+    agg['cobertura_docs_pct'] = (agg['req_docs_sum'] / agg['req_docs_total']).where(agg['req_docs_total'] > 0, 0.0) * 100.0
 
-    agg["faltantes_total"] = agg["req_docs_total"] - agg["req_docs_sum"]
-    agg["cobertura_docs_pct"] = (agg["req_docs_sum"] / agg["req_docs_total"]).where(agg["req_docs_total"] > 0, 0.0) * 100.0
-
-    out = faenas.merge(agg, how="left", on="faena_id")
-    out["trabajadores"] = out["trabajadores"].fillna(0).astype(int)
-    out["trab_ok"] = out["trab_ok"].fillna(0).astype(int)
-    out["faltantes_total"] = out["faltantes_total"].fillna(0).astype(int)
-    out["cobertura_docs_pct"] = out["cobertura_docs_pct"].fillna(0.0).astype(float)
+    out = faenas.merge(agg, how='left', on='faena_id')
+    out['trabajadores'] = out['trabajadores'].fillna(0).astype(int)
+    out['trab_ok'] = out['trab_ok'].fillna(0).astype(int)
+    out['faltantes_total'] = out['faltantes_total'].fillna(0).astype(int)
+    out['cobertura_docs_pct'] = out['cobertura_docs_pct'].fillna(0.0).astype(float)
     return out
+
 
 def parse_date_maybe(s):
     if s is None:
@@ -2538,8 +3339,8 @@ def export_zip_for_faena(
         FROM faenas f
         JOIN mandantes m ON m.id=f.mandante_id
         LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-        WHERE f.id = ?
-    ''', (faena_id,))
+        WHERE f.id = ? AND COALESCE(f.cliente_key,'')=?
+    ''', (faena_id, current_tenant_key()))
     if faena.empty:
         raise ValueError("Faena no encontrada.")
     f = faena.iloc[0]
@@ -2604,7 +3405,7 @@ def export_zip_for_faena(
 
     # 01_Anexos_Faena
     if include_anexos:
-        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (faena_id,))
+        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (faena_id, current_tenant_key()))
         for _, a in anexos.iterrows():
             b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
             if b:
@@ -2613,7 +3414,7 @@ def export_zip_for_faena(
 
     # 02_Documentos_Empresa (global)
     if include_global_empresa_docs:
-        edocs = fetch_df("SELECT * FROM empresa_documentos ORDER BY id")
+        edocs = fetch_df("SELECT * FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? ORDER BY id", (current_tenant_key(),))
         for _, d in edocs.iterrows():
             if _set_emp_glob is not None and str(d.get("doc_tipo", "")) not in _set_emp_glob:
                 continue
@@ -2647,9 +3448,11 @@ def export_zip_for_faena(
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(a.cliente_key,'')=?
+              AND COALESCE(t.cliente_key,'')=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
-        ''', (faena_id,))
+        ''', (faena_id, current_tenant_key(), current_tenant_key()))
         for _, r in asign.iterrows():
             tid = int(r["trabajador_id"])
             if _set_trab_ids is not None and tid not in _set_trab_ids:
@@ -2657,7 +3460,7 @@ def export_zip_for_faena(
             tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
             selected_doc_ids = _trab_doc_map.get(tid, None)
 
-            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
+            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (tid, current_tenant_key()))
             for _, d in tdocs.iterrows():
                 did = int(d["id"])
                 if selected_doc_ids is not None:
@@ -2682,8 +3485,8 @@ def persist_export_mes(year_month: str, zip_bytes: bytes):
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial_mes(year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (str(year_month), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial_mes(cliente_key, year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (current_tenant_key(), str(year_month), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -2694,10 +3497,10 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
         '''
         SELECT f.id, f.nombre, f.estado, f.fecha_inicio, m.nombre AS mandante
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        WHERE substr(f.fecha_inicio,1,7)=?
+        WHERE COALESCE(f.cliente_key,'')=? AND substr(f.fecha_inicio,1,7)=?
         ORDER BY f.id DESC
         ''',
-        (ym,),
+        (current_tenant_key(), ym),
     )
     if faenas.empty:
         raise ValueError("No hay faenas para ese mes.")
@@ -2781,7 +3584,7 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             z.writestr(f"{prefix}/00_Contrato_Faena/{fn}", contrato_bytes)
 
         # 01 anexos
-        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? ORDER BY id", (fid,))
+        anexos = fetch_df("SELECT * FROM faena_anexos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (fid, current_tenant_key()))
         for _, a in anexos.iterrows():
             b = _get_bytes(a.get("file_path"), a.get("bucket"), a.get("object_path"))
             if b:
@@ -2789,7 +3592,7 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
                 z.writestr(f"{prefix}/01_Anexos_Faena/{fn}", b)
 
         # 02 empresa por faena
-        fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? ORDER BY id", (fid,))
+        fedocs = fetch_df("SELECT * FROM faena_empresa_documentos WHERE faena_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (fid, current_tenant_key()))
         for _, d in fedocs.iterrows():
             b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
             if b:
@@ -2805,15 +3608,17 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             FROM asignaciones a
             JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
+              AND COALESCE(a.cliente_key,'')=?
+              AND COALESCE(t.cliente_key,'')=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
             ORDER BY t.apellidos, t.nombres
             ''',
-            (fid,),
+            (fid, current_tenant_key(), current_tenant_key()),
         )
         for _, r in asign.iterrows():
             tid = int(r["trabajador_id"])
             tdir = trabajador_folder(r["apellidos"], r["nombres"], r["rut"])
-            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? ORDER BY id", (tid,))
+            tdocs = fetch_df("SELECT * FROM trabajador_documentos WHERE trabajador_id=? AND COALESCE(cliente_key,'')=? ORDER BY id", (tid, current_tenant_key()))
             for _, d in tdocs.iterrows():
                 b = _get_bytes(d.get("file_path"), d.get("bucket"), d.get("object_path"))
                 if b:
@@ -2832,8 +3637,8 @@ def persist_export(faena_id: int, zip_bytes: bytes, faena_nombre: str):
     sha = sha256_bytes(zip_bytes)
     size = len(zip_bytes)
     execute(
-        "INSERT INTO export_historial(faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (int(faena_id), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        "INSERT INTO export_historial(cliente_key, faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (current_tenant_key(), int(faena_id), path, bucket, object_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
     )
     return path
 
@@ -2943,13 +3748,9 @@ def cleanup_old_auto_backups(keep_last: int = 20):
         pass
 
 def auto_backup_db(tag: str = "auto"):
-    """Backup automático solo de la base local (app.db).
-
-    En modo Postgres/Supabase no genera respaldo local porque la fuente de verdad
-    ya está online. El respaldo manual completo sigue siendo ZIP.
-    """
     if DB_BACKEND == "postgres":
         return
+    """Backup automático SOLO de la base (app.db). El manual sigue siendo ZIP completo."""
     try:
         if not st.session_state.get("auto_backup_enabled", True):
             return
@@ -3023,6 +3824,7 @@ if current_user() is None:
 # ----------------------------
 PAGES = [
     "Dashboard",
+    "Cumplimiento / Alertas",
     "Mi Empresa / SGSST",
     "Mandantes",
     "Contratos de Faena",
@@ -3037,6 +3839,8 @@ PAGES = [
 ]
 
 VISIBLE_PAGES = list(PAGES)
+if is_superadmin():
+    VISIBLE_PAGES = ["SuperAdmin / Empresas", *VISIBLE_PAGES]
 if has_perm("manage_users"):
     VISIBLE_PAGES.append("Admin Usuarios")
 
@@ -3073,9 +3877,39 @@ with st.sidebar:
     if u:
         st.caption(f"👤 {u['username']} · {u['role']}")
 
+    try:
+        ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+        _cli_df = visible_clientes_df()
+        if _cli_df is not None and not _cli_df.empty:
+            _cli_df = _cli_df[_cli_df["activo"].fillna(1).astype(int) == 1] if "activo" in _cli_df.columns else _cli_df
+            _cli_keys = _cli_df["cliente_key"].astype(str).tolist()
+            if _cli_keys:
+                _current_cli = current_segav_client_key() or _cli_keys[0]
+                if _current_cli not in _cli_keys:
+                    _current_cli = _cli_keys[0]
+                _cli_name_map = {str(r["cliente_key"]): str(r["cliente_nombre"]) for _, r in _cli_df.iterrows()}
+                _cli_row_map = {str(r["cliente_key"]): r for _, r in _cli_df.iterrows()}
+                _cli_selected = st.selectbox(
+                    "Empresa activa",
+                    _cli_keys,
+                    index=_cli_keys.index(_current_cli),
+                    key="sidebar_cliente_activo",
+                    format_func=lambda x: _cli_name_map.get(str(x), str(x)),
+                )
+                if _cli_selected != _current_cli:
+                    st.session_state['active_cliente_key'] = _cli_selected
+                    clear_app_caches()
+                    st.rerun()
+                _current_row = _cli_row_map.get(str(_cli_selected), _cli_df.iloc[0])
+                _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
+                st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
+    except Exception:
+        pass
+
     # Navegación (simple)
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
+        "Cumplimiento / Alertas": "🚨 Cumplimiento / Alertas",
         "Mi Empresa / SGSST": "🧭 ERP / SGSST",
         "Mandantes": "🏢 Mandantes",
         "Contratos de Faena": "📄 Contratos",
@@ -3087,6 +3921,7 @@ with st.sidebar:
         "Documentos Trabajador": "📎 Docs Trabajador",
         "Export (ZIP)": "📦 Export",
         "Backup / Restore": "💾 Backup",
+        "SuperAdmin / Empresas": "🌐 SuperAdmin / Empresas",
         "Admin Usuarios": "🔐 Usuarios",
     }
 
@@ -3101,11 +3936,7 @@ with st.sidebar:
     # Contexto (colapsable)
     with st.expander("🔎 Contexto (Faena)", expanded=False):
         try:
-            _fa = fetch_df("""
-                SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-                FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-                ORDER BY f.id DESC
-            """)
+            _fa = get_sidebar_faena_context_df(DB_BACKEND, PG_DSN_FINGERPRINT, current_segav_client_key())
         except Exception:
             _fa = pd.DataFrame()
 
@@ -3181,8 +4012,22 @@ with st.sidebar:
 
 current_section = st.session_state.get("nav_page", "Dashboard")
 st.title(f"{erp_brand_name()} — {current_section}")
+try:
+    _clientes_top = segav_clientes_df()
+    _cli_key_top = current_segav_client_key()
+    if _clientes_top is not None and not _clientes_top.empty and _cli_key_top:
+        _row_top = _clientes_top[_clientes_top["cliente_key"].astype(str) == str(_cli_key_top)]
+        if not _row_top.empty:
+            _row_top = _row_top.iloc[0]
+            st.caption(f"Cliente activo: {_row_top.get('cliente_nombre') or 'Sin definir'} · Vertical: {_row_top.get('vertical') or segav_erp_value('erp_vertical', 'General')} · Modo: {_row_top.get('modo_implementacion') or segav_erp_value('modo_implementacion', 'CONFIGURABLE')}")
+except Exception:
+    pass
 
 
+try:
+    ensure_active_tenant_scaffold_once(DB_BACKEND, PG_DSN_FINGERPRINT, current_tenant_key())
+except Exception:
+    pass
 
 # ----------------------------
 # Pages
@@ -3374,6 +4219,14 @@ def page_dashboard():
             st.bar_chart(mdf)
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+def page_dashboard():
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+
+
+def page_compliance_alerts():
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
+
 
 def page_mandantes():
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante. Aquí puedes crear, editar y revisar su avance.")
@@ -6478,8 +7331,89 @@ def page_admin_usuarios():
 # ----------------------------
 p = st.session_state.get("nav_page", "Dashboard")
 
+from segav_core import ops_faenas as _ops_faenas
+from segav_core import ops_personal as _ops_personal
+from segav_core import ops_docs as _ops_docs
+from segav_core import ops_exports as _ops_exports
+from segav_core import ops_sgsst as _ops_sgsst
+from segav_core import ops_compliance as _ops_compliance
+from segav_core import ops_dashboard as _ops_dashboard
+from segav_core import ops_superadmin as _ops_superadmin
+
+
+def page_dashboard():
+    return _ops_dashboard.page_dashboard(st=st, ui_header=ui_header, ui_tip=ui_tip, get_global_counts=get_global_counts, fetch_df=fetch_df, fetch_value=fetch_value, DB_BACKEND=DB_BACKEND, conn=conn, execute=execute, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, current_user=current_user, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, go=go, clear_app_caches=clear_app_caches)
+
+
+def page_compliance_alerts():
+    return _ops_compliance.page_compliance_alerts(DB_BACKEND=DB_BACKEND, PG_DSN_FINGERPRINT=PG_DSN_FINGERPRINT, conn=conn, execute=execute, fetch_df=fetch_df, fetch_value=fetch_value, clear_app_caches=clear_app_caches, current_segav_client_key=current_segav_client_key, segav_clientes_df=segav_clientes_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, worker_required_docs=worker_required_docs, doc_tipo_label=doc_tipo_label, sgsst_log=sgsst_log)
+
+
+def page_mandantes():
+    return _ops_faenas.page_mandantes(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db)
+
+
+def page_contratos_faena():
+    return _ops_faenas.page_contratos_faena(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, load_file_anywhere=load_file_anywhere)
+
+
+def page_faenas():
+    return _ops_faenas.page_faenas(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, pendientes_obligatorios=pendientes_obligatorios)
+
+
+def page_trabajadores():
+    return _ops_personal.page_trabajadores(fetch_df=fetch_df, conn=conn, execute=execute, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, rut_input=rut_input, segav_cargo_labels=segav_cargo_labels, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, trabajador_insert_or_update=_trabajador_insert_or_update, apply_pending_trabajador_create_reset=_apply_pending_trabajador_create_reset, show_pending_trabajador_create_flash=_show_pending_trabajador_create_flash)
+
+
+def page_asignar_trabajadores():
+    return _ops_personal.page_asignar_trabajadores(fetch_df=fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update)
+
+
+def page_documentos_empresa():
+    return _ops_docs.page_documentos_empresa(fetch_df=fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_documentos_empresa_faena():
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=fetch_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, pendientes_empresa_faena_periodo=pendientes_empresa_faena_periodo, periodo_label=periodo_label, periodo_folder_segment=periodo_folder_segment, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, date=date, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_documentos_trabajador():
+    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=fetch_df, fetch_df_uncached=fetch_df_uncached, execute=execute, execute_rowcount=execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record)
+
+
+def page_export_zip():
+    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date)
+
+
+def page_sgsst():
+    return _ops_sgsst.page_sgsst(fetch_df=fetch_df, fetch_value=fetch_value, execute=execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+
+
+def page_superadmin_empresas():
+    return _ops_superadmin.page_superadmin_empresas(
+        st=st,
+        ui_header=ui_header,
+        fetch_df=fetch_df,
+        fetch_value=fetch_value,
+        execute=execute,
+        clear_app_caches=clear_app_caches,
+        segav_clientes_df=segav_clientes_df,
+        visible_clientes_df=visible_clientes_df,
+        current_segav_client_key=current_segav_client_key,
+        make_erp_key=make_erp_key,
+        clean_rut=clean_rut,
+        ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS,
+        set_segav_erp_config_value=set_segav_erp_config_value,
+        sgsst_log=sgsst_log,
+        current_user=current_user,
+        is_superadmin=is_superadmin,
+        ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
+    )
+
+
 PAGE_PERM_ROUTE = {
     "Dashboard": "view_dashboard",
+    "Cumplimiento / Alertas": "view_sgsst",
     "Mi Empresa / SGSST": "view_sgsst",
     "Mandantes": "view_mandantes",
     "Contratos de Faena": "view_contratos",
@@ -6498,6 +7432,8 @@ if p in PAGE_PERM_ROUTE:
 
 if p == "Dashboard":
     page_dashboard()
+elif p == "Cumplimiento / Alertas":
+    page_compliance_alerts()
 elif p == "Mi Empresa / SGSST":
     page_sgsst()
 elif p == "Mandantes":
@@ -6520,6 +7456,11 @@ elif p == "Export (ZIP)":
     page_export_zip()
 elif p == "Backup / Restore":
     page_backup_restore()
+elif p == "SuperAdmin / Empresas":
+    if not is_superadmin():
+        st.error("Esta sección es exclusiva para SUPERADMIN.")
+        st.stop()
+    page_superadmin_empresas()
 elif p == "Admin Usuarios":
     page_admin_usuarios()
 else:
