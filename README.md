@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.66)
+# SEGAV ERP (v8.4.67)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
@@ -88,7 +88,7 @@ Novedades v8.4.65:
 - Se mantiene la base funcional sin eliminar módulos implementados.
 
 
-Novedades v8.4.66:
+Novedades v8.4.67:
 - Los datos heredados se reasignan una sola vez a la empresa histórica (Maderas GyD) y ya no se mueven a SEGAV al cambiar la empresa activa.
 - Las empresas nuevas parten vacías sin heredar documentación ni registros previos.
 - La pantalla de inicio se reordenó: hero azul a la derecha, login a la izquierda y logo bajo el cuadro de inicio de sesión.

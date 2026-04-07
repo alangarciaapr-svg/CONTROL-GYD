@@ -3103,23 +3103,33 @@ def auth_gate_ui():
     st.markdown(
         """
         <style>
+        .block-container{
+            padding-top:0.65rem !important;
+            padding-bottom:0 !important;
+        }
         .segav-auth-shell{
-            max-width:1240px;
+            max-width:1320px;
             margin:0 auto;
-            padding:12px 0 20px 0;
+            min-height:calc(100vh - 1.4rem);
+            display:flex;
+            align-items:center;
+            padding:0.35rem 0 0 0;
         }
         .segav-auth-hero{
             position:relative;
             overflow:hidden;
-            min-height:640px;
-            border-radius:28px;
-            padding:30px;
+            min-height:clamp(520px, 78vh, 760px);
+            border-radius:30px;
+            padding:26px 28px 24px 28px;
+            display:flex;
+            flex-direction:column;
+            justify-content:space-between;
             background:
-                radial-gradient(circle at top left, rgba(32,132,252,0.20), transparent 30%),
+                radial-gradient(circle at top left, rgba(32,132,252,0.24), transparent 30%),
                 radial-gradient(circle at bottom right, rgba(7,191,141,0.18), transparent 28%),
                 linear-gradient(135deg, #061424 0%, #0b2037 48%, #102b45 100%);
             border:1px solid rgba(255,255,255,0.08);
-            box-shadow:0 18px 48px rgba(2,8,23,0.26);
+            box-shadow:0 22px 56px rgba(2,8,23,0.28);
         }
         .segav-auth-chip{
             display:inline-flex;
@@ -3135,37 +3145,37 @@ def auth_gate_ui():
             letter-spacing:0.02em;
         }
         .segav-auth-kicker{
-            margin-top:18px;
+            margin-top:16px;
             color:#93c5fd;
-            font-size:13px;
+            font-size:12px;
             font-weight:700;
-            letter-spacing:0.08em;
+            letter-spacing:0.10em;
             text-transform:uppercase;
         }
         .segav-auth-title{
             margin-top:10px;
             color:#f8fafc;
-            font-size:42px;
-            line-height:1.05;
+            font-size:clamp(30px, 2.5vw, 40px);
+            line-height:1.03;
             font-weight:800;
-            max-width:680px;
+            max-width:650px;
         }
         .segav-auth-sub{
-            margin-top:16px;
+            margin-top:14px;
             color:rgba(226,232,240,0.88);
-            font-size:16px;
-            line-height:1.6;
-            max-width:690px;
+            font-size:15px;
+            line-height:1.55;
+            max-width:650px;
         }
         .segav-auth-points{
             display:grid;
             grid-template-columns:repeat(3, minmax(0,1fr));
-            gap:12px;
-            margin-top:22px;
+            gap:10px;
+            margin-top:18px;
         }
         .segav-auth-point{
-            border-radius:20px;
-            padding:14px 15px;
+            border-radius:18px;
+            padding:12px 13px;
             background:rgba(255,255,255,0.08);
             border:1px solid rgba(255,255,255,0.10);
             backdrop-filter: blur(8px);
@@ -3173,44 +3183,46 @@ def auth_gate_ui():
         .segav-auth-point b{
             display:block;
             color:#ffffff;
-            font-size:15px;
+            font-size:14px;
             margin-bottom:4px;
         }
         .segav-auth-point span{
             color:rgba(226,232,240,0.84);
-            font-size:13px;
-            line-height:1.45;
+            font-size:12px;
+            line-height:1.42;
         }
         .segav-auth-login{
-            min-height:640px;
-            border-radius:28px;
-            padding:28px 24px 22px 24px;
-            background:rgba(255,255,255,0.88);
+            min-height:clamp(520px, 78vh, 760px);
+            border-radius:30px;
+            padding:24px 22px 18px 22px;
+            background:rgba(255,255,255,0.90);
             border:1px solid rgba(15,23,42,0.08);
-            box-shadow:0 18px 48px rgba(15,23,42,0.10);
-            backdrop-filter:blur(8px);
+            box-shadow:0 22px 56px rgba(15,23,42,0.10);
+            backdrop-filter:blur(10px);
+            display:flex;
+            flex-direction:column;
         }
         .segav-auth-login h3{
             margin:0;
             color:#0f172a;
-            font-size:30px;
-            line-height:1.1;
+            font-size:28px;
+            line-height:1.06;
         }
         .segav-auth-login-sub{
             margin-top:8px;
             color:#475569;
-            font-size:14px;
-            line-height:1.55;
+            font-size:13px;
+            line-height:1.52;
         }
         .segav-auth-mini{
-            margin-top:18px;
+            margin-top:16px;
             display:grid;
             grid-template-columns:repeat(2, minmax(0,1fr));
             gap:10px;
         }
         .segav-auth-mini-card{
-            border-radius:18px;
-            padding:14px 14px 12px 14px;
+            border-radius:16px;
+            padding:12px 12px 10px 12px;
             background:#f8fafc;
             border:1px solid rgba(148,163,184,0.22);
         }
@@ -3223,11 +3235,21 @@ def auth_gate_ui():
         .segav-auth-mini-card span{
             color:#64748b;
             font-size:12px;
-            line-height:1.45;
+            line-height:1.4;
+        }
+        .segav-auth-form-title{
+            margin:16px 0 8px 0;
+            color:#0f172a;
+            font-size:22px;
+            font-weight:800;
+            line-height:1.12;
+        }
+        .segav-auth-form-wrap{
+            margin-top:2px;
         }
         .segav-auth-hero-media{
-            margin-top:22px;
-            border-radius:22px;
+            margin-top:18px;
+            border-radius:20px;
             overflow:hidden;
             border:1px solid rgba(255,255,255,0.08);
             box-shadow:0 10px 30px rgba(2,8,23,0.18);
@@ -3236,32 +3258,45 @@ def auth_gate_ui():
         .segav-auth-hero-media img{
             display:block;
             width:100%;
-            height:auto;
+            height:220px;
+            object-fit:cover;
+            object-position:center;
         }
         .segav-auth-footnote{
-            margin-top:14px;
+            margin-top:10px;
             color:#64748b;
             font-size:12px;
-            line-height:1.5;
+            line-height:1.45;
+        }
+        .segav-auth-login-brand{
+            margin-top:auto;
+            padding-top:14px;
+            border-top:1px solid rgba(148,163,184,0.22);
         }
         .segav-auth-login-logo{
-            margin-top:18px;
-            padding-top:18px;
-            border-top:1px solid rgba(148,163,184,0.22);
             display:flex;
             justify-content:center;
             align-items:center;
         }
         .segav-auth-login-note{
-            margin-top:10px;
+            margin-top:8px;
             text-align:center;
             color:#64748b;
             font-size:12px;
-            line-height:1.45;
+            line-height:1.4;
+        }
+        @media (max-width: 1180px){
+            .segav-auth-shell{min-height:auto; padding:0.35rem 0 1rem 0;}
+            .segav-auth-points{grid-template-columns:1fr;}
+            .segav-auth-mini{grid-template-columns:1fr;}
+            .segav-auth-hero-media img{height:180px;}
         }
         @media (max-width: 980px){
+            .block-container{padding-top:0.75rem !important; padding-bottom:1rem !important;}
+            .segav-auth-shell{min-height:auto; display:block;}
             .segav-auth-hero,.segav-auth-login{min-height:auto;}
             .segav-auth-points,.segav-auth-mini{grid-template-columns:1fr;}
+            .segav-auth-hero-media img{height:auto;}
         }
         </style>
         """,
@@ -3314,7 +3349,7 @@ def auth_gate_ui():
             except Exception:
                 pass
 
-        st.markdown("### Iniciar sesión")
+        st.markdown('<div class="segav-auth-form-title">Iniciar sesión</div><div class="segav-auth-form-wrap">', unsafe_allow_html=True)
         with st.form("form_login"):
             username = st.text_input("Usuario", placeholder="ej: a.garcia")
             password = st.text_input("Contraseña", type="password")
@@ -3337,11 +3372,12 @@ def auth_gate_ui():
             st.success("Ingreso exitoso.")
             st.rerun()
 
+        st.markdown('</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="segav-auth-footnote">¿Olvidaste tu contraseña? Solicita reinicio al administrador correspondiente. Para usuarios que solo revisan información, usa <b>LECTOR</b>. Para operación diaria, <b>OPERADOR</b>.</div>',
             unsafe_allow_html=True,
         )
-        st.markdown('<div class="segav-auth-login-logo">', unsafe_allow_html=True)
+        st.markdown('<div class="segav-auth-login-brand"><div class="segav-auth-login-logo">', unsafe_allow_html=True)
         render_brand_logo(width=185)
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('<div class="segav-auth-login-note">SEGAV ERP · Plataforma multiempresa de control documental, cumplimiento y gestión preventiva.</div></div>', unsafe_allow_html=True)
