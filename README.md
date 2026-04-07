@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.63)
+# SEGAV ERP (v8.4.65)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
@@ -80,3 +80,9 @@ Novedades v8.4.63:
 - CRUD de empresas desde un panel centralizado.
 - Asignación de administradores por empresa mediante vínculos usuario/empresa.
 - Selector de empresa activa por sesión para no depender de una configuración global única.
+
+
+Novedades v8.4.65:
+- Se fusiona la portada profesional de inicio con la base estable que mantiene SuperAdmin / Empresas al inicio.
+- Se agrega hero visual local para login corporativo con branding SEGAV.
+- Se mantiene la base funcional sin eliminar módulos implementados.

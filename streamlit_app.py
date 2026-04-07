@@ -32,6 +32,7 @@ import unicodedata
 # Config
 # ----------------------------
 LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
+LOCAL_LOGIN_HERO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_hero_segav.svg")
 if os.path.exists(LOCAL_BRAND_LOGO_PATH):
     st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
 else:
@@ -2363,10 +2364,122 @@ def backfill_multiempresa_cliente_key():
 
 def ensure_active_tenant_scaffold():
     backfill_multiempresa_cliente_key()
-    try:
-        ensure_sgsst_seed_data()
-    except Exception:
-        pass
+
+
+TENANT_SCOPE_TABLES = tuple(MULTIEMPRESA_TABLES)
+TENANT_SCOPE_FILE_TABLES = (
+    'contratos_faena', 'faena_anexos', 'trabajador_documentos', 'empresa_documentos',
+    'faena_empresa_documentos', 'export_historial', 'export_historial_mes'
+)
+
+
+def _tenant_scope_target_table(sql: str) -> str | None:
+    q = str(sql or '')
+    patterns = [
+        r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
+    ]
+    for patt in patterns:
+        m = re.search(patt, q, flags=re.I)
+        if m:
+            table = str(m.group(1) or '').strip()
+            if table in TENANT_SCOPE_TABLES:
+                return table
+    return None
+
+
+def _inject_tenant_condition_sql(sql: str, alias_or_table: str) -> str:
+    tenant_cond = f"COALESCE({alias_or_table}.cliente_key,'')=?"
+    lower_sql = sql.lower()
+    clause_positions = [p for p in [lower_sql.find(' order by '), lower_sql.find(' group by '), lower_sql.find(' limit '), lower_sql.find(' union ')] if p != -1]
+    cut = min(clause_positions) if clause_positions else len(sql)
+    head = sql[:cut]
+    tail = sql[cut:]
+    if re.search(r"\bwhere\b", head, flags=re.I):
+        return head + f" AND {tenant_cond}" + tail
+    return head + f" WHERE {tenant_cond}" + tail
+
+
+def _scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None):
+    tenant_key = str(tenant_key or current_tenant_key() or '').strip()
+    q = str(sql or '')
+    if not tenant_key or not q.strip():
+        return q, tuple(params or ())
+    if 'cliente_key' in q.lower():
+        return q, tuple(params or ())
+    table = _tenant_scope_target_table(q)
+    if not table:
+        return q, tuple(params or ())
+
+    params_t = tuple(params or ())
+    # INSERT INTO table(cols) VALUES(...)
+    m_ins = re.search(r"(\bINSERT\s+INTO\s+" + re.escape(table) + r"\s*\()([^)]*)(\)\s*VALUES\s*\()", q, flags=re.I | re.S)
+    if m_ins:
+        cols_txt = m_ins.group(2)
+        cols = [c.strip() for c in cols_txt.split(',') if c.strip()]
+        if not any(c.lower() == 'cliente_key' for c in cols):
+            new_cols = 'cliente_key, ' + cols_txt.strip()
+            start, end = m_ins.span(2)
+            q2 = q[:start] + new_cols + q[end:]
+            val_start = m_ins.end(3)
+            q2 = q2[:val_start] + '?, ' + q2[val_start:]
+            return q2, (tenant_key, *params_t)
+        return q, params_t
+
+    # UPDATE / DELETE / SELECT root table scoping
+    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
+    alias = table
+    if m_root:
+        alias_candidate = str(m_root.group(2) or '').strip()
+        if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
+            alias = alias_candidate
+    q2 = _inject_tenant_condition_sql(q, alias)
+    return q2, (*params_t, tenant_key)
+
+
+def tenant_fetch_df(q: str, params=()):
+    q2, p2 = _scope_sql_to_tenant(q, params)
+    return fetch_df(q2, p2)
+
+
+def tenant_fetch_df_uncached(q: str, params=()):
+    q2, p2 = _scope_sql_to_tenant(q, params)
+    return fetch_df_uncached(q2, p2)
+
+
+def tenant_fetch_value(q: str, params=(), default=None, fresh: bool = False):
+    q2, p2 = _scope_sql_to_tenant(q, params)
+    return fetch_value(q2, p2, default=default, fresh=fresh)
+
+
+def tenant_execute(q: str, params=()):
+    q2, p2 = _scope_sql_to_tenant(q, params)
+    return execute(q2, p2)
+
+
+def tenant_execute_rowcount(q: str, params=()):
+    q2, p2 = _scope_sql_to_tenant(q, params)
+    return execute_rowcount(q2, p2)
+
+
+def tenant_executemany(q: str, seq_params):
+    scoped = []
+    q2 = None
+    for params in (seq_params or []):
+        q2, p2 = _scope_sql_to_tenant(q, params)
+        scoped.append(p2)
+    if q2 is None:
+        q2 = q
+    return executemany(q2, scoped)
+
+
+def tenant_fetch_file_refs(table_name: str, where_sql: str = "", params=()):
+    if table_name in TENANT_SCOPE_TABLES and 'cliente_key' not in str(where_sql).lower():
+        where_sql = (where_sql + " AND " if where_sql else "") + "COALESCE(cliente_key,'')=?"
+        params = (*tuple(params or ()), current_tenant_key())
+    return fetch_file_refs(table_name, where_sql, params)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -2462,6 +2575,16 @@ def get_login_logo_bytes():
         except Exception:
             pass
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_login_hero_bytes():
+    if os.path.exists(LOCAL_LOGIN_HERO_PATH):
+        try:
+            with open(LOCAL_LOGIN_HERO_PATH, "rb") as fp:
+                return fp.read()
+        except Exception:
+            return None
+    return None
 
 def render_brand_logo(width: int = 220):
     logo = get_login_logo_bytes()
@@ -2900,43 +3023,206 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de inicio: login con roles. Si la base está vacía, crea ADMIN por defecto."""
+    """Pantalla de inicio profesional con login, branding e imagen hero."""
 
     st.markdown(
         """
         <style>
-        .auth-wrap{max-width:980px;margin:0 auto;}
-        .auth-card{border:1px solid rgba(255,255,255,0.08);border-radius:18px;padding:18px 18px 6px 18px;background:rgba(15,23,42,0.25);box-shadow:0 10px 30px rgba(0,0,0,0.18);}
-        .auth-title{font-size:28px;font-weight:800;line-height:1.1;margin:6px 0 4px 0;}
-        .auth-sub{opacity:0.85;margin:0 0 10px 0;}
-        .auth-badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;opacity:0.9;border:1px solid rgba(255,255,255,0.12);}
+        .segav-auth-shell{
+            max-width:1240px;
+            margin:0 auto;
+            padding:12px 0 20px 0;
+        }
+        .segav-auth-hero{
+            position:relative;
+            overflow:hidden;
+            min-height:640px;
+            border-radius:28px;
+            padding:30px;
+            background:
+                radial-gradient(circle at top left, rgba(32,132,252,0.20), transparent 30%),
+                radial-gradient(circle at bottom right, rgba(7,191,141,0.18), transparent 28%),
+                linear-gradient(135deg, #061424 0%, #0b2037 48%, #102b45 100%);
+            border:1px solid rgba(255,255,255,0.08);
+            box-shadow:0 18px 48px rgba(2,8,23,0.26);
+        }
+        .segav-auth-chip{
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            padding:7px 14px;
+            border-radius:999px;
+            background:rgba(255,255,255,0.08);
+            border:1px solid rgba(255,255,255,0.11);
+            color:#dbeafe;
+            font-size:12px;
+            font-weight:700;
+            letter-spacing:0.02em;
+        }
+        .segav-auth-kicker{
+            margin-top:18px;
+            color:#93c5fd;
+            font-size:13px;
+            font-weight:700;
+            letter-spacing:0.08em;
+            text-transform:uppercase;
+        }
+        .segav-auth-title{
+            margin-top:10px;
+            color:#f8fafc;
+            font-size:42px;
+            line-height:1.05;
+            font-weight:800;
+            max-width:680px;
+        }
+        .segav-auth-sub{
+            margin-top:16px;
+            color:rgba(226,232,240,0.88);
+            font-size:16px;
+            line-height:1.6;
+            max-width:690px;
+        }
+        .segav-auth-points{
+            display:grid;
+            grid-template-columns:repeat(3, minmax(0,1fr));
+            gap:12px;
+            margin-top:22px;
+        }
+        .segav-auth-point{
+            border-radius:20px;
+            padding:14px 15px;
+            background:rgba(255,255,255,0.08);
+            border:1px solid rgba(255,255,255,0.10);
+            backdrop-filter: blur(8px);
+        }
+        .segav-auth-point b{
+            display:block;
+            color:#ffffff;
+            font-size:15px;
+            margin-bottom:4px;
+        }
+        .segav-auth-point span{
+            color:rgba(226,232,240,0.84);
+            font-size:13px;
+            line-height:1.45;
+        }
+        .segav-auth-login{
+            min-height:640px;
+            border-radius:28px;
+            padding:28px 24px 22px 24px;
+            background:rgba(255,255,255,0.88);
+            border:1px solid rgba(15,23,42,0.08);
+            box-shadow:0 18px 48px rgba(15,23,42,0.10);
+            backdrop-filter:blur(8px);
+        }
+        .segav-auth-login h3{
+            margin:0;
+            color:#0f172a;
+            font-size:30px;
+            line-height:1.1;
+        }
+        .segav-auth-login-sub{
+            margin-top:8px;
+            color:#475569;
+            font-size:14px;
+            line-height:1.55;
+        }
+        .segav-auth-mini{
+            margin-top:18px;
+            display:grid;
+            grid-template-columns:repeat(2, minmax(0,1fr));
+            gap:10px;
+        }
+        .segav-auth-mini-card{
+            border-radius:18px;
+            padding:14px 14px 12px 14px;
+            background:#f8fafc;
+            border:1px solid rgba(148,163,184,0.22);
+        }
+        .segav-auth-mini-card strong{
+            display:block;
+            color:#0f172a;
+            font-size:13px;
+            margin-bottom:3px;
+        }
+        .segav-auth-mini-card span{
+            color:#64748b;
+            font-size:12px;
+            line-height:1.45;
+        }
+        .segav-auth-hero-media{
+            margin-top:22px;
+            border-radius:22px;
+            overflow:hidden;
+            border:1px solid rgba(255,255,255,0.08);
+            box-shadow:0 10px 30px rgba(2,8,23,0.18);
+            background:rgba(255,255,255,0.05);
+        }
+        .segav-auth-hero-media img{
+            display:block;
+            width:100%;
+            height:auto;
+        }
+        .segav-auth-footnote{
+            margin-top:14px;
+            color:#64748b;
+            font-size:12px;
+            line-height:1.5;
+        }
+        @media (max-width: 980px){
+            .segav-auth-hero,.segav-auth-login{min-height:auto;}
+            .segav-auth-points,.segav-auth-mini{grid-template-columns:1fr;}
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
-    cL, cR = st.columns([1.1, 1], gap="large")
+    hero_html = """
+    <div class="segav-auth-hero">
+        <span class="segav-auth-chip">SEGAV ERP · Prevención + operación + control documental</span>
+        <div class="segav-auth-kicker">Plataforma empresarial multiempresa</div>
+        <div class="segav-auth-title">ERP profesional para control documental, cumplimiento legal y gestión operativa de empresas y trabajadores.</div>
+        <div class="segav-auth-sub">Centraliza documentación, faenas, SGSST, alertas, trabajadores y trazabilidad en una sola plataforma preparada para operación diaria, auditoría y escalamiento comercial.</div>
+        <div class="segav-auth-points">
+            <div class="segav-auth-point"><b>Control documental</b><span>Empresas, faenas y trabajadores con vigencias, evidencias y exportación centralizada.</span></div>
+            <div class="segav-auth-point"><b>Multiempresa</b><span>Superadmin, empresas, administradores por cliente y operación segmentada por tenant.</span></div>
+            <div class="segav-auth-point"><b>Prevención 4.0</b><span>SGSST, alertas, cumplimiento, acciones correctivas y panel ejecutivo comercial.</span></div>
+        </div>
+    </div>
+    """
 
-    with cL:
-        try:
-            render_brand_logo(width=260)
-        except Exception:
-            pass
-        st.markdown('<div class="auth-title">SEGAV ERP</div>', unsafe_allow_html=True)
-        st.markdown('<div class="auth-sub">Accede con tu usuario y contraseña para gestionar mandantes, faenas, trabajadores y exportaciones.</div>', unsafe_allow_html=True)
-        st.markdown('<span class="auth-badge">🔒 Acceso seguro · Roles y poderes</span>', unsafe_allow_html=True)
-        st.markdown("")
-        st.caption("Consejo: para usuarios que solo revisan, usa rol **LECTOR**. Para operación diaria, **OPERADOR**.")
+    login_intro_html = """
+    <div class="segav-auth-login">
+        <h3>Ingreso seguro</h3>
+        <div class="segav-auth-login-sub">Accede con tu usuario y contraseña para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>
+        <div class="segav-auth-mini">
+            <div class="segav-auth-mini-card"><strong>SuperAdmin</strong><span>Control total del ecosistema, empresas, administradores y visión global.</span></div>
+            <div class="segav-auth-mini-card"><strong>Admin Empresa</strong><span>Operación de su empresa, trabajadores, faenas, documentos y seguimiento.</span></div>
+        </div>
+    """
 
-    with cR:
-        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+    st.markdown('<div class="segav-auth-shell">', unsafe_allow_html=True)
+    left_col, right_col = st.columns([1.18, 0.82], gap="large")
 
-        # Asegura tabla users
+    with left_col:
+        st.markdown(hero_html, unsafe_allow_html=True)
+        render_brand_logo(width=250)
+        hero_bytes = get_login_hero_bytes()
+        if hero_bytes:
+            hero_b64 = _b64e(hero_bytes)
+            st.markdown(
+                f'<div class="segav-auth-hero-media"><img alt="SEGAV ERP Hero" src="data:image/svg+xml;base64,{hero_b64}"></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Imagen principal no disponible. El branding y el acceso siguen operativos.")
+
+    with right_col:
+        st.markdown(login_intro_html, unsafe_allow_html=True)
         ensure_users_table()
         ensure_superadmin_exists()
 
-        # Seed automático del SUPERADMIN por defecto si la tabla está vacía
         if users_count() == 0:
             DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
             DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
@@ -2949,14 +3235,13 @@ def auth_gate_ui():
                 )
                 auto_backup_db("users_seed_default_superadmin")
             except Exception:
-                # Si ya existe o hay algún problema, continuamos hacia login
                 pass
 
         st.markdown("### Iniciar sesión")
         with st.form("form_login"):
             username = st.text_input("Usuario", placeholder="ej: a.garcia")
             password = st.text_input("Contraseña", type="password")
-            ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
 
         if ok:
             u = (username or "").strip()
@@ -2975,10 +3260,12 @@ def auth_gate_ui():
             st.success("Ingreso exitoso.")
             st.rerun()
 
-        st.caption("¿Olvidaste tu contraseña? Pide al **ADMIN** que la reinicie desde **Usuarios**.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="segav-auth-footnote">¿Olvidaste tu contraseña? Solicita reinicio al administrador correspondiente. Para usuarios que solo revisan información, usa <b>LECTOR</b>. Para operación diaria, <b>OPERADOR</b>.</div></div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
 def fetch_df(q: str, params=()):
@@ -7350,43 +7637,43 @@ def page_compliance_alerts():
 
 
 def page_mandantes():
-    return _ops_faenas.page_mandantes(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db)
+    return _ops_faenas.page_mandantes(fetch_df=tenant_fetch_df, execute=tenant_execute, auto_backup_db=auto_backup_db)
 
 
 def page_contratos_faena():
-    return _ops_faenas.page_contratos_faena(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, load_file_anywhere=load_file_anywhere)
+    return _ops_faenas.page_contratos_faena(fetch_df=tenant_fetch_df, execute=tenant_execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, fetch_file_refs=tenant_fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, load_file_anywhere=load_file_anywhere)
 
 
 def page_faenas():
-    return _ops_faenas.page_faenas(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, ESTADOS_FAENA=ESTADOS_FAENA)
+    return _ops_faenas.page_faenas(fetch_df=tenant_fetch_df, execute=tenant_execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=tenant_fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, ESTADOS_FAENA=ESTADOS_FAENA)
 
 
 def page_trabajadores():
-    return _ops_personal.page_trabajadores(fetch_df=fetch_df, conn=conn, execute=execute, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, rut_input=rut_input, segav_cargo_labels=segav_cargo_labels, parse_date_maybe=parse_date_maybe, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, trabajador_insert_or_update=_trabajador_insert_or_update, apply_pending_trabajador_create_reset=_apply_pending_trabajador_create_reset, show_pending_trabajador_create_flash=_show_pending_trabajador_create_flash)
+    return _ops_personal.page_trabajadores(fetch_df=tenant_fetch_df, conn=conn, execute=tenant_execute, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, rut_input=rut_input, segav_cargo_labels=segav_cargo_labels, parse_date_maybe=parse_date_maybe, fetch_file_refs=tenant_fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, trabajador_insert_or_update=_trabajador_insert_or_update, apply_pending_trabajador_create_reset=_apply_pending_trabajador_create_reset, show_pending_trabajador_create_flash=_show_pending_trabajador_create_flash)
 
 
 def page_asignar_trabajadores():
-    return _ops_personal.page_asignar_trabajadores(fetch_df=fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update)
+    return _ops_personal.page_asignar_trabajadores(fetch_df=tenant_fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=tenant_executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update)
 
 
 def page_documentos_empresa():
-    return _ops_docs.page_documentos_empresa(fetch_df=fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+    return _ops_docs.page_documentos_empresa(fetch_df=tenant_fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
 
 
 def page_documentos_empresa_faena():
-    return _ops_docs.page_documentos_empresa_faena(fetch_df=fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES)
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=tenant_fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES)
 
 
 def page_documentos_trabajador():
-    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=fetch_df, fetch_df_uncached=fetch_df_uncached, execute=execute, execute_rowcount=execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record)
+    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=tenant_fetch_df, fetch_df_uncached=tenant_fetch_df_uncached, execute=tenant_execute, execute_rowcount=tenant_execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record)
 
 
 def page_export_zip():
-    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date)
+    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date)
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=fetch_df, fetch_value=fetch_value, execute=execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
 
 
 def page_superadmin_empresas():
@@ -7408,6 +7695,9 @@ def page_superadmin_empresas():
         current_user=current_user,
         is_superadmin=is_superadmin,
         ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
+        fetch_file_refs=fetch_file_refs,
+        cleanup_deleted_file_refs=cleanup_deleted_file_refs,
+        set_active_cliente_key=lambda key: st.session_state.__setitem__('active_cliente_key', key),
     )
 
 
