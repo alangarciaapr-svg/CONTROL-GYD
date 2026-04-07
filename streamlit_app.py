@@ -7358,7 +7358,7 @@ def page_contratos_faena():
 
 
 def page_faenas():
-    return _ops_faenas.page_faenas(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, pendientes_obligatorios=pendientes_obligatorios)
+    return _ops_faenas.page_faenas(fetch_df=fetch_df, execute=execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, ESTADOS_FAENA=ESTADOS_FAENA)
 
 
 def page_trabajadores():
@@ -7374,7 +7374,7 @@ def page_documentos_empresa():
 
 
 def page_documentos_empresa_faena():
-    return _ops_docs.page_documentos_empresa_faena(fetch_df=fetch_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, pendientes_empresa_faena_periodo=pendientes_empresa_faena_periodo, periodo_label=periodo_label, periodo_folder_segment=periodo_folder_segment, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, date=date, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES)
 
 
 def page_documentos_trabajador():
