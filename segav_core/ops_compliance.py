@@ -150,17 +150,6 @@ def ensure_multiempresa_compliance_schema(*, db_backend: str, execute: Callable,
         pass
 
 
-@st.cache_resource(show_spinner=False)
-def ensure_multiempresa_compliance_schema_once(db_backend: str, dsn_fingerprint: str, current_client_key: str, _execute: Callable, _conn: Callable):
-    ensure_multiempresa_compliance_schema(
-        db_backend=db_backend,
-        execute=_execute,
-        conn=_conn,
-        current_client_key=current_client_key,
-    )
-    return True
-
-
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
     if clientes_df is None or clientes_df.empty:
@@ -480,7 +469,6 @@ def _metric_card(label: str, value, help_text: str | None = None):
 def page_compliance_alerts(
     *,
     DB_BACKEND: str,
-    PG_DSN_FINGERPRINT: str,
     conn: Callable,
     execute: Callable,
     fetch_df: Callable,
@@ -498,12 +486,11 @@ def page_compliance_alerts(
     current_client = _safe_current_client(clientes_df, current_key)
     current_key = str(current_client.get("cliente_key") or current_key or "cli_default")
 
-    ensure_multiempresa_compliance_schema_once(
-        DB_BACKEND,
-        str(PG_DSN_FINGERPRINT or "none"),
-        current_key,
-        execute,
-        conn,
+    ensure_multiempresa_compliance_schema(
+        db_backend=DB_BACKEND,
+        execute=execute,
+        conn=conn,
+        current_client_key=current_key,
     )
 
     client_name = str(current_client.get("cliente_nombre") or "Empresa activa")
