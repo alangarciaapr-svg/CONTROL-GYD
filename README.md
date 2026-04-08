@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.71-final)
+# SEGAV ERP (v8.4.70)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
@@ -95,7 +95,7 @@ Novedades v8.4.69:
 
 
 
-Fase de saneamiento v8.4.71-final:
+Fase de saneamiento v8.4.70:
 - Se eliminaron definiciones duplicadas antiguas de páginas en `streamlit_app.py`, conservando solo los wrappers activos hacia `segav_core`.
 - Se limpió el sombreado/confusión de `bootstrap_app` y un import no usado.
 - Se incorporó diagnóstico liviano para algunos fallos no críticos que antes quedaban totalmente silenciosos.

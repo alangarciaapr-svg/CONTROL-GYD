@@ -134,24 +134,42 @@ def page_documentos_empresa(
 def page_documentos_empresa_faena(
     *,
     fetch_df,
-    ui_tip,
-    periodo_label,
-    periodo_ym,
-    get_empresa_monthly_doc_types,
-    doc_tipo_join,
-    doc_tipo_label,
-    render_upload_help,
-    prepare_upload_payload,
-    safe_name,
-    save_file_online,
-    sha256_bytes,
-    execute,
-    datetime,
-    auto_backup_db,
-    load_file_anywhere,
-    delete_uploaded_document_record,
-    MESES_ES,
+    ui_tip=None,
+    periodo_label=None,
+    periodo_ym=None,
+    get_empresa_monthly_doc_types=None,
+    doc_tipo_join=None,
+    doc_tipo_label=None,
+    render_upload_help=None,
+    prepare_upload_payload=None,
+    safe_name=None,
+    save_file_online=None,
+    sha256_bytes=None,
+    execute=None,
+    datetime=None,
+    auto_backup_db=None,
+    load_file_anywhere=None,
+    delete_uploaded_document_record=None,
+    MESES_ES=None,
+    pendientes_empresa_faena_periodo=None,
+    periodo_folder_segment=None,
+    date=None,
+    **_ignored,
 ):
+    if ui_tip is None:
+        ui_tip = lambda msg: st.info(msg)
+    if periodo_ym is None:
+        periodo_ym = lambda anio, mes: f"{int(anio):04d}-{int(mes):02d}"
+    if MESES_ES is None:
+        MESES_ES = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
+    if periodo_label is None:
+        periodo_label = lambda anio, mes: f"{int(anio):04d}-{int(mes):02d} · {MESES_ES.get(int(mes), str(mes))}"
+    if get_empresa_monthly_doc_types is None:
+        get_empresa_monthly_doc_types = lambda: []
+    if doc_tipo_join is None:
+        doc_tipo_join = lambda values: ", ".join(str(v) for v in values)
+    if doc_tipo_label is None:
+        doc_tipo_label = lambda v: str(v)
     ui_header(
         "Documentos Empresa (Faena)",
         "Carga documentos de empresa POR FAENA, POR MANDANTE y POR MES. Cada período mensual puede tener varios archivos por tipo.",
