@@ -5,6 +5,7 @@ import zipfile
 import hashlib
 import base64
 import sqlite3
+import sys
 
 # Postgres (Supabase)
 try:
@@ -28,6 +29,10 @@ import json
 import secrets
 import unicodedata
 
+APP_DIR = os.path.dirname(__file__)
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
 # ----------------------------
 # Config
 # ----------------------------
@@ -47,6 +52,22 @@ UPLOAD_HELP_TEXT = (
     "Máximo por archivo: 1,5 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
     "Si aun así excede el límite, redúcelo antes de subirlo. Sugerencia: puedes comprimirlo en iLovePDF."
 )
+
+
+def _record_soft_error(context: str, exc: Exception | None = None):
+    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
+    try:
+        logs = st.session_state.setdefault("soft_errors", [])
+        msg = str(exc).strip() if exc is not None else ""
+        logs.append({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "context": str(context or "").strip(),
+            "message": msg[:300],
+        })
+        if len(logs) > 30:
+            del logs[:-30]
+    except Exception:
+        pass
 
 
 # Fingerprints/cache helpers
@@ -183,6 +204,65 @@ def _is_select_query(q: str) -> bool:
     txt = re.sub(r"--.*?$", " ", txt, flags=re.M).strip().lower()
     return txt.startswith("select") or txt.startswith("with")
 
+
+def fetch_df(q: str, params=()):
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+
+def execute(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
+    with conn() as c:
+        c.execute(q, params)
+        c.commit()
+
+
+def execute_rowcount(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def executemany(q: str, seq_params):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
+            c.commit()
+            return
+    with conn() as c:
+        c.executemany(q, seq_params)
+        c.commit()
+
 @st.cache_resource(show_spinner=False)
 def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     ensure_dirs()
@@ -199,19 +279,13 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         pass
     return True
 
+
 def bootstrap_app_or_stop():
-    """Inicializa la app. Si falla algo crítico, muestra error y detiene Streamlit."""
     try:
         _bootstrap_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception as _boot_exc:
-        st.error("❌ No se pudo iniciar SEGAV ERP. Revisa la conexión a base de datos.")
-        st.code(str(_boot_exc))
-        st.markdown("""
-**Posibles causas:**
-- Falta `SUPABASE_DB_URL` (o `PG_DSN`) en Secrets / ENV.
-- Credenciales incorrectas o caducadas.
-- Si usas SQLite local, verifica que el directorio de datos tenga permisos de escritura.
-        """)
+    except Exception as exc:
+        st.error("No se pudo iniciar la app por un problema de arranque o conexión a la base de datos.")
+        st.code(str(exc))
         st.stop()
 
 def _qmark_to_pct(sql: str) -> str:
@@ -1003,6 +1077,13 @@ def ui_header(title: str, desc: str = ""):
 def ui_tip(text: str):
     st.info(text, icon="ℹ️")
 
+
+def go(page: str, faena_id: int | None = None):
+    st.session_state["nav_request"] = page
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = int(faena_id)
+    st.rerun()
+
 def safe_name(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
@@ -1315,56 +1396,6 @@ def cursor_execute(cur, q: str, params=()):
     if DB_BACKEND == "postgres":
         q = _qmark_to_pct(q).replace("datetime('now')", "now()")
     return cur.execute(q, params)
-
-
-def execute(q: str, params=()):
-    """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches automáticamente."""
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            c.execute(q2, params)
-            c.commit()
-            return
-    with conn() as c:
-        c.execute(q, params)
-        c.commit()
-
-
-def execute_rowcount(q: str, params=()):
-    """Ejecuta DML y devuelve el número de filas afectadas."""
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            cur = c.execute(q2, params)
-            c.commit()
-            try:
-                return int(cur.rowcount or 0)
-            except Exception:
-                return 0
-    with conn() as c:
-        cur = c.execute(q, params)
-        c.commit()
-        try:
-            return int(cur.rowcount or 0)
-        except Exception:
-            return 0
-
-
-def executemany(q: str, seq_params):
-    """Ejecuta DML en lote."""
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            with c.cursor() as cur:
-                cur.executemany(q2, seq_params)
-            c.commit()
-            return
-    with conn() as c:
-        c.executemany(q, seq_params)
-        c.commit()
 
 
 def ensure_core_tables_postgres():
@@ -3174,230 +3205,245 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso corporativa, de una sola vista y sin scroll en escritorio."""
+    """Pantalla de inicio exacta, de una sola vista, sin scroll en escritorio."""
+
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets", "branding")
+    exact_panel_path = os.path.join(assets_dir, "login_right_exact.png")
+
+    def _safe_read(path_: str):
+        try:
+            with open(path_, "rb") as fp:
+                return fp.read()
+        except Exception:
+            return None
+
+    logo_bytes = get_login_logo_bytes()
+    panel_bytes = _safe_read(exact_panel_path) or get_login_panel_approved_bytes() or get_login_hero_bytes()
+    logo_b64 = _b64e(logo_bytes) if logo_bytes else ""
+    panel_b64 = _b64e(panel_bytes) if panel_bytes else ""
 
     st.markdown(
-        """
+        f"""
         <style>
-        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"] {display:none !important;}
-        html, body, [data-testid="stAppViewContainer"], .stApp {height:100vh !important; overflow:hidden !important;}
-        .main, .block-container {
+        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"] {{display:none !important;}}
+        html, body, [data-testid="stAppViewContainer"], .stApp {{
+            height:100vh !important;
+            min-height:100vh !important;
+            overflow:hidden !important;
+            background:#f3f5f9 !important;
+        }}
+        [data-testid="stAppViewContainer"] > .main,
+        .main,
+        .block-container {{
             padding:0 !important;
             margin:0 !important;
             max-width:none !important;
-        }
-        [data-testid="stAppViewContainer"] > .main {padding:0 !important;}
-        .segav-login-screen {
+        }}
+        .block-container {{padding-top:0 !important; padding-bottom:0 !important;}}
+        .segav-login-root {{
+            width:100vw;
             height:100vh;
-            display:flex;
-            align-items:stretch;
-            background:#f5f7fb;
-            overflow:hidden;
-        }
-        .segav-login-left {
-            height:100vh;
+            min-height:100vh;
             display:flex;
             align-items:center;
             justify-content:center;
-            padding:28px 24px;
-        }
-        .segav-login-card {
-            width:min(460px, 100%);
+            overflow:hidden;
+        }}
+        .segav-login-frame {{
+            width:min(1280px, 96vw);
+            height:min(760px, 100vh);
+            display:grid;
+            grid-template-columns:minmax(420px, 40%) minmax(600px, 60%);
             background:#ffffff;
-            border:1px solid rgba(15,23,42,0.08);
-            border-radius:24px;
-            box-shadow:0 18px 52px rgba(15,23,42,0.10);
-            padding:28px 28px 22px 28px;
-        }
-        .segav-chip {
+            border-radius:0;
+            overflow:hidden;
+            border:0;
+            box-shadow:none;
+        }}
+        .segav-left {{
+            height:100%;
+            padding:48px 52px 24px 52px;
+            display:flex;
+            flex-direction:column;
+            justify-content:center;
+            background:#ffffff;
+        }}
+        .segav-chip {{
             display:inline-flex;
             align-items:center;
-            gap:8px;
+            width:max-content;
             padding:6px 12px;
             border-radius:999px;
             background:#eff6ff;
             color:#1d4ed8;
             font-size:11px;
             font-weight:800;
-            letter-spacing:0.03em;
-        }
-        .segav-login-title {
-            margin:12px 0 0 0;
-            color:#0f172a;
+            letter-spacing:.04em;
+            margin:0 0 14px 0;
+        }}
+        .segav-left h1 {{
             font-size:30px;
-            line-height:1.05;
+            line-height:1.08;
+            margin:0 0 10px 0;
+            color:#0f2346;
             font-weight:800;
-        }
-        .segav-login-sub {
-            margin-top:10px;
+        }}
+        .segav-sub {{
+            margin:0 0 20px 0;
             color:#475569;
-            font-size:13px;
+            font-size:14px;
             line-height:1.5;
-        }
-        .segav-login-card [data-testid="stForm"] {
+        }}
+        .segav-form-label {{
+            font-size:14px;
+            font-weight:700;
+            color:#1b2740;
+            margin:0 0 8px 0;
+        }}
+        .segav-login-root .stForm {{
             border:none !important;
             background:transparent !important;
+            box-shadow:none !important;
             padding:0 !important;
-            margin-top:14px;
-        }
-        .segav-login-card [data-testid="stForm"] > div:first-child {
-            border:none !important;
-            padding:0 !important;
-        }
-        .segav-login-card [data-testid="stTextInputRootElement"] {
-            border-radius:14px !important;
-        }
-        .segav-login-card div[data-testid="stFormSubmitButton"] > button {
-            min-height:46px;
-            font-weight:700;
-            border-radius:14px !important;
-        }
-        .segav-logo-wrap {
+            margin:0 !important;
+        }}
+        .segav-login-root .stTextInput > div > div input,
+        .segav-login-root div[data-testid="stTextInputRootElement"] input {{
+            height:52px !important;
+            font-size:16px !important;
+        }}
+        .segav-login-root div[data-testid="stTextInputRootElement"] {{
+            margin-bottom:16px !important;
+        }}
+        .segav-login-root div[data-testid="stFormSubmitButton"] {{margin-top:2px;}}
+        .segav-login-root div[data-testid="stFormSubmitButton"] > button {{
+            height:52px !important;
+            min-height:52px !important;
+            border-radius:10px !important;
+            font-size:16px !important;
+            font-weight:700 !important;
+        }}
+        .segav-logo-box {{
+            margin-top:18px;
             display:flex;
             flex-direction:column;
             align-items:center;
             justify-content:center;
-            margin-top:14px;
-            gap:8px;
-        }
-        .segav-logo-note {
             text-align:center;
-            color:#334155;
-            font-size:15px;
-            font-weight:700;
-            letter-spacing:0.02em;
-        }
-        .segav-footnote {
+            gap:6px;
+        }}
+        .segav-logo-box img {{
+            width:140px;
+            max-width:140px;
+            height:auto;
+            display:block;
+        }}
+        .segav-logo-text {{
+            font-size:18px;
+            font-weight:800;
+            color:#1258b8;
+            letter-spacing:.03em;
+        }}
+        .segav-footnote {{
             margin-top:10px;
+            text-align:center;
             color:#64748b;
             font-size:11px;
-            line-height:1.4;
-            text-align:center;
-        }
-        .segav-login-right {
-            height:100vh;
-            padding:18px 18px 18px 0;
+            line-height:1.35;
+        }}
+        .segav-right {{
+            height:100%;
+            background:linear-gradient(135deg, #0d51ad 0%, #0a3d83 100%);
             display:flex;
-            align-items:center;
-            justify-content:center;
-        }
-        .segav-login-panel {
-            width:100%;
-            height:calc(100vh - 36px);
-            border-radius:28px;
-            overflow:hidden;
-            box-shadow:0 18px 52px rgba(2,8,23,0.18);
-            border:1px solid rgba(255,255,255,0.18);
-            background:linear-gradient(135deg, #0b2540 0%, #10395f 100%);
-        }
-        .segav-login-panel img {
+            align-items:stretch;
+            justify-content:stretch;
+        }}
+        .segav-right img {{
             width:100%;
             height:100%;
             object-fit:cover;
             display:block;
-        }
-        @media (max-width: 980px) {
-            html, body, [data-testid="stAppViewContainer"], .stApp {height:auto !important; overflow:auto !important;}
-            .segav-login-screen {height:auto;}
-            .segav-login-left, .segav-login-right {height:auto; padding:16px;}
-            .segav-login-panel {height:auto;}
-        }
+        }}
+        @media (max-width: 980px) {{
+            html, body, [data-testid="stAppViewContainer"], .stApp {{height:auto !important; overflow:auto !important;}}
+            .segav-login-root {{height:auto; min-height:100vh; padding:20px 0;}}
+            .segav-login-frame {{width:min(96vw, 760px); height:auto; grid-template-columns:1fr; border-radius:20px; box-shadow:0 18px 52px rgba(15,23,42,.10);}}
+            .segav-right {{display:none;}}
+            .segav-left {{padding:32px 24px 24px 24px;}}
+        }}
         </style>
+        <div class="segav-login-root"><div class="segav-login-frame"><div class="segav-left">
+            <div class="segav-chip">SEGAV ERP · Acceso seguro</div>
+            <h1>Iniciar sesión</h1>
+            <div class="segav-sub">Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="segav-login-screen">', unsafe_allow_html=True)
-    left_col, right_col = st.columns([0.42, 0.58], gap="small")
+    ensure_users_table()
+    ensure_superadmin_exists()
 
-    with left_col:
-        st.markdown('<div class="segav-login-left"><div class="segav-login-card">', unsafe_allow_html=True)
-        st.markdown('<span class="segav-chip">SEGAV ERP · Acceso seguro</span>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-login-title">Iniciar sesión</div>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-login-sub">Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>', unsafe_allow_html=True)
-
-        ensure_users_table()
-        ensure_superadmin_exists()
-
-        if users_count() == 0:
-            DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-            DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
-            try:
-                salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
-                perms_json = json.dumps(SUPERADMIN_PERMS)
-                execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
-                )
-                auto_backup_db("users_seed_default_superadmin")
-            except Exception:
-                pass
-
-        with st.form("form_login"):
-            username = st.text_input("Usuario", placeholder="ej: a.garcia")
-            password = st.text_input("Contraseña", type="password")
-            ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
-
-        if ok:
-            u = (username or "").strip()
-            if not u or not password:
-                st.error("Usuario y contraseña son obligatorios.")
-                st.stop()
-            df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
-            if df.empty:
-                st.error("Usuario no existe o está desactivado.")
-                st.stop()
-            row = df.iloc[0].to_dict()
-            if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
-                st.error("Contraseña incorrecta.")
-                st.stop()
-            auth_set_session(row)
-            st.success("Ingreso exitoso.")
-            st.rerun()
-
-        st.markdown('<div class="segav-logo-wrap">', unsafe_allow_html=True)
-        render_brand_logo(width=140)
-        st.markdown('<div class="segav-logo-note">SEGAV ERP</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-footnote">Si olvidaste tu contraseña, un administrador puede restablecerla desde Usuarios.</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
-
-    with right_col:
-        panel_bytes = get_login_panel_approved_bytes()
-        st.markdown('<div class="segav-login-right"><div class="segav-login-panel">', unsafe_allow_html=True)
-        if panel_bytes:
-            panel_b64 = _b64e(panel_bytes)
-            st.markdown(
-                f'<img alt="SEGAV ERP Login Panel" src="data:image/png;base64,{panel_b64}">',
-                unsafe_allow_html=True,
+    if users_count() == 0:
+        DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+        DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+        try:
+            salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
+            perms_json = json.dumps(SUPERADMIN_PERMS)
+            execute(
+                "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
             )
-        else:
-            st.markdown('<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;">SEGAV ERP</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
+            auto_backup_db("users_seed_default_superadmin")
+        except Exception:
+            pass
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.form("form_login"):
+        st.markdown('<div class="segav-form-label">Usuario</div>', unsafe_allow_html=True)
+        username = st.text_input("Usuario", label_visibility="collapsed", placeholder="ej: a.garcia")
+        st.markdown('<div class="segav-form-label">Contraseña</div>', unsafe_allow_html=True)
+        password = st.text_input("Contraseña", type="password", label_visibility="collapsed")
+        ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
+
+    if ok:
+        u = (username or "").strip()
+        if not u or not password:
+            st.error("Usuario y contraseña son obligatorios.")
+            st.stop()
+        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+        if df.empty:
+            st.error("Usuario no existe o está desactivado.")
+            st.stop()
+        row = df.iloc[0].to_dict()
+        if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
+            st.error("Contraseña incorrecta.")
+            st.stop()
+        auth_set_session(row)
+        st.success("Ingreso exitoso.")
+        st.rerun()
+
+    st.markdown(
+        f"""
+            <div class="segav-logo-box">
+                {f'<img alt="SEGAV" src="data:image/png;base64,{logo_b64}" />' if logo_b64 else '<div style="font-size:36px;font-weight:800;color:#1258b8;">SEGAV</div>'}
+                <div class="segav-logo-text">SEGAV ERP</div>
+            </div>
+            <div class="segav-footnote">Si olvidaste tu contraseña, un administrador puede restablecerla desde Usuarios.</div>
+        </div>
+        <div class="segav-right">
+            {f'<img alt="SEGAV ERP Login Panel" src="data:image/png;base64,{panel_b64}" />' if panel_b64 else '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;">SEGAV ERP</div>'}
+        </div>
+        </div></div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
 # ----------------------------
 # Init
 # ----------------------------
 bootstrap_app_or_stop()
 
 inject_css()
-
-def _record_soft_error(context: str, exc: Exception | None = None):
-    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
-    try:
-        logs = st.session_state.setdefault("soft_errors", [])
-        msg = str(exc).strip() if exc is not None else ""
-        logs.append({
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "context": str(context or "").strip(),
-            "message": msg[:300],
-        })
-        # evita crecimiento infinito
-        if len(logs) > 30:
-            del logs[:-30]
-    except Exception:
-        pass
 
 
 # ----------------------------
@@ -5558,9 +5604,6 @@ def page_superadmin_empresas():
         current_user=current_user,
         is_superadmin=is_superadmin,
         ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
-        fetch_file_refs=fetch_file_refs,
-        cleanup_deleted_file_refs=cleanup_deleted_file_refs,
-        set_active_cliente_key=lambda key: st.session_state.__setitem__('active_cliente_key', key),
     )
 
 
