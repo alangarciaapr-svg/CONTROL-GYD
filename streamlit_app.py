@@ -3205,20 +3205,20 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de inicio exacta según la referencia aprobada por el usuario."""
+    """Pantalla de acceso profesional, de una sola vista en escritorio."""
 
-    assets_dir = os.path.join(os.path.dirname(__file__), "assets", "branding")
-    exact_frame_path = os.path.join(assets_dir, "login_frame_exact_full.png")
-
-    def _safe_read(path_: str):
+    def _safe_b64(reader):
         try:
-            with open(path_, "rb") as fp:
-                return fp.read()
+            data = reader()
+            return _b64e(data) if data else ""
         except Exception:
-            return None
+            return ""
 
-    frame_bytes = _safe_read(exact_frame_path)
-    frame_b64 = _b64e(frame_bytes) if frame_bytes else ""
+    logo_b64 = _safe_b64(get_login_logo_bytes)
+    hero_b64 = _safe_b64(get_login_hero_bytes)
+    panel_b64 = hero_b64 or _safe_b64(get_login_panel_approved_bytes)
+    panel_mime = "image/svg+xml" if hero_b64 else "image/png"
+    panel_css = f"background-image:url('data:{panel_mime};base64,{panel_b64}');" if panel_b64 else "background:linear-gradient(135deg,#0d4ea6 0%,#0a3a7b 100%);"
 
     st.markdown(
         f"""
@@ -3228,7 +3228,7 @@ def auth_gate_ui():
             height:100vh !important;
             min-height:100vh !important;
             overflow:hidden !important;
-            background:#f6f6f7 !important;
+            background:linear-gradient(180deg, #eef3f8 0%, #e6edf6 100%) !important;
         }}
         [data-testid="stAppViewContainer"] > .main,
         .main,
@@ -3245,102 +3245,232 @@ def auth_gate_ui():
             display:flex;
             align-items:center;
             justify-content:center;
+            padding:22px;
+            box-sizing:border-box;
             overflow:hidden;
-            background:#f6f6f7;
         }}
-        .segav-login-exact {{
+        .segav-login-shell {{
+            width:min(1420px, 96vw);
+            height:min(860px, calc(100vh - 44px));
+            display:grid;
+            grid-template-columns:minmax(390px, 37%) minmax(0, 63%);
+            background:#ffffff;
+            border-radius:28px;
+            overflow:hidden;
+            box-shadow:0 32px 72px rgba(15, 23, 42, 0.16);
+            border:1px solid rgba(15, 23, 42, 0.08);
+        }}
+        .segav-login-left {{
+            background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            padding:48px 44px 34px 44px;
+            display:flex;
+            flex-direction:column;
+            justify-content:space-between;
+            gap:24px;
+        }}
+        .segav-login-copy {{display:flex; flex-direction:column; gap:12px;}}
+        .segav-login-kicker {{
+            margin:0;
+            font-size:13px;
+            font-weight:800;
+            letter-spacing:0.18em;
+            text-transform:uppercase;
+            color:#0e58b6;
+        }}
+        .segav-login-title {{
+            margin:0;
+            font-size:clamp(34px, 2.5vw, 42px);
+            line-height:1.08;
+            font-weight:800;
+            color:#0f2547;
+            letter-spacing:-0.03em;
+        }}
+        .segav-login-subtitle {{
+            margin:0;
+            font-size:16px;
+            line-height:1.65;
+            color:#5b6d86;
+            max-width:460px;
+        }}
+        .segav-login-form-wrap {{
+            display:flex;
+            flex-direction:column;
+            gap:16px;
+            padding:30px 28px;
+            border-radius:22px;
+            background:linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+            border:1px solid #dde6f2;
+            box-shadow:0 18px 36px rgba(15, 23, 42, 0.06);
+        }}
+        .segav-login-form-wrap .stForm {{
+            border:none !important;
+            background:transparent !important;
+            box-shadow:none !important;
+            padding:0 !important;
+            margin:0 !important;
+        }}
+        .segav-login-form-wrap form {{gap:0 !important;}}
+        .segav-field-label {{
+            margin:0 0 8px 0;
+            font-size:15px;
+            line-height:1.2;
+            font-weight:700;
+            color:#1c3253;
+        }}
+        .segav-login-form-wrap div[data-testid="stTextInput"] {{margin:0 0 18px 0 !important;}}
+        .segav-login-form-wrap div[data-testid="stTextInputRootElement"] {{
+            background:#f8fbff !important;
+            border:1px solid #d6dfeb !important;
+            border-radius:14px !important;
+            box-shadow:none !important;
+            min-height:56px !important;
+            transition:border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+        }}
+        .segav-login-form-wrap div[data-testid="stTextInputRootElement"]:focus-within {{
+            border-color:#0e58b6 !important;
+            background:#ffffff !important;
+            box-shadow:0 0 0 4px rgba(14, 88, 182, 0.12) !important;
+        }}
+        .segav-login-form-wrap div[data-testid="stTextInputRootElement"] input {{
+            height:56px !important;
+            min-height:56px !important;
+            font-size:16px !important;
+            color:#112949 !important;
+            padding:0 16px !important;
+            background:transparent !important;
+        }}
+        .segav-login-form-wrap div[data-testid="stTextInputRootElement"] input::placeholder {{color:#8a99ad !important;}}
+        .segav-login-helper {{
+            margin:-2px 0 16px 0;
+            text-align:right;
+            font-size:14px;
+            font-weight:600;
+            color:#0e58b6;
+        }}
+        .segav-login-form-wrap div[data-testid="stFormSubmitButton"] {{margin:0 !important;}}
+        .segav-login-form-wrap div[data-testid="stFormSubmitButton"] > button {{
+            width:100% !important;
+            min-height:56px !important;
+            height:56px !important;
+            border:none !important;
+            border-radius:14px !important;
+            background:linear-gradient(135deg, #0f63d8 0%, #0c4da5 100%) !important;
+            color:#ffffff !important;
+            font-size:18px !important;
+            font-weight:800 !important;
+            letter-spacing:-0.01em;
+            box-shadow:0 18px 34px rgba(15, 99, 216, 0.28) !important;
+            transition:transform .18s ease, box-shadow .18s ease, filter .18s ease;
+        }}
+        .segav-login-form-wrap div[data-testid="stFormSubmitButton"] > button:hover {{
+            transform:translateY(-1px);
+            filter:brightness(1.02);
+            box-shadow:0 20px 36px rgba(15, 99, 216, 0.32) !important;
+        }}
+        .segav-login-form-wrap div[data-testid="stFormSubmitButton"] > button:focus {{
+            box-shadow:0 0 0 4px rgba(15, 99, 216, 0.16), 0 18px 34px rgba(15, 99, 216, 0.28) !important;
+        }}
+        .segav-login-brand {{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            padding-top:4px;
+        }}
+        .segav-login-brand img {{
+            width:clamp(170px, 14vw, 230px);
+            max-width:100%;
+            height:auto;
+            object-fit:contain;
+            display:block;
+        }}
+        .segav-login-brand-fallback {{
+            font-size:38px;
+            line-height:1;
+            font-weight:800;
+            color:#0e58b6;
+            letter-spacing:-0.04em;
+        }}
+        .segav-login-right {{
             position:relative;
-            width:min(86vw, 1300px);
-            aspect-ratio:1795 / 1059;
-            background-image:url('data:image/png;base64,{frame_b64}');
-            background-size:100% 100%;
+            overflow:hidden;
+            {panel_css}
+            background-size:cover;
             background-position:center center;
             background-repeat:no-repeat;
+            display:flex;
+            align-items:stretch;
         }}
-        .segav-login-exact .stForm {{
-            position:absolute !important;
-            inset:0 !important;
-            border:none !important;
-            background:transparent !important;
-            box-shadow:none !important;
-            padding:0 !important;
-            margin:0 !important;
+        .segav-login-right::before {{
+            content:"";
+            position:absolute;
+            inset:0;
+            background:linear-gradient(180deg, rgba(10, 47, 104, 0.04) 0%, rgba(10, 47, 104, 0.10) 100%);
         }}
-        .segav-login-exact form {{
-            position:absolute !important;
-            inset:0 !important;
-            min-height:100% !important;
+        .segav-login-right::after {{
+            content:"";
+            position:absolute;
+            inset:auto 28px 28px 28px;
+            height:86px;
+            border-radius:22px;
+            background:linear-gradient(90deg, rgba(15, 37, 71, 0.92) 0%, rgba(14, 88, 182, 0.82) 100%);
+            box-shadow:0 20px 36px rgba(8, 32, 77, 0.18);
+            z-index:2;
         }}
-        .segav-login-exact label[data-testid="stWidgetLabel"] {{display:none !important;}}
-        .segav-login-exact div[data-testid="stTextInput"] {{margin:0 !important;}}
-        .segav-login-exact div[data-testid="stTextInputRootElement"] {{
-            background:transparent !important;
-            border:none !important;
-            box-shadow:none !important;
+        .segav-login-right-meta {{
+            position:absolute;
+            inset:auto 44px 44px 44px;
+            z-index:3;
+            display:grid;
+            grid-template-columns:repeat(3, minmax(0, 1fr));
+            gap:20px;
+            color:#ffffff;
         }}
-        .segav-login-exact div[data-testid="stTextInput"]:has(input[aria-label="Usuario"]) {{
-            position:absolute !important;
-            left:4.1% !important;
-            top:25.55% !important;
-            width:31.7% !important;
-            z-index:5 !important;
+        .segav-login-right-item {{display:flex; flex-direction:column; gap:6px;}}
+        .segav-login-right-label {{
+            margin:0;
+            font-size:12px;
+            line-height:1.2;
+            font-weight:700;
+            letter-spacing:0.12em;
+            text-transform:uppercase;
+            color:rgba(255,255,255,0.72);
         }}
-        .segav-login-exact div[data-testid="stTextInput"]:has(input[aria-label="Contraseña"]) {{
-            position:absolute !important;
-            left:4.1% !important;
-            top:42.55% !important;
-            width:31.7% !important;
-            z-index:5 !important;
+        .segav-login-right-value {{
+            margin:0;
+            font-size:18px;
+            line-height:1.2;
+            font-weight:800;
+            color:#ffffff;
         }}
-        .segav-login-exact input[aria-label="Usuario"],
-        .segav-login-exact input[aria-label="Contraseña"] {{
-            height:54px !important;
-            min-height:54px !important;
-            border:none !important;
-            box-shadow:none !important;
-            background:transparent !important;
-            color:#6b7280 !important;
-            font-size:17px !important;
-            font-weight:500 !important;
-            padding:0 16px 0 58px !important;
-            caret-color:#1f2937 !important;
-        }}
-        .segav-login-exact input[aria-label="Usuario"]::placeholder,
-        .segav-login-exact input[aria-label="Contraseña"]::placeholder {{
-            color:transparent !important;
-        }}
-        .segav-login-exact div[data-testid="stFormSubmitButton"] {{
-            position:absolute !important;
-            left:4.1% !important;
-            top:59.55% !important;
-            width:31.7% !important;
-            z-index:6 !important;
-            margin:0 !important;
-        }}
-        .segav-login-exact div[data-testid="stFormSubmitButton"] > button {{
-            width:100% !important;
-            height:54px !important;
-            min-height:54px !important;
-            opacity:0 !important;
-            background:transparent !important;
-            border:none !important;
-            box-shadow:none !important;
-            color:transparent !important;
-            margin:0 !important;
-            padding:0 !important;
-            cursor:pointer !important;
-        }}
-        .segav-login-exact div[data-testid="stFormSubmitButton"] > button:focus {{
-            outline:none !important;
-            box-shadow:none !important;
+        @media (max-width: 1180px) {{
+            .segav-login-shell {{grid-template-columns:minmax(360px, 42%) minmax(0, 58%);}}
+            .segav-login-left {{padding:40px 36px 30px 36px;}}
+            .segav-login-right-meta {{grid-template-columns:1fr; gap:10px; inset:auto 38px 40px 38px;}}
+            .segav-login-right::after {{height:132px;}}
         }}
         @media (max-width: 980px) {{
-            html, body, [data-testid="stAppViewContainer"], .stApp {{overflow:auto !important; height:auto !important;}}
-            .segav-login-root {{min-height:100vh; height:auto; padding:18px 0; overflow:auto;}}
-            .segav-login-exact {{width:min(96vw, 760px);}}
+            html, body, [data-testid="stAppViewContainer"], .stApp {{height:auto !important; min-height:100vh !important; overflow:auto !important;}}
+            .segav-login-root {{height:auto; min-height:100vh; align-items:flex-start; padding:16px; overflow:auto;}}
+            .segav-login-shell {{
+                width:min(100%, 860px);
+                height:auto;
+                grid-template-columns:1fr;
+            }}
+            .segav-login-left {{padding:34px 24px 28px 24px;}}
+            .segav-login-right {{min-height:420px;}}
+            .segav-login-right::after {{inset:auto 18px 18px 18px; height:170px;}}
+            .segav-login-right-meta {{grid-template-columns:1fr; gap:12px; inset:auto 30px 30px 30px;}}
         }}
         </style>
-        <div class="segav-login-root"><div class="segav-login-exact">
+        <div class="segav-login-root">
+            <div class="segav-login-shell">
+                <section class="segav-login-left">
+                    <div class="segav-login-copy">
+                        <p class="segav-login-kicker">SEGAV ERP</p>
+                        <h1 class="segav-login-title">Acceso al sistema</h1>
+                        <p class="segav-login-subtitle">Plataforma ERP multiempresa para gestión documental, seguridad, cumplimiento y operación centralizada.</p>
+                    </div>
+                    <div class="segav-login-form-wrap">
         """,
         unsafe_allow_html=True,
     )
@@ -3363,11 +3493,56 @@ def auth_gate_ui():
             pass
 
     with st.form("form_login"):
-        username = st.text_input("Usuario", label_visibility="collapsed", placeholder="", key="login_username_exact")
-        password = st.text_input("Contraseña", type="password", label_visibility="collapsed", placeholder="", key="login_password_exact")
+        st.markdown('<p class="segav-field-label">Usuario</p>', unsafe_allow_html=True)
+        username = st.text_input(
+            "Usuario",
+            label_visibility="collapsed",
+            placeholder="Ingrese su usuario",
+            key="login_username_pro",
+        )
+        st.markdown('<p class="segav-field-label">Contraseña</p>', unsafe_allow_html=True)
+        password = st.text_input(
+            "Contraseña",
+            type="password",
+            label_visibility="collapsed",
+            placeholder="Ingrese su contraseña",
+            key="login_password_pro",
+        )
+        st.markdown('<div class="segav-login-helper">¿Olvidó su contraseña?</div>', unsafe_allow_html=True)
         ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
+    brand_markup = (
+        f'<div class="segav-login-brand"><img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}"></div>'
+        if logo_b64
+        else '<div class="segav-login-brand"><div class="segav-login-brand-fallback">SEGAV ERP</div></div>'
+    )
+
+    st.markdown(
+        f"""
+                    </div>
+                    {brand_markup}
+                </section>
+                <section class="segav-login-right">
+                    <div class="segav-login-right-meta">
+                        <div class="segav-login-right-item">
+                            <p class="segav-login-right-label">Control</p>
+                            <p class="segav-login-right-value">Documentos, vigencias y trazabilidad</p>
+                        </div>
+                        <div class="segav-login-right-item">
+                            <p class="segav-login-right-label">Cumplimiento</p>
+                            <p class="segav-login-right-value">SGSST, alertas y seguimiento</p>
+                        </div>
+                        <div class="segav-login-right-item">
+                            <p class="segav-login-right-label">Escalabilidad</p>
+                            <p class="segav-login-right-value">Operación multiempresa centralizada</p>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if ok:
         u = (username or "").strip()
