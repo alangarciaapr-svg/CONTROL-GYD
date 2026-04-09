@@ -199,6 +199,21 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         pass
     return True
 
+def bootstrap_app_or_stop():
+    """Inicializa la app. Si falla algo crítico, muestra error y detiene Streamlit."""
+    try:
+        _bootstrap_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    except Exception as _boot_exc:
+        st.error("❌ No se pudo iniciar SEGAV ERP. Revisa la conexión a base de datos.")
+        st.code(str(_boot_exc))
+        st.markdown("""
+**Posibles causas:**
+- Falta `SUPABASE_DB_URL` (o `PG_DSN`) en Secrets / ENV.
+- Credenciales incorrectas o caducadas.
+- Si usas SQLite local, verifica que el directorio de datos tenga permisos de escritura.
+        """)
+        st.stop()
+
 def _qmark_to_pct(sql: str) -> str:
     # Convert SQLite '?' placeholders to psycopg '%s' (only outside single quotes)
     if "?" not in sql:
