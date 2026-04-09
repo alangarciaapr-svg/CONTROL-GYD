@@ -6,10 +6,10 @@ import pandas as pd
 
 IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
 IMPLEMENTATION_LABELS = {
-    "DESDE_CERO": "Desde cero",
+    "DESDE_CERO": "Desde cero (recomendado)",
     "CONFIGURACION_BASE": "Configuración base",
     "DEMO_PRUEBA": "Demo / Prueba",
-    "CONFIGURABLE": "Desde cero",
+    "CONFIGURABLE": "Desde cero (recomendado)",
     "VERTICAL FORESTAL": "Configuración base forestal",
     "CORPORATIVO": "Configuración corporativa",
 }
