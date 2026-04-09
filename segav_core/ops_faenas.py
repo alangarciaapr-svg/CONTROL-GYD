@@ -403,8 +403,12 @@ def page_faenas(
     parse_date_maybe,
     fetch_file_refs,
     cleanup_deleted_file_refs,
-    ESTADOS_FAENA,
+    ESTADOS_FAENA=None,
+    pendientes_obligatorios=None,
+    **_ignored,
 ):
+    if ESTADOS_FAENA is None:
+        ESTADOS_FAENA = ["ACTIVA", "TERMINADA"]
     ui_header("Faenas", "Crea, edita y gestiona faenas por mandante. Registra fechas/estado y carga anexos si aplica.")
     mand = fetch_df("SELECT * FROM mandantes ORDER BY nombre")
     if mand.empty:

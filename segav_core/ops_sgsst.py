@@ -46,9 +46,12 @@ def page_sgsst(
     SGSST_TIPOS_EVENTO,
     SGSST_TIPOS_CAP,
     doc_tipo_join,
+    current_user,
 ):
     ui_header("Mi Empresa / SGSST", "Núcleo comercializable de SEGAV ERP: configurable para cualquier empresa, sin reemplazar lo ya existente.")
     ensure_sgsst_seed_data()
+    _u = current_user() or {}
+    _is_superadmin = str(_u.get("role") or "").upper() == "SUPERADMIN"
 
     company_df = fetch_df("SELECT * FROM sgsst_empresa ORDER BY id LIMIT 1")
     company = company_df.iloc[0].to_dict() if not company_df.empty else {}
@@ -117,7 +120,7 @@ def page_sgsst(
             st.markdown("### Vista ejecutiva")
             resumen = [
                 ("ERP", cfg.get("erp_name", "SEGAV ERP")),
-                ("Rubro", cfg.get("erp_vertical", "General")),
+                ("Vertical", cfg.get("erp_vertical", "General")),
                 ("Plantilla actual", cfg.get("template_actual", "GENERAL")),
                 ("Cliente actual", current_client.get("cliente_nombre") or cfg.get("cliente_actual") or "Sin definir"),
                 ("Razón social operativa", company.get("razon_social") or "Sin definir"),
@@ -140,7 +143,7 @@ def page_sgsst(
                 {"Indicador": "DS 44", "Estado": "Base ERP visible cargada"},
                 {"Indicador": "DS 594", "Estado": "Checklist inicial habilitado"},
                 {"Indicador": "Multiempresa", "Estado": cfg.get("multiempresa", "SI")},
-                {"Indicador": "Tipo de inicio", "Estado": cfg.get("modo_implementacion", "DESDE_CERO")},
+                {"Indicador": "Implementación", "Estado": cfg.get("modo_implementacion", "CONFIGURABLE")},
             ])
             st.dataframe(estado_rows, use_container_width=True, hide_index=True)
             b1, b2, b3 = st.columns(3)
@@ -159,7 +162,7 @@ def page_sgsst(
             {"Bloque": "Producto", "Valor": cfg.get("erp_slogan", "") or "Sin definir"},
             {"Bloque": "Cliente actual", "Valor": current_client.get("cliente_nombre") or cfg.get("cliente_actual") or "Sin definir"},
             {"Bloque": "RUT cliente", "Valor": current_client.get("rut") or clean_rut(company.get("rut") or "") or "Sin definir"},
-            {"Bloque": "Rubro actual", "Valor": cfg.get("erp_vertical", "General")},
+            {"Bloque": "Vertical actual", "Valor": cfg.get("erp_vertical", "General")},
             {"Bloque": "Modo comercial", "Valor": cfg.get("multiempresa", "SI")},
             {"Bloque": "Plantilla activa", "Valor": cfg.get("template_actual", "GENERAL")},
         ])
@@ -172,12 +175,12 @@ def page_sgsst(
         with z1:
             erp_name = st.text_input("Nombre comercial", value=cfg.get("erp_name", "SEGAV ERP"), key="segav_cfg_name")
             erp_slogan = st.text_area("Propuesta de valor", value=cfg.get("erp_slogan", "ERP comercializable de cumplimiento, prevención y operación documental"), height=90, key="segav_cfg_slogan")
-            erp_vertical = st.text_input("Rubro base", value=cfg.get("erp_vertical", "General"), key="segav_cfg_vertical", help="Rubro principal o tipo de empresa que ocupará esta configuración base.")
+            erp_vertical = st.text_input("Vertical / rubro base", value=cfg.get("erp_vertical", "General"), key="segav_cfg_vertical")
         with z2:
             multiempresa = st.selectbox("Modo comercial", ["SI", "NO"], index=0 if cfg.get("multiempresa", "SI") == "SI" else 1, key="segav_cfg_multi")
             cliente_actual = st.text_input("Cliente / empresa actual", value=cfg.get("cliente_actual", company.get("razon_social") or "Empresa actual"), key="segav_cfg_cliente")
-            impl_opts = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
-            modo_impl = st.selectbox("Tipo de inicio", impl_opts, index=impl_opts.index(cfg.get("modo_implementacion", "DESDE_CERO")) if cfg.get("modo_implementacion", "DESDE_CERO") in impl_opts else 0, key="segav_cfg_impl", help="Define si las empresas nuevas parten vacías, con configuración base o como demo.")
+            impl_opts = ["CONFIGURABLE", "VERTICAL FORESTAL", "CORPORATIVO"]
+            modo_impl = st.selectbox("Implementación", impl_opts, index=impl_opts.index(cfg.get("modo_implementacion", "CONFIGURABLE")) if cfg.get("modo_implementacion", "CONFIGURABLE") in impl_opts else 0, key="segav_cfg_impl")
         if st.button("Guardar configuración ERP", key="segav_cfg_save", type="primary"):
             now = datetime.now().isoformat(timespec='seconds')
             payload = {
@@ -199,7 +202,7 @@ def page_sgsst(
         st.markdown("### Plantillas por rubro")
         tpl_df = segav_templates_df()
         if tpl_df is not None and not tpl_df.empty:
-            st.dataframe(tpl_df[["template_key", "template_label", "vertical", "description", "activo"]].rename(columns={"template_key":"Código", "template_label":"Plantilla", "vertical":"Rubro", "description":"Descripción", "activo":"Activa"}), use_container_width=True, hide_index=True)
+            st.dataframe(tpl_df[["template_key", "template_label", "vertical", "description", "activo"]].rename(columns={"template_key":"Código", "template_label":"Plantilla", "vertical":"Vertical", "description":"Descripción", "activo":"Activa"}), use_container_width=True, hide_index=True)
         tpl_options = tpl_df["template_key"].tolist() if tpl_df is not None and not tpl_df.empty else list(ERP_TEMPLATE_PRESETS.keys())
         current_tpl = cfg.get("template_actual", tpl_options[0] if tpl_options else "GENERAL")
         if current_tpl not in tpl_options and tpl_options:
@@ -210,7 +213,7 @@ def page_sgsst(
             p1, p2 = st.columns([1.1, 1])
             with p1:
                 st.write(f"**Descripción:** {payload.get('description') or 'Sin descripción'}")
-                st.write(f"**Rubro:** {payload.get('vertical') or 'Sin definir'}")
+                st.write(f"**Vertical:** {payload.get('vertical') or 'Sin definir'}")
                 st.write(f"**Cargos incluidos:** {', '.join(payload.get('cargos', [])) or 'Sin cargos'}")
             with p2:
                 preview_rows = []
@@ -228,89 +231,10 @@ def page_sgsst(
                     st.error(msg)
 
         st.markdown("---")
-        st.markdown("### Clientes / Multiempresa")
-        cli_df = segav_clientes_df()
-        if cli_df is not None and not cli_df.empty:
-            st.dataframe(cli_df[["cliente_key", "cliente_nombre", "rut", "vertical", "modo_implementacion", "activo"]].rename(columns={"cliente_key":"Código", "cliente_nombre":"Cliente", "rut":"RUT", "vertical":"Rubro", "modo_implementacion":"Tipo de inicio", "activo":"Activo"}), use_container_width=True, hide_index=True)
-        c1, c2, c3 = st.columns(3)
-        cli_name = c1.text_input("Nuevo cliente / empresa", key="segav_cli_name")
-        cli_rut = c2.text_input("RUT cliente", key="segav_cli_rut")
-        cli_vertical = c3.text_input("Rubro cliente", value=cfg.get("erp_vertical", "General"), key="segav_cli_vertical", help="Rubro o tipo de empresa del cliente.")
-        c4, c5, c6 = st.columns(3)
-        cli_contacto = c4.text_input("Contacto", key="segav_cli_contacto")
-        cli_email = c5.text_input("Email", key="segav_cli_email")
-        cli_obs = c6.text_input("Observaciones", key="segav_cli_obs")
-        if st.button("Registrar cliente ERP", key="segav_add_cliente"):
-            if not cli_name.strip():
-                st.error("Debes indicar el nombre del cliente.")
-            else:
-                now = datetime.now().isoformat(timespec='seconds')
-                cliente_key = make_erp_key(cli_name, prefix='cli_')
-                execute("DELETE FROM segav_erp_clientes WHERE cliente_key=?", (cliente_key,))
-                execute("INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (cliente_key, cli_name.strip(), clean_rut(cli_rut), cli_vertical.strip() or cfg.get('erp_vertical', 'General'), modo_impl, 1, cli_contacto.strip(), cli_email.strip(), cli_obs.strip(), now, now))
-                for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
-                    execute("INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM segav_erp_parametros_cliente WHERE cliente_key=? AND param_key=?)", (cliente_key, param_key, str(param_value), now, cliente_key, param_key))
-                clear_app_caches()
-                sgsst_log("Clientes ERP", "Agregar", cli_name.strip())
-                st.success("Cliente ERP registrado.")
-                st.rerun()
-        cli_keys = cli_df["cliente_key"].tolist() if cli_df is not None and not cli_df.empty else []
-        current_client_key_cfg = segav_erp_value("current_client_key", cli_keys[0] if cli_keys else "")
-        if cli_keys:
-            if current_client_key_cfg not in cli_keys:
-                current_client_key_cfg = cli_keys[0]
-            cli_active = st.selectbox("Cliente activo en el ERP", cli_keys, index=cli_keys.index(current_client_key_cfg), key="segav_cli_active", format_func=lambda x: str(cli_df[cli_df['cliente_key']==x].iloc[0]['cliente_nombre']))
-            if st.button("Usar como cliente actual", key="segav_set_cli_active"):
-                nombre_cli = str(cli_df[cli_df['cliente_key']==cli_active].iloc[0]['cliente_nombre'])
-                set_segav_erp_config_value("current_client_key", cli_active)
-                set_segav_erp_config_value("cliente_actual", nombre_cli)
-                clear_app_caches()
-                sgsst_log("Clientes ERP", "Activar", nombre_cli)
-                st.success("Cliente actual actualizado.")
-                st.rerun()
-
-        st.markdown("---")
-        st.markdown("### Parámetros por cliente")
-        cli_keys = cli_df["cliente_key"].tolist() if cli_df is not None and not cli_df.empty else []
-        param_client_key = None
-        if cli_keys:
-            default_cli = segav_erp_value("current_client_key", cli_keys[0])
-            if default_cli not in cli_keys:
-                default_cli = cli_keys[0]
-            param_client_key = st.selectbox("Cliente a parametrizar", cli_keys, index=cli_keys.index(default_cli), key="segav_param_cliente", format_func=lambda x: str(cli_df[cli_df['cliente_key']==x].iloc[0]['cliente_nombre']))
-        if param_client_key:
-            cli_params = segav_cliente_params(param_client_key)
-            pp1, pp2, pp3, pp4 = st.columns(4)
-            p_1 = pp1.selectbox("Multi faena", ["SI", "NO"], index=0 if cli_params.get("usa_multi_faena", "SI") == "SI" else 1, key="segav_param_multi_faena")
-            p_2 = pp2.selectbox("Docs empresa mensuales", ["SI", "NO"], index=0 if cli_params.get("usa_docs_empresa_mensuales", "SI") == "SI" else 1, key="segav_param_docs_mensuales")
-            p_3 = pp3.selectbox("MIPER", ["SI", "NO"], index=0 if cli_params.get("usa_miper", "SI") == "SI" else 1, key="segav_param_miper")
-            p_4 = pp4.selectbox("DS 594", ["SI", "NO"], index=0 if cli_params.get("usa_ds594", "SI") == "SI" else 1, key="segav_param_ds594")
-            pp5, pp6, pp7, pp8 = st.columns(4)
-            p_5 = pp5.selectbox("Ley 16.744", ["SI", "NO"], index=0 if cli_params.get("usa_ley_16744", "SI") == "SI" else 1, key="segav_param_ley")
-            p_6 = pp6.selectbox("Capacitaciones / ODI", ["SI", "NO"], index=0 if cli_params.get("usa_capacitaciones_odi", "SI") == "SI" else 1, key="segav_param_cap")
-            p_7 = pp7.selectbox("Auditoría", ["SI", "NO"], index=0 if cli_params.get("usa_auditoria", "SI") == "SI" else 1, key="segav_param_aud")
-            p_8 = pp8.selectbox("Branding", ["ESTANDAR", "CLIENTE"], index=0 if cli_params.get("branding_cliente", "ESTANDAR") == "ESTANDAR" else 1, key="segav_param_brand")
-            if st.button("Guardar parámetros del cliente", key="segav_save_cliente_params"):
-                now = datetime.now().isoformat(timespec='seconds')
-                payload = {
-                    "usa_multi_faena": p_1,
-                    "usa_docs_empresa_mensuales": p_2,
-                    "usa_miper": p_3,
-                    "usa_ds594": p_4,
-                    "usa_ley_16744": p_5,
-                    "usa_capacitaciones_odi": p_6,
-                    "usa_auditoria": p_7,
-                    "branding_cliente": p_8,
-                }
-                for pk, pv in payload.items():
-                    execute("DELETE FROM segav_erp_parametros_cliente WHERE cliente_key=? AND param_key=?", (param_client_key, pk))
-                    execute("INSERT INTO segav_erp_parametros_cliente(cliente_key, param_key, param_value, updated_at) VALUES(?,?,?,?)", (param_client_key, pk, str(pv), now))
-                clear_app_caches()
-                sgsst_log("Clientes ERP", "Guardar parámetros", param_client_key)
-                st.success("Parámetros del cliente guardados.")
-                st.rerun()
-
-        st.info("Esta capa vuelve a SEGAV ERP configurable y comercializable para cualquier empresa: nombre, rubro, tipo de inicio, modo multiempresa, plantillas por rubro, clientes y parámetros por cliente.")
+        if _is_superadmin:
+            st.info("La administración completa de empresas, alta/baja, edición y designación de administradores está centralizada en **SuperAdmin / Empresas**.", icon="🌐")
+        else:
+            st.info("La gestión multiempresa y de administradores está disponible solo para **SUPERADMIN** en la sección **SuperAdmin / Empresas**.", icon="🔒")
 
     with tabs[3]:
         st.markdown("### Catálogos configurables")

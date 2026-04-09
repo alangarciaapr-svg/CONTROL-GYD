@@ -206,7 +206,13 @@ def require_perm(perm: str):
         st.stop()
 
 def auth_gate_ui(render_brand_logo: Callable | None = None, auto_backup_callback: Callable | None = None, brand_name: str = "SEGAV ERP"):
-    """Pantalla de acceso corporativa full-screen, sin scroll normal en escritorio."""
+    """Pantalla de inicio corporativa aprobada, compacta y sin scroll normal."""
+
+    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "branding")
+    logo_path = os.path.join(assets_dir, "segav_logo_final.png")
+    if not os.path.exists(logo_path):
+        logo_path = os.path.join(assets_dir, "segav_logo.png")
+    right_img_path = os.path.join(assets_dir, "login_right_exact.png")
 
     def _img_b64(path: str) -> str:
         try:
@@ -215,96 +221,74 @@ def auth_gate_ui(render_brand_logo: Callable | None = None, auto_backup_callback
         except Exception:
             return ""
 
-    logo_path = "assets/branding/segav_logo_login.png"
-    if not os.path.exists(logo_path):
-        logo_path = "assets/branding/segav_logo.png"
-    hero_path = "assets/branding/login_hero_approved.png"
-    if not os.path.exists(hero_path):
-        hero_path = "assets/branding/login_hero_segav.svg"
-
     logo_b64 = _img_b64(logo_path)
-    hero_is_svg = str(hero_path).lower().endswith('.svg')
-    hero_inline = ""
-    if hero_is_svg:
-        try:
-            hero_inline = open(hero_path, 'r', encoding='utf-8').read()
-        except Exception:
-            hero_inline = ""
-    hero_b64 = _img_b64(hero_path) if not hero_is_svg else ""
+    hero_b64 = _img_b64(right_img_path)
 
     st.markdown(
         f"""
         <style>
-        html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] > .main {{
+        html, body, [data-testid="stAppViewContainer"], .stApp {{
             height: 100vh !important;
             overflow: hidden !important;
-            background: #eef2f7;
+            background: #f3f3f3 !important;
         }}
-        [data-testid="stSidebar"], header[data-testid="stHeader"], #MainMenu, footer {{display:none !important;}}
-        .block-container {{padding: 0 !important; max-width: 100% !important;}}
-        .segav-auth-shell {{
+        [data-testid="stHeader"] {{background: transparent;}}
+        .block-container {{padding-top: 0 !important; padding-bottom: 0 !important; max-width: 100% !important;}}
+        section[data-testid="stSidebar"] {{display: none !important;}}
+        div[data-testid="stVerticalBlock"]:has(> .segav-login-shell) {{height: 100vh;}}
+        .segav-login-shell {{
             height: 100vh;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            padding: 20px 26px;
-            box-sizing:border-box;
-            overflow:hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
         }}
-        .segav-auth-card {{
-            width:min(1300px, 96vw);
-            height:min(760px, calc(100vh - 40px));
-            background:#ffffff;
-            border-radius:18px;
-            overflow:hidden;
-            box-shadow:0 16px 50px rgba(15, 23, 42, 0.16);
-            border:1px solid rgba(15, 23, 42, 0.08);
-            display:grid;
-            grid-template-columns: 41% 59%;
+        .segav-login-frame {{
+            width: min(1280px, 90vw);
+            height: min(760px, 82vh);
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 2px 12px rgba(16,24,40,.08);
+            overflow: hidden;
+            display: grid;
+            grid-template-columns: 40% 60%;
+            border: 1px solid rgba(15,23,42,0.08);
         }}
-        .segav-auth-left {{
-            background:#fff;
-            display:flex;
-            flex-direction:column;
-            justify-content:center;
-            padding:44px 56px 34px 56px;
-            min-width:0;
+        .segav-left {{padding: 60px 54px 34px 54px; display:flex; flex-direction:column; justify-content:center;}}
+        .segav-left h1 {{font-size: 28px; line-height:1.15; margin:0 0 42px 0; color:#0f2346; font-weight:800;}}
+        .segav-form-label {{font-size: 15px; font-weight:700; color:#1b2740; margin:0 0 8px 0;}}
+        .segav-forgot {{text-align:center; color:#1e64d4; margin: 6px 0 12px 0; font-size: 14px;}}
+        .segav-logo-box {{margin-top: 28px; text-align:center;}}
+        .segav-logo-box img {{max-width: 220px; height: auto;}}
+        .segav-logo-text {{font-size: 18px; font-weight: 700; color:#1258b8; margin-top: 4px; letter-spacing:.3px;}}
+        .segav-divider {{width: 180px; height: 2px; background: #1258b8; opacity:.55; margin: 8px auto 0 auto; border-radius: 999px;}}
+        .segav-right {{background:#0d51ad; display:flex; align-items:stretch; justify-content:stretch;}}
+        .segav-right img {{width:100%; height:100%; object-fit:cover; display:block;}}
+        .segav-login-shell .stForm {{border:none !important; box-shadow:none !important; padding:0 !important; background:transparent !important;}}
+        .segav-login-shell div[data-testid="stTextInputRootElement"] input {{height: 52px !important; font-size: 16px !important;}}
+        .segav-login-shell div[data-testid="stTextInputRootElement"] {{margin-bottom: 18px;}}
+        .segav-login-shell button[kind="primary"] {{height: 52px !important; border-radius: 8px !important; font-size: 17px !important; font-weight:700 !important;}}
+        @media (max-width: 1200px) {{
+            .segav-login-frame {{width: 95vw; height: min(740px, 88vh);}}
+            .segav-left {{padding: 46px 38px 28px 38px;}}
         }}
-        .segav-auth-title {{font-size:32px; font-weight:800; color:#10264d; margin:0 0 34px 0;}}
-        .segav-label {{font-size:19px; font-weight:700; color:#16233b; margin:10px 0 10px 0;}}
-        .segav-help {{text-align:center; color:#1b63d0; font-size:16px; margin:12px 0 18px 0;}}
-        .segav-logo-wrap {{margin-top:22px; text-align:center;}}
-        .segav-logo-wrap img {{max-width:230px; width:52%; min-width:150px; height:auto; display:block; margin:0 auto;}}
-        .segav-logo-text {{font-size:20px; font-weight:800; color:#1450a8; margin-top:8px; letter-spacing:0.3px;}}
-        .segav-rule {{height:2px; background:linear-gradient(90deg, transparent, #3b82f6 16%, #3b82f6 84%, transparent); width:74%; margin:4px auto 0; opacity:0.7;}}
-        .segav-auth-right {{
-            position:relative;
-            background:linear-gradient(135deg, #034da7 0%, #0a64ca 100%);
-            display:flex;
-            align-items:stretch;
-            justify-content:center;
-            min-width:0;
-        }}
-        .segav-auth-right img, .segav-auth-right svg {{width:100%; height:100%; object-fit:cover; display:block;}}
-        div[data-testid="stForm"] {{border:none !important; padding:0 !important; background:transparent !important;}}
-        div[data-testid="stTextInputRootElement"] input {{height:58px !important; font-size:18px !important;}}
-        div[data-testid="stTextInput"] label p {{font-size:19px !important; font-weight:700 !important; color:#16233b !important;}}
-        div[data-testid="stForm"] button[kind="primary"], .stButton > button {{height:56px !important; border-radius:10px !important; font-size:20px !important; font-weight:700 !important; background:#0e63d8 !important;}}
-        @media (max-width: 980px) {{
-            .segav-auth-card {{grid-template-columns: 1fr; height:auto; max-height:none; overflow:auto;}}
-            .segav-auth-right {{display:none;}}
-            html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] > .main {{overflow:auto !important;}}
-            .segav-auth-shell {{height:auto; min-height:100vh; overflow:auto;}}
+        @media (max-width: 900px) {{
+            html, body, [data-testid="stAppViewContainer"], .stApp {{overflow: auto !important;}}
+            .segav-login-shell {{height:auto; min-height:100vh; padding:20px 0;}}
+            .segav-login-frame {{grid-template-columns:1fr; width:min(96vw, 760px); height:auto;}}
+            .segav-right {{display:none;}}
         }}
         </style>
-        <div class="segav-auth-shell"><div class="segav-auth-card"><div class="segav-auth-left"> 
+        <div class="segav-login-shell"><div class="segav-login-frame">
+          <div class="segav-left">
+            <h1>Acceso al Sistema</h1>
         """,
         unsafe_allow_html=True,
     )
 
-    # Ensure base user tables/seed
     ensure_users_table()
     ensure_superadmin_exists()
+
     if users_count() == 0:
         DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
         DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
@@ -319,11 +303,12 @@ def auth_gate_ui(render_brand_logo: Callable | None = None, auto_backup_callback
         except Exception:
             pass
 
-    st.markdown('<div class="segav-auth-title">Acceso al Sistema</div>', unsafe_allow_html=True)
     with st.form("form_login"):
-        username = st.text_input("Usuario", placeholder="Ingrese su usuario")
-        password = st.text_input("Contraseña", type="password", placeholder="Ingrese su contraseña")
-        st.markdown('<div class="segav-help">¿Olvidó su contraseña?</div>', unsafe_allow_html=True)
+        st.markdown('<div class="segav-form-label">Usuario</div>', unsafe_allow_html=True)
+        username = st.text_input("Usuario", label_visibility="collapsed", placeholder="Ingrese su usuario")
+        st.markdown('<div class="segav-form-label">Contraseña</div>', unsafe_allow_html=True)
+        password = st.text_input("Contraseña", type="password", label_visibility="collapsed", placeholder="Ingrese su contraseña")
+        st.markdown('<div class="segav-forgot">¿Olvidó su contraseña?</div>', unsafe_allow_html=True)
         ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
 
     if ok:
@@ -343,21 +328,18 @@ def auth_gate_ui(render_brand_logo: Callable | None = None, auto_backup_callback
         st.success("Ingreso exitoso.")
         st.rerun()
 
-    if logo_b64:
-        st.markdown(
-            f'<div class="segav-logo-wrap"><img src="data:image/png;base64,{logo_b64}" alt="SEGAV"><div class="segav-rule"></div><div class="segav-logo-text">SEGAV ERP</div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown('<div class="segav-logo-wrap"><div class="segav-logo-text">SEGAV ERP</div></div>', unsafe_allow_html=True)
-
-    st.markdown('</div><div class="segav-auth-right">', unsafe_allow_html=True)
-    if hero_is_svg and hero_inline:
-        st.markdown(hero_inline, unsafe_allow_html=True)
-    elif hero_b64:
-        st.markdown(f'<img src="data:image/png;base64,{hero_b64}" alt="SEGAV Hero">', unsafe_allow_html=True)
-    st.markdown('</div></div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+            <div class="segav-logo-box">
+              <img src="data:image/png;base64,{logo_b64}" alt="SEGAV" />
+              <div class="segav-logo-text">SEGAV ERP</div>
+              <div class="segav-divider"></div>
+            </div>
+          </div>
+          <div class="segav-right"><img src="data:image/png;base64,{hero_b64}" alt="SEGAV ERP" /></div>
+        </div></div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.stop()
-
-
 
