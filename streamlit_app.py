@@ -994,6 +994,65 @@ def safe_name(s: str) -> str:
 
 
 
+def fetch_df(q: str, params=()):
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+
+def execute(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
+    with conn() as c:
+        c.execute(q, params)
+        c.commit()
+
+
+def execute_rowcount(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def executemany(q: str, seq_params):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
+            c.commit()
+            return
+    with conn() as c:
+        c.executemany(q, seq_params)
+        c.commit()
+
+
 def fetch_df_uncached(q: str, params=()):
     """SELECT sin cache para flujos que deben reflejar cambios inmediatamente."""
     if DB_BACKEND == "postgres":
