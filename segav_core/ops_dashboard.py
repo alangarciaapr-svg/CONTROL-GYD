@@ -7,12 +7,12 @@ from typing import Callable
 import pandas as pd
 import streamlit as st
 
-from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once
+from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema
 
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
     if clientes_df is None or clientes_df.empty:
-        return {"cliente_key": current_client_key or "cli_default", "cliente_nombre": "Empresa activa", "vertical": "General", "modo_implementacion": "CONFIGURABLE"}
+        return {"cliente_key": current_client_key or "cli_default", "cliente_nombre": "Empresa activa", "vertical": "General", "modo_implementacion": "DESDE_CERO"}
     keys = clientes_df["cliente_key"].astype(str).tolist()
     key = str(current_client_key or "").strip()
     if not key or key not in keys:
@@ -191,7 +191,7 @@ def _portfolio_rows(*, fetch_df: Callable, fetch_value: Callable, clientes_df: p
         rows.append(
             {
                 "Cliente": str(crow.get("cliente_nombre") or client_key),
-                "Vertical": str(crow.get("vertical") or "General"),
+                "Rubro": str(crow.get("vertical") or "General"),
                 "Score": score,
                 "Estado": f"{icon} {score_label}",
                 "Faenas críticas": crit,
@@ -216,7 +216,6 @@ def page_dashboard(
     DB_BACKEND: str,
     conn: Callable,
     execute: Callable,
-    PG_DSN_FINGERPRINT: str | None = None,
     current_segav_client_key: Callable[[], str],
     segav_clientes_df: Callable[[], pd.DataFrame],
     current_user: Callable[[], dict | None],
@@ -224,7 +223,7 @@ def page_dashboard(
     worker_required_docs: Callable[[str | None], list[str]],
     doc_tipo_label: Callable[[str], str],
     go: Callable,
-    clear_app_caches: Callable | None = None,
+    clear_app_caches: Callable,
 ):
     clientes_df = segav_clientes_df()
     current_client = _safe_current_client(clientes_df, current_segav_client_key())
@@ -232,15 +231,13 @@ def page_dashboard(
     current_name = str(current_client.get("cliente_nombre") or "Empresa activa")
 
     try:
-        ensure_multiempresa_compliance_schema_once(
-            DB_BACKEND,
-            str(PG_DSN_FINGERPRINT or "none"),
-            current_key,
-            execute,
-            conn,
+        ensure_multiempresa_compliance_schema(
+            db_backend=DB_BACKEND,
+            execute=execute,
+            conn=conn,
+            current_client_key=current_key,
         )
-        if callable(clear_app_caches):
-            clear_app_caches()
+        clear_app_caches()
     except Exception:
         pass
 
@@ -293,7 +290,7 @@ def page_dashboard(
     with m6:
         st.metric("Alertas / planes", int(auto_high + actions["abiertas"]))
 
-    st.caption(f"Estado gerencial: **{score_icon} {score_label}** · Cliente activo: **{current_name}** · Vertical: **{current_client.get('vertical') or 'General'}** · Modo: **{current_client.get('modo_implementacion') or 'CONFIGURABLE'}**")
+    st.caption(f"Estado gerencial: **{score_icon} {score_label}** · Cliente activo: **{current_name}** · Rubro: **{current_client.get('vertical') or 'General'}** · Tipo de inicio: **{current_client.get('modo_implementacion') or 'DESDE_CERO'}**")
 
     tabs = st.tabs(["🏢 Resumen ejecutivo", "🚦 Operación y cumplimiento", "💼 Comercial / multiempresa", "⚡ Acciones"])
 
@@ -364,7 +361,7 @@ def page_dashboard(
         params = {
             "Cliente": current_name,
             "Vertical": str(current_client.get("vertical") or "General"),
-            "Modo de implementación": str(current_client.get("modo_implementacion") or "CONFIGURABLE"),
+            "Tipo de inicio": str(current_client.get("modo_implementacion") or "DESDE_CERO"),
             "Faenas registradas": int(counts.get("faenas", 0)),
             "Trabajadores registrados": int(counts.get("trabajadores", 0)),
             "Documentos cargados": int(counts.get("docs", 0)) + int(counts.get("docs_empresa", 0)) + int(counts.get("docs_empresa_faena", 0)),

@@ -858,7 +858,7 @@ def ensure_segav_erp_seed_data():
         'erp_vertical': 'General',
         'multiempresa': 'SI',
         'cliente_actual': 'Empresa actual',
-        'modo_implementacion': 'CONFIGURABLE',
+        'modo_implementacion': 'DESDE_CERO',
         'template_actual': 'GENERAL',
     }
     for k, v in defaults.items():
