@@ -49,6 +49,22 @@ UPLOAD_HELP_TEXT = (
 )
 
 
+def _record_soft_error(context: str, exc: Exception | None = None):
+    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
+    try:
+        logs = st.session_state.setdefault("soft_errors", [])
+        msg = str(exc).strip() if exc is not None else ""
+        logs.append({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "context": str(context or "").strip(),
+            "message": msg[:300],
+        })
+        if len(logs) > 30:
+            del logs[:-30]
+    except Exception:
+        pass
+
+
 # Fingerprints/cache helpers
 def _fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
@@ -183,6 +199,65 @@ def _is_select_query(q: str) -> bool:
     txt = re.sub(r"--.*?$", " ", txt, flags=re.M).strip().lower()
     return txt.startswith("select") or txt.startswith("with")
 
+
+def fetch_df(q: str, params=()):
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+
+def execute(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
+    with conn() as c:
+        c.execute(q, params)
+        c.commit()
+
+
+def execute_rowcount(q: str, params=()):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def executemany(q: str, seq_params):
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
+            c.commit()
+            return
+    with conn() as c:
+        c.executemany(q, seq_params)
+        c.commit()
+
 @st.cache_resource(show_spinner=False)
 def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     ensure_dirs()
@@ -199,19 +274,13 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         pass
     return True
 
+
 def bootstrap_app_or_stop():
-    """Inicializa la app. Si falla algo crítico, muestra error y detiene Streamlit."""
     try:
         _bootstrap_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception as _boot_exc:
-        st.error("❌ No se pudo iniciar SEGAV ERP. Revisa la conexión a base de datos.")
-        st.code(str(_boot_exc))
-        st.markdown("""
-**Posibles causas:**
-- Falta `SUPABASE_DB_URL` (o `PG_DSN`) en Secrets / ENV.
-- Credenciales incorrectas o caducadas.
-- Si usas SQLite local, verifica que el directorio de datos tenga permisos de escritura.
-        """)
+    except Exception as exc:
+        st.error("No se pudo iniciar la app por un problema de arranque o conexión a la base de datos.")
+        st.code(str(exc))
         st.stop()
 
 def _qmark_to_pct(sql: str) -> str:
@@ -1002,6 +1071,13 @@ def ui_header(title: str, desc: str = ""):
 
 def ui_tip(text: str):
     st.info(text, icon="ℹ️")
+
+
+def go(page: str, faena_id: int | None = None):
+    st.session_state["nav_request"] = page
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = int(faena_id)
+    st.rerun()
 
 def safe_name(s: str) -> str:
     s = (s or "").strip().lower()
@@ -3333,22 +3409,6 @@ bootstrap_app_or_stop()
 
 inject_css()
 
-def _record_soft_error(context: str, exc: Exception | None = None):
-    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
-    try:
-        logs = st.session_state.setdefault("soft_errors", [])
-        msg = str(exc).strip() if exc is not None else ""
-        logs.append({
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "context": str(context or "").strip(),
-            "message": msg[:300],
-        })
-        # evita crecimiento infinito
-        if len(logs) > 30:
-            del logs[:-30]
-    except Exception:
-        pass
-
 
 # ----------------------------
 # Auth gate
@@ -5508,9 +5568,6 @@ def page_superadmin_empresas():
         current_user=current_user,
         is_superadmin=is_superadmin,
         ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
-        fetch_file_refs=fetch_file_refs,
-        cleanup_deleted_file_refs=cleanup_deleted_file_refs,
-        set_active_cliente_key=lambda key: st.session_state.__setitem__('active_cliente_key', key),
     )
 
 
