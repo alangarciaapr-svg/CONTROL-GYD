@@ -4,6 +4,19 @@ from datetime import datetime
 
 import pandas as pd
 
+IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
+IMPLEMENTATION_LABELS = {
+    "DESDE_CERO": "Desde cero (recomendado)",
+    "CONFIGURACION_BASE": "Configuración base",
+    "DEMO_PRUEBA": "Demo / Prueba",
+    "CONFIGURABLE": "Desde cero (recomendado)",
+    "VERTICAL FORESTAL": "Configuración base forestal",
+    "CORPORATIVO": "Configuración corporativa",
+}
+
+def impl_label(value: str) -> str:
+    return IMPLEMENTATION_LABELS.get(str(value or ""), str(value or "Sin definir"))
+
 
 def _dep_count(fetch_value, table: str, cliente_key: str) -> int:
     try:
@@ -59,8 +72,8 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                     "Código": ckey,
                     "Empresa": str(row.get("cliente_nombre") or ""),
                     "RUT": str(row.get("rut") or ""),
-                    "Vertical": str(row.get("vertical") or ""),
-                    "Implementación": str(row.get("modo_implementacion") or ""),
+                    "Rubro": str(row.get("vertical") or ""),
+                    "Tipo de inicio": impl_label(str(row.get("modo_implementacion") or "")),
                     "Activa": "SI" if int(row.get("activo") or 0) == 1 else "NO",
                     "Faenas": _dep_count(fetch_value, "faenas", ckey),
                     "Trabajadores": _dep_count(fetch_value, "trabajadores", ckey),
@@ -80,7 +93,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             if row.empty:
                 row = vis_df.iloc[[0]]
             active = row.iloc[0].to_dict()
-            st.success(f"Empresa activa en esta sesión: {active.get('cliente_nombre')} · {active.get('vertical') or 'Sin vertical'}")
+            st.success(f"Empresa activa en esta sesión: {active.get('cliente_nombre')} · {active.get('vertical') or 'Sin rubro'}")
         else:
             st.warning("No hay empresas visibles en esta sesión.")
 
@@ -89,9 +102,9 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         c1, c2, c3 = st.columns(3)
         new_name = c1.text_input("Nombre empresa", key="sa_new_empresa_nombre")
         new_rut = c2.text_input("RUT empresa", key="sa_new_empresa_rut")
-        new_vertical = c3.text_input("Vertical", key="sa_new_empresa_vertical")
+        new_vertical = c3.text_input("Rubro", key="sa_new_empresa_vertical", help="Define el rubro o tipo de empresa: forestal, construcción, transporte, servicios, etc.")
         c4, c5, c6 = st.columns(3)
-        new_impl = c4.selectbox("Implementación", ["CONFIGURABLE", "VERTICAL FORESTAL", "CORPORATIVO"], key="sa_new_empresa_impl")
+        new_impl = c4.selectbox("Tipo de inicio", IMPLEMENTATION_OPTIONS, key="sa_new_empresa_impl", format_func=impl_label, help="Define cómo comenzará la empresa dentro del sistema. Desde cero parte completamente vacía.")
         new_contact = c5.text_input("Contacto", key="sa_new_empresa_contacto")
         new_email = c6.text_input("Email", key="sa_new_empresa_email")
         new_obs = st.text_area("Observaciones", key="sa_new_empresa_obs", height=80)
@@ -128,13 +141,13 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             e1, e2, e3 = st.columns(3)
             edit_name = e1.text_input("Nombre empresa", value=str(row.get("cliente_nombre") or ""), key="sa_edit_nombre")
             edit_rut = e2.text_input("RUT", value=str(row.get("rut") or ""), key="sa_edit_rut")
-            edit_vertical = e3.text_input("Vertical", value=str(row.get("vertical") or ""), key="sa_edit_vertical")
+            edit_vertical = e3.text_input("Rubro", value=str(row.get("vertical") or ""), key="sa_edit_vertical", help="Rubro o tipo de empresa.")
             e4, e5, e6 = st.columns(3)
-            impl_options = ["CONFIGURABLE", "VERTICAL FORESTAL", "CORPORATIVO"]
+            impl_options = IMPLEMENTATION_OPTIONS.copy()
             current_impl = str(row.get("modo_implementacion") or "CONFIGURABLE")
             if current_impl not in impl_options:
                 impl_options.append(current_impl)
-            edit_impl = e4.selectbox("Implementación", impl_options, index=impl_options.index(current_impl), key="sa_edit_impl")
+            edit_impl = e4.selectbox("Tipo de inicio", impl_options, index=impl_options.index(current_impl), key="sa_edit_impl", format_func=impl_label, help="Define si la empresa parte desde cero, con configuración base o en modo demo.")
             edit_contact = e5.text_input("Contacto", value=str(row.get("contacto") or ""), key="sa_edit_contacto")
             edit_email = e6.text_input("Email", value=str(row.get("email") or ""), key="sa_edit_email")
             edit_obs = st.text_area("Observaciones", value=str(row.get("observaciones") or ""), key="sa_edit_obs", height=80)
