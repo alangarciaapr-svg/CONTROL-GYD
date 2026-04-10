@@ -29,6 +29,13 @@ import json
 import secrets
 import unicodedata
 
+from segav_core.storage import (
+    save_file as _storage_save_file,
+    fetch_file_refs as _storage_fetch_file_refs,
+    cleanup_deleted_file_refs as _storage_cleanup_deleted_file_refs,
+    delete_uploaded_document_record as _storage_delete_uploaded_document_record,
+)
+
 APP_DIR = os.path.dirname(__file__)
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
@@ -637,6 +644,402 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
         f"Sugerencia: puedes comprimirlo en iLovePDF."
     )
     st.stop()
+
+
+def save_file(folder_parts, file_name: str, file_bytes: bytes):
+    return _storage_save_file(folder_parts, file_name, file_bytes)
+
+
+def fetch_file_refs(table_name: str, where_sql: str = "", params=()):
+    return _storage_fetch_file_refs(table_name, where_sql, params)
+
+
+def cleanup_deleted_file_refs(file_refs):
+    return _storage_cleanup_deleted_file_refs(file_refs)
+
+
+def delete_uploaded_document_record(table_name: str, row_id: int):
+    if table_name in TENANT_SCOPE_TABLES:
+        tenant_key = current_tenant_key()
+        probe = fetch_df(
+            f"SELECT id, cliente_key FROM {table_name} WHERE id=?",
+            (int(row_id),),
+        )
+        if probe.empty:
+            raise FileNotFoundError("El documento ya no existe en la base de datos.")
+        if tenant_key and str(probe.iloc[0].get("cliente_key") or "") != tenant_key:
+            raise PermissionError("El documento no pertenece a la empresa activa.")
+    return _storage_delete_uploaded_document_record(table_name, int(row_id))
+
+
+def parse_date_maybe(value):
+    if value in (None, "", "None"):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    txt = str(value).strip()
+    if not txt:
+        return None
+    txt = txt.split("T")[0].split(" ")[0]
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(txt, fmt).date()
+        except Exception:
+            pass
+    try:
+        return pd.to_datetime(txt, errors="coerce").date()
+    except Exception:
+        return None
+
+
+def auto_backup_db(tag: str = "manual"):
+    if not st.session_state.get("auto_backup_enabled", True):
+        return None
+    ensure_dirs()
+    source_db = os.path.join(APP_DIR, DB_PATH) if not os.path.isabs(DB_PATH) else DB_PATH
+    if not os.path.exists(source_db):
+        return None
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"segav_auto_{safe_name(tag)}_{ts}.db"
+    backup_path = os.path.join(UPLOAD_ROOT, "auto_backups", backup_name)
+    with open(source_db, "rb") as src, open(backup_path, "wb") as dst:
+        data = src.read()
+        dst.write(data)
+    sha = sha256_bytes(data)
+    size = len(data)
+    try:
+        execute(
+            "INSERT INTO auto_backup_historial(tag, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+            (str(tag or "manual"), backup_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
+        )
+    except Exception:
+        pass
+    st.session_state["last_auto_backup"] = {
+        "name": backup_name,
+        "bytes": data,
+        "path": backup_path,
+        "tag": str(tag or "manual"),
+    }
+    return backup_path
+
+
+def validate_faena_dates(fecha_inicio, fecha_termino=None, estado: str | None = None):
+    errors = []
+    fi = parse_date_maybe(fecha_inicio)
+    ft = parse_date_maybe(fecha_termino)
+    estado_txt = str(estado or "ACTIVA").strip().upper()
+    if fi is None:
+        errors.append("Fecha de inicio inválida.")
+    if ft is not None and fi is not None and ft < fi:
+        errors.append("La fecha término no puede ser menor que la fecha inicio.")
+    if estado_txt == "ACTIVA" and ft is not None and ft < date.today():
+        errors.append("Una faena activa no debería tener fecha término vencida.")
+    if estado_txt == "TERMINADA" and ft is None:
+        errors.append("Una faena terminada debería registrar fecha término.")
+    return errors
+
+
+def pendientes_obligatorios(faena_id: int):
+    df = fetch_assigned_workers(int(faena_id), fresh=True)
+    results = {}
+    if df is None or df.empty:
+        return results
+    for _, row in df.iterrows():
+        trabajador_id = int(row.get("id") or 0)
+        if trabajador_id <= 0:
+            continue
+        req = worker_required_docs_by_id(trabajador_id)
+        docs_df = tenant_fetch_df_uncached(
+            "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
+            (trabajador_id,),
+        )
+        present = set(docs_df["doc_tipo"].astype(str).tolist()) if docs_df is not None and not docs_df.empty else set()
+        missing = [doc for doc in req if doc not in present]
+        label = f"{row.get('apellidos','')}, {row.get('nombres','')} · {row.get('rut','')}".strip(" ·")
+        results[label] = missing
+    return results
+
+
+def pendientes_empresa_faena(faena_id: int):
+    df = tenant_fetch_df_uncached(
+        "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?",
+        (int(faena_id),),
+    )
+    present = set(df["doc_tipo"].astype(str).tolist()) if df is not None and not df.empty else set()
+    required = get_empresa_monthly_doc_types()
+    return [doc for doc in required if doc not in present]
+
+
+def faena_progress_table():
+    faenas_df = tenant_fetch_df_uncached(
+        """
+        SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
+               m.nombre AS mandante
+        FROM faenas f
+        JOIN mandantes m ON m.id=f.mandante_id
+        ORDER BY f.id DESC
+        """
+    )
+    if faenas_df is None or faenas_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in faenas_df.iterrows():
+        fid = int(row.get("faena_id") or 0)
+        workers = fetch_assigned_workers(fid, fresh=True)
+        trabajadores = 0 if workers is None else int(len(workers))
+        trab_ok = 0
+        faltantes_total = 0
+        total_req = 0
+        for _, w in (workers.iterrows() if workers is not None else []):
+            req = worker_required_docs_by_id(int(w.get("id") or 0))
+            total_req += len(req)
+            docs_df = tenant_fetch_df_uncached(
+                "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
+                (int(w.get("id") or 0),),
+            )
+            present = set(docs_df["doc_tipo"].astype(str).tolist()) if docs_df is not None and not docs_df.empty else set()
+            missing = [doc for doc in req if doc not in present]
+            if not missing:
+                trab_ok += 1
+            faltantes_total += len(missing)
+        cobertura = 100.0 if total_req == 0 else max(0.0, (total_req - faltantes_total) * 100.0 / total_req)
+        rows.append({
+            "faena_id": fid,
+            "mandante": row.get("mandante"),
+            "faena": row.get("faena"),
+            "estado": row.get("estado"),
+            "fecha_inicio": row.get("fecha_inicio"),
+            "fecha_termino": row.get("fecha_termino"),
+            "trabajadores": trabajadores,
+            "trab_ok": trab_ok,
+            "faltantes_total": faltantes_total,
+            "cobertura_docs_pct": cobertura,
+        })
+    return pd.DataFrame(rows)
+
+
+def _zip_add_if_available(zf, arcname: str, file_path=None, bucket=None, object_path=None):
+    try:
+        data = load_file_anywhere(file_path, bucket, object_path)
+    except Exception:
+        return False
+    zf.writestr(arcname, data)
+    return True
+
+
+def export_zip_for_faena(
+    faena_id: int,
+    *,
+    include_global_empresa_docs: bool = True,
+    include_contrato: bool = True,
+    include_anexos: bool = True,
+    include_empresa_faena: bool = True,
+    include_trabajadores: bool = True,
+    doc_types_empresa_global=None,
+    doc_types_empresa_faena=None,
+    doc_types_trabajador=None,
+    selected_empresa_faena_doc_ids=None,
+    selected_trabajador_ids=None,
+    selected_trabajador_doc_ids=None,
+):
+    faena_df = tenant_fetch_df_uncached(
+        """
+        SELECT f.id, f.nombre, m.nombre AS mandante, COALESCE(cf.nombre,'') AS contrato_nombre,
+               cf.file_path AS contrato_file_path, cf.bucket AS contrato_bucket, cf.object_path AS contrato_object_path
+        FROM faenas f
+        JOIN mandantes m ON m.id=f.mandante_id
+        LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
+        WHERE f.id=?
+        LIMIT 1
+        """,
+        (int(faena_id),),
+    )
+    if faena_df.empty:
+        raise ValueError("Faena no encontrada.")
+    faena = faena_df.iloc[0]
+    zip_io = io.BytesIO()
+    base_folder = safe_name(f"{faena.get('mandante','mandante')}_{faena.get('nombre','faena')}")
+    with zipfile.ZipFile(zip_io, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        manifest = [
+            f"Mandante: {faena.get('mandante','')}",
+            f"Faena: {faena.get('nombre','')}",
+            f"Generado: {datetime.utcnow().isoformat(timespec='seconds')}Z",
+            "",
+        ]
+        if include_contrato and (faena.get("contrato_file_path") or faena.get("contrato_object_path")):
+            contract_name = os.path.basename(str(faena.get('contrato_file_path') or faena.get('contrato_object_path') or 'contrato'))
+            _zip_add_if_available(zf, f"{base_folder}/01_contrato_faena/{contract_name}", faena.get("contrato_file_path"), faena.get("contrato_bucket"), faena.get("contrato_object_path"))
+            manifest.append(f"Contrato: {contract_name}")
+        if include_anexos:
+            anexos_df = tenant_fetch_df_uncached(
+                "SELECT nombre, file_path, bucket, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id",
+                (int(faena_id),),
+            )
+            for _, ax in anexos_df.iterrows():
+                nombre = os.path.basename(str(ax.get('nombre') or ax.get('file_path') or ax.get('object_path') or 'anexo'))
+                _zip_add_if_available(zf, f"{base_folder}/02_anexos/{nombre}", ax.get('file_path'), ax.get('bucket'), ax.get('object_path'))
+        if include_global_empresa_docs:
+            q = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos"
+            params = ()
+            if doc_types_empresa_global:
+                q += " WHERE doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_empresa_global))
+                params = tuple(doc_types_empresa_global)
+            q += " ORDER BY doc_tipo, nombre_archivo, id"
+            gdf = tenant_fetch_df_uncached(q, params)
+            for _, doc in gdf.iterrows():
+                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
+                tipo = safe_name(doc.get('doc_tipo') or 'empresa')
+                _zip_add_if_available(zf, f"{base_folder}/03_empresa_global/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
+        if include_empresa_faena:
+            q = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE faena_id=?"
+            params = [int(faena_id)]
+            if doc_types_empresa_faena:
+                q += " AND doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_empresa_faena))
+                params.extend(list(doc_types_empresa_faena))
+            if selected_empresa_faena_doc_ids is not None:
+                if selected_empresa_faena_doc_ids:
+                    q += " AND id IN (%s)" % ",".join(["?"] * len(selected_empresa_faena_doc_ids))
+                    params.extend([int(x) for x in selected_empresa_faena_doc_ids])
+                else:
+                    q += " AND 1=0"
+            q += " ORDER BY doc_tipo, nombre_archivo, id"
+            edf = tenant_fetch_df_uncached(q, tuple(params))
+            for _, doc in edf.iterrows():
+                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
+                tipo = safe_name(doc.get('doc_tipo') or 'empresa_faena')
+                _zip_add_if_available(zf, f"{base_folder}/04_empresa_faena/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
+        if include_trabajadores:
+            q = """
+                SELECT DISTINCT t.id, t.rut, t.nombres, t.apellidos
+                FROM asignaciones a
+                JOIN trabajadores t ON t.id=a.trabajador_id
+                WHERE a.faena_id=?
+                  AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
+            """
+            params = [int(faena_id)]
+            if selected_trabajador_ids is not None:
+                if selected_trabajador_ids:
+                    q += " AND t.id IN (%s)" % ",".join(["?"] * len(selected_trabajador_ids))
+                    params.extend([int(x) for x in selected_trabajador_ids])
+                else:
+                    q += " AND 1=0"
+            q += " ORDER BY t.apellidos, t.nombres, t.id"
+            tdf = tenant_fetch_df_uncached(q, tuple(params))
+            for _, trab in tdf.iterrows():
+                tid = int(trab.get('id') or 0)
+                dq = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=?"
+                dparams = [tid]
+                if doc_types_trabajador:
+                    dq += " AND doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_trabajador))
+                    dparams.extend(list(doc_types_trabajador))
+                selected_ids = (selected_trabajador_doc_ids or {}).get(tid) if isinstance(selected_trabajador_doc_ids, dict) else None
+                if selected_ids is not None:
+                    if selected_ids:
+                        dq += " AND id IN (%s)" % ",".join(["?"] * len(selected_ids))
+                        dparams.extend([int(x) for x in selected_ids])
+                    else:
+                        dq += " AND 1=0"
+                dq += " ORDER BY doc_tipo, nombre_archivo, id"
+                docs_df = tenant_fetch_df_uncached(dq, tuple(dparams))
+                worker_folder = safe_name(f"{trab.get('apellidos','')}_{trab.get('nombres','')}_{trab.get('rut','')}")
+                for _, doc in docs_df.iterrows():
+                    nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
+                    tipo = safe_name(doc.get('doc_tipo') or 'trabajador')
+                    _zip_add_if_available(zf, f"{base_folder}/05_trabajadores/{worker_folder}/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
+        manifest.extend([
+            "",
+            "Pendientes trabajadores:",
+        ])
+        for label, missing in pendientes_obligatorios(int(faena_id)).items():
+            manifest.append(f"- {label}: {', '.join(missing) if missing else 'OK'}")
+        miss_emp = pendientes_empresa_faena(int(faena_id))
+        manifest.extend([
+            "",
+            f"Pendientes empresa/faena: {', '.join(miss_emp) if miss_emp else 'OK'}",
+        ])
+        zf.writestr(f"{base_folder}/00_resumen.txt", "\n".join(manifest))
+    zip_bytes = zip_io.getvalue()
+    export_name = f"segav_export_faena_{int(faena_id)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+    return zip_bytes, export_name
+
+
+def persist_export(faena_id: int, zip_bytes: bytes, file_name: str):
+    file_path, bucket, object_path = save_file_online(["exports", "faenas", int(faena_id)], file_name, zip_bytes, content_type="application/zip")
+    execute(
+        "INSERT INTO export_historial(faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
+        (int(faena_id), file_path, bucket, object_path, sha256_bytes(zip_bytes), len(zip_bytes), datetime.utcnow().isoformat(timespec="seconds")),
+    )
+    return file_path
+
+
+def export_zip_for_mes(year: int, month: int, *, include_global_empresa_docs: bool = True):
+    ym = f"{int(year):04d}-{int(month):02d}"
+    zip_io = io.BytesIO()
+    with zipfile.ZipFile(zip_io, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        if include_global_empresa_docs:
+            gdf = tenant_fetch_df_uncached(
+                "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, nombre_archivo, id"
+            )
+            for _, doc in gdf.iterrows():
+                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
+                tipo = safe_name(doc.get('doc_tipo') or 'empresa')
+                _zip_add_if_available(zf, f"{ym}/empresa_global/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
+        fdf = tenant_fetch_df_uncached(
+            """
+            SELECT fed.faena_id, fed.doc_tipo, fed.nombre_archivo, fed.file_path, fed.bucket, fed.object_path,
+                   f.nombre AS faena_nombre, m.nombre AS mandante
+            FROM faena_empresa_documentos fed
+            JOIN faenas f ON f.id=fed.faena_id
+            JOIN mandantes m ON m.id=f.mandante_id
+            WHERE COALESCE(fed.periodo_anio,0)=? AND COALESCE(fed.periodo_mes,0)=?
+            ORDER BY m.nombre, f.nombre, fed.doc_tipo, fed.nombre_archivo, fed.id
+            """,
+            (int(year), int(month)),
+        )
+        for _, doc in fdf.iterrows():
+            faena_folder = safe_name(f"{doc.get('mandante','mandante')}_{doc.get('faena_nombre','faena')}")
+            nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
+            tipo = safe_name(doc.get('doc_tipo') or 'empresa_faena')
+            _zip_add_if_available(zf, f"{ym}/empresa_faena/{faena_folder}/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
+    return zip_io.getvalue(), ym
+
+
+def persist_export_mes(year_month: str, zip_bytes: bytes):
+    file_name = f"segav_export_{safe_name(year_month)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+    file_path, bucket, object_path = save_file_online(["exports", "mensual", safe_name(year_month)], file_name, zip_bytes, content_type="application/zip")
+    execute(
+        "INSERT INTO export_historial_mes(year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
+        (str(year_month), file_path, bucket, object_path, sha256_bytes(zip_bytes), len(zip_bytes), datetime.utcnow().isoformat(timespec="seconds")),
+    )
+    return file_path
+
+
+def restore_from_backup_zip(zip_bytes: bytes):
+    ensure_dirs()
+    mem = io.BytesIO(zip_bytes)
+    with zipfile.ZipFile(mem, "r") as zf:
+        members = zf.namelist()
+        db_member = next((m for m in members if m.endswith("app.db") or os.path.basename(m) == "app.db"), None)
+        if db_member:
+            with zf.open(db_member) as src, open(DB_PATH, "wb") as dst:
+                dst.write(src.read())
+        for member in members:
+            clean = member.strip().lstrip("/")
+            if not clean or clean.endswith("/"):
+                continue
+            if clean == db_member or os.path.basename(clean) == "app.db":
+                continue
+            target = os.path.abspath(os.path.join(APP_DIR, clean))
+            root = os.path.abspath(APP_DIR)
+            if not target.startswith(root):
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                dst.write(src.read())
+    clear_app_caches()
+    return True
 
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
@@ -2549,31 +2952,79 @@ TENANT_SCOPE_FILE_TABLES = (
 )
 
 
+def _parse_top_level_from_table(sql: str):
+    pos = _find_top_level_clause(sql, ' from ')
+    if pos == -1:
+        return None, None
+    rest = sql[pos + len(' from '):].lstrip()
+    m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)(?:\s+([A-Za-z_][A-Za-z0-9_]*))?', rest, flags=re.I)
+    if not m:
+        return None, None
+    table = str(m.group(1) or '').strip()
+    alias = str(m.group(2) or '').strip()
+    if alias.upper() in {'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
+        alias = ''
+    return table, alias or table
+
+
 def _tenant_scope_target_table(sql: str) -> str | None:
-    q = str(sql or '')
-    patterns = [
-        r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
-    ]
-    for patt in patterns:
+    q = str(sql or '').strip()
+    if not q:
+        return None
+    lower_q = q.lower()
+    if lower_q.startswith('select') or lower_q.startswith('with'):
+        table, _alias = _parse_top_level_from_table(q)
+        return table if table in TENANT_SCOPE_TABLES else None
+    for patt in [
+        r'^\s*update\s+([A-Za-z_][A-Za-z0-9_]*)',
+        r'^\s*delete\s+from\s+([A-Za-z_][A-Za-z0-9_]*)',
+        r'^\s*insert\s+into\s+([A-Za-z_][A-Za-z0-9_]*)',
+    ]:
         m = re.search(patt, q, flags=re.I)
         if m:
             table = str(m.group(1) or '').strip()
-            if table in TENANT_SCOPE_TABLES:
-                return table
+            return table if table in TENANT_SCOPE_TABLES else None
     return None
+
+
+def _find_top_level_clause(sql: str, clause: str) -> int:
+    lower_sql = sql.lower()
+    clause_l = clause.lower()
+    depth = 0
+    in_single = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'":
+            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2
+                continue
+            in_single = not in_single
+        elif not in_single:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth = max(0, depth - 1)
+            elif depth == 0 and lower_sql.startswith(clause_l, i):
+                return i
+        i += 1
+    return -1
 
 
 def _inject_tenant_condition_sql(sql: str, alias_or_table: str) -> str:
     tenant_cond = f"COALESCE({alias_or_table}.cliente_key,'')=?"
-    lower_sql = sql.lower()
-    clause_positions = [p for p in [lower_sql.find(' order by '), lower_sql.find(' group by '), lower_sql.find(' limit '), lower_sql.find(' union ')] if p != -1]
-    cut = min(clause_positions) if clause_positions else len(sql)
+    cut_positions = [
+        _find_top_level_clause(sql, ' order by '),
+        _find_top_level_clause(sql, ' group by '),
+        _find_top_level_clause(sql, ' limit '),
+        _find_top_level_clause(sql, ' union '),
+    ]
+    valid_positions = [p for p in cut_positions if p != -1]
+    cut = min(valid_positions) if valid_positions else len(sql)
     head = sql[:cut]
     tail = sql[cut:]
-    if re.search(r"\bwhere\b", head, flags=re.I):
+    where_pos = _find_top_level_clause(head, ' where ')
+    if where_pos != -1:
         return head + f" AND {tenant_cond}" + tail
     return head + f" WHERE {tenant_cond}" + tail
 
@@ -2605,12 +3056,18 @@ def _scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None):
         return q, params_t
 
     # UPDATE / DELETE / SELECT root table scoping
-    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
     alias = table
-    if m_root:
-        alias_candidate = str(m_root.group(2) or '').strip()
-        if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
-            alias = alias_candidate
+    lower_q = q.lstrip().lower()
+    if lower_q.startswith('select') or lower_q.startswith('with'):
+        _table_parsed, _alias_parsed = _parse_top_level_from_table(q)
+        if _table_parsed == table and _alias_parsed:
+            alias = _alias_parsed
+    else:
+        m_root = re.search(r"^\s*(UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
+        if m_root:
+            alias_candidate = str(m_root.group(2) or '').strip()
+            if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
+                alias = alias_candidate
     q2 = _inject_tenant_condition_sql(q, alias)
     return q2, (*params_t, tenant_key)
 
@@ -3819,6 +4276,15 @@ def auth_gate_ui():
 
     if login_message:
         message_slot.error(login_message)
+
+
+
+bootstrap_app_or_stop()
+inject_css()
+
+if not current_user():
+    auth_gate_ui()
+    st.stop()
 
 
 # ----------------------------
@@ -5949,7 +6415,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, segav_template_payload=segav_template_payload, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
 
 
 def page_superadmin_empresas():
