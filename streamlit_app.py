@@ -3211,7 +3211,7 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso ERP de una sola pantalla, sin scroll y con panel derecho completo."""
+    """Pantalla de acceso ERP compacta, profesional y sin scroll en escritorio."""
 
     def _safe_b64(reader):
         try:
@@ -3240,12 +3240,12 @@ def auth_gate_ui():
     hero_b64 = _safe_b64(get_login_hero_bytes)
 
     hero_style = (
-        f"background-image:linear-gradient(135deg, rgba(5, 26, 69, 0.82) 0%, rgba(7, 49, 117, 0.64) 42%, rgba(3, 19, 49, 0.86) 100%), url('data:image/png;base64,{panel_b64}');"
+        f"background-image:linear-gradient(135deg, rgba(5, 28, 74, 0.78) 0%, rgba(8, 58, 131, 0.44) 45%, rgba(3, 17, 46, 0.88) 100%), url('data:image/png;base64,{panel_b64}');"
         if panel_b64
         else (
-            f"background-image:linear-gradient(135deg, rgba(5, 26, 69, 0.86) 0%, rgba(7, 49, 117, 0.68) 42%, rgba(3, 19, 49, 0.88) 100%), url('data:image/svg+xml;base64,{hero_b64}');"
+            f"background-image:linear-gradient(135deg, rgba(5, 28, 74, 0.82) 0%, rgba(8, 58, 131, 0.50) 45%, rgba(3, 17, 46, 0.90) 100%), url('data:image/svg+xml;base64,{hero_b64}');"
             if hero_b64
-            else "background:linear-gradient(135deg,#0b4ca4 0%,#0a3778 100%);"
+            else "background:linear-gradient(135deg,#0c4aa5 0%,#0a2d66 100%);"
         )
     )
 
@@ -3260,19 +3260,20 @@ def auth_gate_ui():
             min-height:100vh !important;
             overflow:hidden !important;
             background:
-                radial-gradient(circle at 12% 8%, rgba(102, 146, 255, 0.16) 0%, rgba(102, 146, 255, 0.00) 26%),
-                radial-gradient(circle at 88% 10%, rgba(10, 91, 207, 0.12) 0%, rgba(10, 91, 207, 0.00) 28%),
-                linear-gradient(180deg, #eef3fb 0%, #e6edf7 100%) !important;
+                radial-gradient(circle at 10% 6%, rgba(102, 146, 255, 0.16) 0%, rgba(102, 146, 255, 0.00) 28%),
+                radial-gradient(circle at 90% 8%, rgba(10, 91, 207, 0.10) 0%, rgba(10, 91, 207, 0.00) 28%),
+                linear-gradient(180deg, #eef3fb 0%, #e8eff8 100%) !important;
         }}
         [data-testid="stAppViewContainer"] > .main, .main {{
             height:100vh !important;
+            min-height:100vh !important;
             overflow:hidden !important;
         }}
         .block-container {{
-            --segav-card-height:min(700px, calc(100vh - 24px));
+            --segav-card-height:min(620px, calc(100vh - 16px));
             max-width:none !important;
             margin:0 !important;
-            padding:12px !important;
+            padding:8px 12px !important;
             height:100vh !important;
             min-height:100vh !important;
             display:flex !important;
@@ -3290,7 +3291,7 @@ def auth_gate_ui():
             height:var(--segav-card-height) !important;
             min-height:var(--segav-card-height) !important;
             max-height:var(--segav-card-height) !important;
-            background:rgba(255,255,255,0.90) !important;
+            background:rgba(255,255,255,0.95) !important;
             border:1px solid rgba(19, 53, 102, 0.10) !important;
             border-radius:30px !important;
             overflow:hidden !important;
@@ -3298,22 +3299,23 @@ def auth_gate_ui():
             backdrop-filter:blur(10px);
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
-            height:var(--segav-card-height) !important;
-            min-height:var(--segav-card-height) !important;
-            max-height:var(--segav-card-height) !important;
+            height:100% !important;
+            min-height:100% !important;
+            max-height:100% !important;
             overflow:hidden !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] {{
             gap:0 !important;
             height:100% !important;
             min-height:100% !important;
+            max-height:100% !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] > div {{
             width:100% !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {{
             background:linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
-            padding:26px 34px !important;
+            padding:18px 30px !important;
             display:flex !important;
             flex-direction:column !important;
             justify-content:center !important;
@@ -3325,7 +3327,7 @@ def auth_gate_ui():
             margin-right:auto !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {{
-            background:#0b4ca4 !important;
+            background:#0a397e !important;
             padding:0 !important;
             display:flex !important;
             flex-direction:column !important;
@@ -3351,8 +3353,9 @@ def auth_gate_ui():
             flex-direction:column;
             align-items:center;
             justify-content:center;
-            gap:14px;
+            gap:10px;
             text-align:center;
+            margin-bottom:10px;
         }}
         .segav-login-kicker {{
             display:inline-flex;
@@ -3377,36 +3380,36 @@ def auth_gate_ui():
             box-shadow:0 0 0 5px rgba(31, 198, 110, 0.14);
         }}
         .segav-login-headline {{
-            margin:12px auto 0 auto;
-            max-width:470px;
-            font-size:clamp(26px, 2.65vw, 40px);
-            line-height:1.06;
-            letter-spacing:-0.055em;
+            margin:4px auto 0 auto;
+            max-width:420px;
+            font-size:clamp(24px, 2.15vw, 34px);
+            line-height:1.08;
+            letter-spacing:-0.05em;
             color:#142d4f;
             font-weight:900;
         }}
         .segav-login-subcopy {{
-            margin:8px auto 0 auto;
-            max-width:470px;
-            font-size:14px;
-            line-height:1.72;
+            margin:2px auto 0 auto;
+            max-width:450px;
+            font-size:13px;
+            line-height:1.58;
             color:#627691;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stAlert"] {{
             width:100%;
             max-width:500px;
-            margin:0 auto 12px auto !important;
+            margin:0 auto 8px auto !important;
             border-radius:16px !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] {{
             width:100%;
             max-width:500px;
             margin:0 auto !important;
-            padding:22px 22px 18px 22px !important;
+            padding:18px 20px 14px 20px !important;
             border-radius:24px !important;
             border:1px solid #dbe6f1 !important;
-            background:rgba(255,255,255,0.99) !important;
-            box-shadow:0 22px 54px rgba(15, 23, 42, 0.10) !important;
+            background:rgba(255,255,255,0.995) !important;
+            box-shadow:0 20px 52px rgba(15, 23, 42, 0.10) !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child form {{
             gap:0 !important;
@@ -3414,19 +3417,19 @@ def auth_gate_ui():
         .segav-form-brand {{
             display:flex;
             align-items:center;
-            justify-content:center;
-            gap:14px;
-            margin:0 0 14px 0;
+            justify-content:flex-start;
+            gap:12px;
+            margin:0 0 10px 0;
         }}
         .segav-form-brand img {{
-            width:72px;
+            width:76px;
             height:auto;
             object-fit:contain;
             display:block;
             flex:0 0 auto;
         }}
         .segav-form-brand-fallback {{
-            font-size:24px;
+            font-size:28px;
             line-height:1;
             color:#0f58b7;
             font-weight:900;
@@ -3437,7 +3440,7 @@ def auth_gate_ui():
         }}
         .segav-form-brand-copy strong {{
             display:block;
-            font-size:18px;
+            font-size:17px;
             line-height:1.05;
             letter-spacing:-0.04em;
             color:#123661;
@@ -3445,42 +3448,42 @@ def auth_gate_ui():
         }}
         .segav-form-brand-copy span {{
             display:block;
-            margin-top:5px;
+            margin-top:4px;
             font-size:11px;
-            line-height:1.55;
-            color:#71839b;
+            line-height:1.45;
+            color:#6f839d;
         }}
         .segav-form-top {{
-            margin:0 0 14px 0;
+            margin:0 0 10px 0;
             text-align:center;
         }}
         .segav-form-top h3 {{
             margin:0;
-            font-size:20px;
+            font-size:18px;
             line-height:1.05;
             letter-spacing:-0.04em;
             color:#183153;
             font-weight:850;
         }}
         .segav-form-top p {{
-            margin:6px 0 0 0;
+            margin:5px 0 0 0;
             font-size:11px;
-            line-height:1.55;
+            line-height:1.45;
             color:#7689a2;
         }}
         .segav-label {{
-            margin:0 0 8px 0;
-            font-size:11px;
+            margin:0 0 6px 0;
+            font-size:12px;
             color:#1a3357;
             font-weight:800;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInput"] {{
-            margin:0 0 10px 0 !important;
+            margin:0 0 8px 0 !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] {{
             border:1px solid #d4deea !important;
             border-radius:14px !important;
-            min-height:50px !important;
+            min-height:44px !important;
             background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
             box-shadow:none !important;
             transition:border-color .18s ease, box-shadow .18s ease;
@@ -3490,8 +3493,8 @@ def auth_gate_ui():
             box-shadow:0 0 0 4px rgba(15, 96, 210, 0.12) !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] input {{
-            min-height:50px !important;
-            height:50px !important;
+            min-height:44px !important;
+            height:44px !important;
             padding:0 14px !important;
             color:#122b4a !important;
             font-size:14px !important;
@@ -3504,7 +3507,7 @@ def auth_gate_ui():
             display:flex;
             align-items:center;
             justify-content:flex-end;
-            margin:-2px 0 12px 0;
+            margin:-2px 0 8px 0;
         }}
         .segav-login-inline a {{
             color:#0f5fcf;
@@ -3512,21 +3515,23 @@ def auth_gate_ui():
             font-size:11px;
             font-weight:700;
         }}
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .stFormSubmitButton > button,
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stFormSubmitButton"] > button,
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primaryFormSubmit"],
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primary"] {{
             width:100% !important;
-            min-height:52px !important;
-            height:52px !important;
+            min-height:46px !important;
+            height:46px !important;
             border:none !important;
             border-radius:14px !important;
-            background:linear-gradient(135deg, #0f62d6 0%, #0c4da5 100%) !important;
+            background:linear-gradient(135deg, #1161d9 0%, #0b469a 100%) !important;
             color:#ffffff !important;
-            font-size:16px !important;
+            font-size:15px !important;
             font-weight:850 !important;
             letter-spacing:-0.01em;
-            box-shadow:0 18px 30px rgba(15, 98, 214, 0.22) !important;
+            box-shadow:0 16px 28px rgba(15, 98, 214, 0.22) !important;
         }}
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .stFormSubmitButton > button:hover,
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stFormSubmitButton"] > button:hover,
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primaryFormSubmit"]:hover,
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primary"]:hover {{
@@ -3537,9 +3542,9 @@ def auth_gate_ui():
             {hero_style}
             position:relative;
             width:100%;
-            height:var(--segav-card-height);
-            min-height:var(--segav-card-height);
-            max-height:var(--segav-card-height);
+            height:100% !important;
+            min-height:100% !important;
+            max-height:100% !important;
             background-size:cover;
             background-position:center center;
             background-repeat:no-repeat;
@@ -3553,20 +3558,21 @@ def auth_gate_ui():
             position:absolute;
             inset:0;
             background:
-                linear-gradient(180deg, rgba(4, 26, 66, 0.10) 0%, rgba(4, 26, 66, 0.18) 38%, rgba(4, 26, 66, 0.46) 100%),
-                linear-gradient(135deg, rgba(6, 38, 100, 0.42) 0%, rgba(6, 38, 100, 0.14) 42%, rgba(4, 18, 46, 0.56) 100%);
+                linear-gradient(180deg, rgba(4, 26, 66, 0.06) 0%, rgba(4, 26, 66, 0.20) 34%, rgba(4, 26, 66, 0.54) 100%),
+                linear-gradient(135deg, rgba(6, 38, 100, 0.34) 0%, rgba(6, 38, 100, 0.10) 42%, rgba(4, 18, 46, 0.50) 100%);
         }}
         .segav-hero-content {{
             position:relative;
             z-index:2;
             width:100%;
             height:100%;
-            padding:38px 42px;
+            min-height:100%;
+            padding:32px 38px;
             display:flex;
             flex-direction:column;
             align-items:center;
             justify-content:center;
-            gap:18px;
+            gap:15px;
             text-align:center;
         }}
         .segav-hero-badge {{
@@ -3585,17 +3591,17 @@ def auth_gate_ui():
         }}
         .segav-hero-copy {{
             width:100%;
-            max-width:540px;
+            max-width:560px;
             display:flex;
             flex-direction:column;
             align-items:center;
-            gap:12px;
+            gap:10px;
         }}
         .segav-hero-copy h2 {{
             margin:0;
-            font-size:clamp(34px, 3.1vw, 50px);
-            line-height:1.01;
-            letter-spacing:-0.055em;
+            font-size:clamp(28px, 2.5vw, 42px);
+            line-height:1.03;
+            letter-spacing:-0.05em;
             font-weight:900;
             color:#ffffff;
             text-shadow:0 10px 24px rgba(3, 18, 48, 0.24);
@@ -3603,8 +3609,8 @@ def auth_gate_ui():
         .segav-hero-copy p {{
             margin:0 auto;
             max-width:520px;
-            font-size:16px;
-            line-height:1.62;
+            font-size:15px;
+            line-height:1.55;
             color:rgba(240, 247, 255, 0.96);
         }}
         .segav-hero-strip {{
@@ -3615,7 +3621,7 @@ def auth_gate_ui():
             gap:10px;
         }}
         .segav-hero-pill {{
-            padding:10px 14px;
+            padding:9px 14px;
             border-radius:999px;
             background:rgba(255,255,255,0.15);
             border:1px solid rgba(255,255,255,0.20);
@@ -3627,16 +3633,16 @@ def auth_gate_ui():
         }}
         @media (max-width: 1180px) {{
             .block-container {{
-                --segav-card-height:min(680px, calc(100vh - 20px));
+                --segav-card-height:min(600px, calc(100vh - 12px));
             }}
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {{
-                padding:22px 26px !important;
+                padding:16px 22px !important;
             }}
             .segav-login-headline {{
-                font-size:clamp(24px, 2.6vw, 34px);
+                font-size:clamp(22px, 2.1vw, 30px);
             }}
             .segav-hero-copy h2 {{
-                font-size:clamp(30px, 3vw, 42px);
+                font-size:clamp(26px, 2.4vw, 36px);
             }}
         }}
         @media (max-width: 980px) {{
@@ -3662,19 +3668,19 @@ def auth_gate_ui():
                 max-height:none !important;
             }}
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {{
-                padding:28px 22px 24px 22px !important;
+                padding:24px 20px !important;
             }}
             div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"],
             .segav-login-shell {{
                 max-width:none;
             }}
             .segav-hero-panel {{
-                height:420px !important;
-                min-height:420px !important;
-                max-height:420px !important;
+                height:360px !important;
+                min-height:360px !important;
+                max-height:360px !important;
             }}
             .segav-hero-content {{
-                padding:28px 24px;
+                padding:24px 20px;
             }}
         }}
         </style>
@@ -3699,15 +3705,15 @@ def auth_gate_ui():
         except Exception:
             pass
 
-    left, right = st.columns([4.65, 5.35], gap="small")
+    left, right = st.columns([4.8, 5.2], gap="small")
 
     with left:
         st.markdown(
             """
             <div class="segav-login-shell">
                 <div class="segav-login-kicker">ERP Multiempresa · SEGAV</div>
-                <h1 class="segav-login-headline">Acceso profesional en una sola pantalla.</h1>
-                <p class="segav-login-subcopy">Entrada corporativa compacta, clara y ordenada para iniciar sesión sin scroll, sin bloques sueltos y con foco total en el acceso.</p>
+                <h1 class="segav-login-headline">Acceso corporativo claro, compacto y profesional.</h1>
+                <p class="segav-login-subcopy">Ingreso centralizado para operar el ERP multiempresa con una portada limpia, estable y enfocada en el acceso.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3723,7 +3729,7 @@ def auth_gate_ui():
                         <img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}">
                         <div class="segav-form-brand-copy">
                             <strong>SEGAV ERP</strong>
-                            <span>Acceso central para SuperAdmin, administradores y responsables de empresa.</span>
+                            <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
                         </div>
                     </div>
                     """,
@@ -3736,7 +3742,7 @@ def auth_gate_ui():
                         <div class="segav-form-brand-fallback">SEGAV</div>
                         <div class="segav-form-brand-copy">
                             <strong>SEGAV ERP</strong>
-                            <span>Acceso central para SuperAdmin, administradores y responsables de empresa.</span>
+                            <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
                         </div>
                     </div>
                     """,
@@ -3746,7 +3752,7 @@ def auth_gate_ui():
                 """
                 <div class="segav-form-top">
                     <h3>Iniciar sesión</h3>
-                    <p>Ingrese sus credenciales para continuar al ERP.</p>
+                    <p>Ingrese sus credenciales para continuar.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -3780,7 +3786,7 @@ def auth_gate_ui():
                     <div class="segav-hero-badge">Seguridad · Cumplimiento · Operación</div>
                     <div class="segav-hero-copy">
                         <h2>SEGAV ERP Multiempresa</h2>
-                        <p>Plataforma preparada para operar múltiples empresas con una portada visual sólida, ordenada y lista para ser presentada como producto comercial.</p>
+                        <p>Plataforma lista para operar múltiples empresas con una entrada visual sólida, equilibrada y preparada para presentación comercial.</p>
                     </div>
                     <div class="segav-hero-strip">
                         <div class="segav-hero-pill">Documentos</div>
@@ -3814,68 +3820,7 @@ def auth_gate_ui():
     if login_message:
         message_slot.error(login_message)
 
-    st.stop()
 
-
-
-# ----------------------------
-# Init
-# ----------------------------
-bootstrap_app_or_stop()
-
-inject_css()
-
-
-# ----------------------------
-# Auth gate
-# ----------------------------
-if current_user() is None:
-    auth_gate_ui()
-
-
-# ----------------------------
-# Sidebar navigation
-# ----------------------------
-PAGES = [
-    "Dashboard",
-    "Cumplimiento / Alertas",
-    "Mi Empresa / SGSST",
-    "Mandantes",
-    "Contratos de Faena",
-    "Faenas",
-    "Trabajadores",
-    "Documentos Empresa",
-    "Documentos Empresa (Faena)",
-    "Asignar Trabajadores",
-    "Documentos Trabajador",
-    "Export (ZIP)",
-    "Backup / Restore",
-]
-
-VISIBLE_PAGES = list(PAGES)
-if is_superadmin():
-    VISIBLE_PAGES = ["SuperAdmin / Empresas", *VISIBLE_PAGES]
-if has_perm("manage_users"):
-    VISIBLE_PAGES.append("Admin Usuarios")
-
-
-# Aplica navegación solicitada por botones (antes de crear el widget del sidebar)
-if st.session_state.get("nav_request") is not None:
-    _req = st.session_state.get("nav_request")
-    if _req in VISIBLE_PAGES:
-        st.session_state["nav_page"] = _req
-    if st.session_state.get("nav_request_faena_id") is not None:
-        st.session_state["selected_faena_id"] = int(st.session_state.get("nav_request_faena_id"))
-    st.session_state.pop("nav_request", None)
-    st.session_state.pop("nav_request_faena_id", None)
-
-# Normaliza nav_page por si quedó un valor antiguo en session_state
-if st.session_state.get("nav_page") not in VISIBLE_PAGES:
-    st.session_state["nav_page"] = "Dashboard"
-
-
-if "nav_page" not in st.session_state:
-    st.session_state["nav_page"] = "Dashboard"
 # Si quedó algo inválido tras login/permisos, fuerza el primero visible
 if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
