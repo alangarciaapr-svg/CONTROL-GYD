@@ -40,6 +40,7 @@ LOCAL_BRAND_LOGO_FINAL_PATH = os.path.join(os.path.dirname(__file__), "assets", 
 LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
 LOCAL_LOGIN_HERO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_hero_segav.svg")
 LOCAL_LOGIN_PANEL_APPROVED_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_approved.png")
+LOCAL_LOGIN_PANEL_FIT_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit_fullbleed.png")
 LOCAL_LOGIN_FRAME_EXACT_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_frame_exact_full.png")
 PAGE_ICON_PATH = LOCAL_BRAND_LOGO_FINAL_PATH if os.path.exists(LOCAL_BRAND_LOGO_FINAL_PATH) else LOCAL_BRAND_LOGO_PATH
 if os.path.exists(PAGE_ICON_PATH):
@@ -3230,7 +3231,8 @@ def auth_gate_ui():
 
     logo_b64 = _safe_b64(get_login_logo_bytes)
     panel_b64 = (
-        _safe_file_b64(LOCAL_LOGIN_PANEL_APPROVED_PATH)
+        _safe_file_b64(LOCAL_LOGIN_PANEL_FIT_PATH)
+        or _safe_file_b64(LOCAL_LOGIN_PANEL_APPROVED_PATH)
         or _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_exact.png"))
         or _safe_b64(get_login_panel_approved_bytes)
     )
@@ -3300,10 +3302,11 @@ def auth_gate_ui():
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {{
             background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-            padding:42px 42px 34px 42px;
+            padding:42px 42px 38px 42px;
             display:flex;
             flex-direction:column;
             justify-content:center;
+            align-items:center;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {{
             background:#0b4ca4;
@@ -3311,8 +3314,10 @@ def auth_gate_ui():
         }}
 
         .segav-login-copy {{
-            max-width:470px;
-            margin:0 0 22px 0;
+            width:100%;
+            max-width:560px;
+            margin:0 auto 20px auto;
+            text-align:center;
         }}
         .segav-login-kicker {{
             display:inline-flex;
@@ -3338,7 +3343,7 @@ def auth_gate_ui():
         }}
         .segav-login-headline {{
             margin:18px 0 0 0;
-            font-size:clamp(42px, 3.1vw, 56px);
+            font-size:clamp(40px, 3.0vw, 54px);
             line-height:1.02;
             letter-spacing:-0.055em;
             color:#142d4f;
@@ -3346,22 +3351,25 @@ def auth_gate_ui():
             max-width:520px;
         }}
         .segav-login-subcopy {{
-            margin:16px 0 0 0;
-            max-width:470px;
+            margin:16px auto 0 auto;
+            max-width:500px;
             font-size:16px;
             line-height:1.65;
             color:#627691;
+            text-align:center;
         }}
 
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stAlert"] {{
-            max-width:470px;
-            margin:0 0 14px 0 !important;
+            width:100%;
+            max-width:520px;
+            margin:0 auto 14px auto !important;
             border-radius:18px !important;
         }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] {{
-            max-width:470px;
-            margin:0 !important;
-            padding:28px !important;
+            width:100%;
+            max-width:520px;
+            margin:0 auto !important;
+            padding:30px !important;
             border-radius:24px !important;
             border:1px solid #dbe6f1 !important;
             background:rgba(255,255,255,0.98) !important;
@@ -3372,10 +3380,12 @@ def auth_gate_ui():
         }}
         .segav-form-top {{
             margin:0 0 18px 0;
+            text-align:center;
         }}
         .segav-form-top span {{
             display:inline-flex;
             align-items:center;
+            justify-content:center;
             padding:7px 12px;
             border-radius:999px;
             background:#edf5ff;
@@ -3463,12 +3473,14 @@ def auth_gate_ui():
         }}
 
         .segav-brand-box {{
-            max-width:470px;
-            margin-top:22px;
+            width:100%;
+            max-width:520px;
+            margin:22px auto 0 auto;
             padding-top:18px;
             border-top:1px solid rgba(19, 52, 95, 0.10);
             display:flex;
             align-items:center;
+            justify-content:center;
             gap:18px;
         }}
         .segav-brand-box img {{
@@ -3494,7 +3506,7 @@ def auth_gate_ui():
         .segav-brand-meta span {{
             display:block;
             margin-top:6px;
-            max-width:250px;
+            max-width:290px;
             font-size:13px;
             line-height:1.55;
             color:#70849d;
@@ -3513,14 +3525,17 @@ def auth_gate_ui():
             background-position:center center;
             background-repeat:no-repeat;
             overflow:hidden;
+            display:flex;
+            align-items:center;
+            justify-content:center;
         }}
         .segav-hero-panel::before {{
             content:"";
             position:absolute;
             inset:0;
             background:
-                linear-gradient(180deg, rgba(7, 34, 85, 0.20) 0%, rgba(7, 34, 85, 0.08) 30%, rgba(7, 34, 85, 0.26) 100%),
-                linear-gradient(120deg, rgba(9, 40, 99, 0.40) 0%, rgba(9, 40, 99, 0.06) 44%, rgba(9, 40, 99, 0.24) 100%);
+                linear-gradient(180deg, rgba(7, 34, 85, 0.32) 0%, rgba(7, 34, 85, 0.12) 30%, rgba(7, 34, 85, 0.34) 100%),
+                linear-gradient(120deg, rgba(9, 40, 99, 0.46) 0%, rgba(9, 40, 99, 0.08) 44%, rgba(9, 40, 99, 0.28) 100%);
         }}
         .segav-hero-panel::after {{
             content:"";
@@ -3536,15 +3551,19 @@ def auth_gate_ui():
             position:relative;
             z-index:2;
             height:100%;
-            padding:46px 44px 42px 44px;
+            width:100%;
+            padding:48px 46px;
             display:flex;
             flex-direction:column;
-            justify-content:space-between;
+            align-items:center;
+            justify-content:center;
+            gap:26px;
+            text-align:center;
         }}
         .segav-hero-badge {{
             display:inline-flex;
             align-items:center;
-            align-self:flex-start;
+            align-self:center;
             padding:9px 14px;
             border-radius:999px;
             background:rgba(255,255,255,0.16);
@@ -3557,37 +3576,41 @@ def auth_gate_ui():
             text-transform:uppercase;
         }}
         .segav-hero-copy {{
-            max-width:580px;
-            margin-top:22px;
+            max-width:600px;
+            margin-top:0;
         }}
         .segav-hero-copy h2 {{
             margin:0;
-            font-size:clamp(42px, 3.4vw, 60px);
-            line-height:0.98;
+            font-size:clamp(38px, 3.1vw, 54px);
+            line-height:1.02;
             letter-spacing:-0.055em;
             font-weight:900;
             color:#ffffff;
             text-shadow:0 10px 24px rgba(3, 18, 48, 0.24);
         }}
         .segav-hero-copy p {{
-            margin:18px 0 0 0;
-            max-width:500px;
+            margin:16px auto 0 auto;
+            max-width:560px;
             font-size:16px;
             line-height:1.68;
-            color:rgba(240, 247, 255, 0.95);
+            color:rgba(240, 247, 255, 0.96);
         }}
         .segav-hero-points {{
+            width:100%;
+            max-width:760px;
             display:grid;
             grid-template-columns:repeat(3, minmax(0, 1fr));
             gap:14px;
-            margin-top:auto;
+            margin-top:0;
         }}
         .segav-hero-point {{
             padding:16px 16px 14px 16px;
             border-radius:18px;
-            background:rgba(255,255,255,0.11);
-            border:1px solid rgba(255,255,255,0.18);
+            background:rgba(255,255,255,0.14);
+            border:1px solid rgba(255,255,255,0.22);
             backdrop-filter:blur(12px);
+            text-align:center;
+            box-shadow:0 14px 32px rgba(5, 24, 61, 0.12);
         }}
         .segav-hero-point strong {{
             display:block;
@@ -3763,7 +3786,7 @@ def auth_gate_ui():
                         <div class="segav-hero-badge">Seguridad · Cumplimiento · Operación</div>
                         <div class="segav-hero-copy">
                             <h2>SEGAV ERP Multiempresa</h2>
-                            <p>Un acceso corporativo que sí proyecta un ERP profesional: ordenado, compacto y listo para ser presentado como plataforma comercial.</p>
+                            <p>Plataforma corporativa lista para presentar una operación multiempresa con una entrada más limpia, sólida y comercial.</p>
                         </div>
                     </div>
                     <div class="segav-hero-points">
