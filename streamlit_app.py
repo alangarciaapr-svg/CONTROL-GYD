@@ -3821,6 +3821,48 @@ def auth_gate_ui():
         message_slot.error(login_message)
 
 
+# ----------------------------
+# Sidebar navigation
+# ----------------------------
+PAGES = [
+    "Dashboard",
+    "Cumplimiento / Alertas",
+    "Mi Empresa / SGSST",
+    "Mandantes",
+    "Contratos de Faena",
+    "Faenas",
+    "Trabajadores",
+    "Documentos Empresa",
+    "Documentos Empresa (Faena)",
+    "Asignar Trabajadores",
+    "Documentos Trabajador",
+    "Export (ZIP)",
+    "Backup / Restore",
+]
+
+VISIBLE_PAGES = list(PAGES)
+if is_superadmin():
+    VISIBLE_PAGES = ["SuperAdmin / Empresas", *VISIBLE_PAGES]
+if has_perm("manage_users"):
+    VISIBLE_PAGES.append("Admin Usuarios")
+
+# Aplica navegación solicitada por botones (antes de crear el widget del sidebar)
+if st.session_state.get("nav_request") is not None:
+    _req = st.session_state.get("nav_request")
+    if _req in VISIBLE_PAGES:
+        st.session_state["nav_page"] = _req
+    if st.session_state.get("nav_request_faena_id") is not None:
+        st.session_state["selected_faena_id"] = int(st.session_state.get("nav_request_faena_id"))
+    st.session_state.pop("nav_request", None)
+    st.session_state.pop("nav_request_faena_id", None)
+
+# Normaliza nav_page por si quedó un valor antiguo en session_state
+if st.session_state.get("nav_page") not in VISIBLE_PAGES:
+    st.session_state["nav_page"] = "Dashboard"
+
+if "nav_page" not in st.session_state:
+    st.session_state["nav_page"] = "Dashboard"
+
 # Si quedó algo inválido tras login/permisos, fuerza el primero visible
 if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
