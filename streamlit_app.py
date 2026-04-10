@@ -36,11 +36,14 @@ if APP_DIR not in sys.path:
 # ----------------------------
 # Config
 # ----------------------------
+LOCAL_BRAND_LOGO_FINAL_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo_final.png")
 LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
 LOCAL_LOGIN_HERO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_hero_segav.svg")
 LOCAL_LOGIN_PANEL_APPROVED_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_approved.png")
-if os.path.exists(LOCAL_BRAND_LOGO_PATH):
-    st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
+LOCAL_LOGIN_FRAME_EXACT_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_frame_exact_full.png")
+PAGE_ICON_PATH = LOCAL_BRAND_LOGO_FINAL_PATH if os.path.exists(LOCAL_BRAND_LOGO_FINAL_PATH) else LOCAL_BRAND_LOGO_PATH
+if os.path.exists(PAGE_ICON_PATH):
+    st.set_page_config(page_title="SEGAV ERP", page_icon=PAGE_ICON_PATH, layout="wide")
 else:
     st.set_page_config(page_title="SEGAV ERP", layout="wide")
 
@@ -2740,12 +2743,13 @@ LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-made
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_login_logo_bytes():
-    if os.path.exists(LOCAL_BRAND_LOGO_PATH):
-        try:
-            with open(LOCAL_BRAND_LOGO_PATH, "rb") as fp:
-                return fp.read()
-        except Exception:
-            pass
+    for logo_path in (LOCAL_BRAND_LOGO_FINAL_PATH, LOCAL_BRAND_LOGO_PATH):
+        if os.path.exists(logo_path):
+            try:
+                with open(logo_path, "rb") as fp:
+                    return fp.read()
+            except Exception:
+                pass
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -3205,7 +3209,7 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso profesional, de una sola vista en escritorio."""
+    """Pantalla de acceso profesional, compacta y de una sola vista en escritorio."""
 
     def _safe_b64(reader):
         try:
@@ -3215,29 +3219,39 @@ def auth_gate_ui():
             return ""
 
     logo_b64 = _safe_b64(get_login_logo_bytes)
+    panel_b64 = _safe_b64(get_login_panel_approved_bytes)
     hero_b64 = _safe_b64(get_login_hero_bytes)
-    panel_b64 = hero_b64 or _safe_b64(get_login_panel_approved_bytes)
-    panel_mime = "image/svg+xml" if hero_b64 else "image/png"
-    panel_css = f"background-image:url('data:{panel_mime};base64,{panel_b64}');" if panel_b64 else "background:linear-gradient(135deg,#0d4ea6 0%,#0a3a7b 100%);"
+    panel_css = (
+        f"background-image:url('data:image/png;base64,{panel_b64}');"
+        if panel_b64
+        else (
+            f"background-image:url('data:image/svg+xml;base64,{hero_b64}');"
+            if hero_b64
+            else "background:linear-gradient(135deg,#0d4ea6 0%,#0a3a7b 100%);"
+        )
+    )
 
     st.markdown(
         f"""
         <style>
-        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"] {{display:none !important;}}
+        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"], footer {{display:none !important;}}
         html, body, [data-testid="stAppViewContainer"], .stApp {{
             height:100vh !important;
             min-height:100vh !important;
             overflow:hidden !important;
-            background:linear-gradient(180deg, #eef3f8 0%, #e6edf6 100%) !important;
+            background:linear-gradient(180deg, #eef2f7 0%, #e7edf5 100%) !important;
         }}
         [data-testid="stAppViewContainer"] > .main,
         .main,
-        .block-container {{
+        .block-container,
+        [data-testid="stVerticalBlock"] {{
             padding:0 !important;
             margin:0 !important;
             max-width:none !important;
+            gap:0 !important;
         }}
         .block-container {{padding-top:0 !important; padding-bottom:0 !important;}}
+        div[data-testid="stForm"] {{margin:0 !important;}}
         .segav-login-root {{
             width:100vw;
             height:100vh;
@@ -3245,62 +3259,68 @@ def auth_gate_ui():
             display:flex;
             align-items:center;
             justify-content:center;
-            padding:22px;
+            padding:clamp(16px, 2vw, 24px);
             box-sizing:border-box;
             overflow:hidden;
         }}
         .segav-login-shell {{
-            width:min(1420px, 96vw);
-            height:min(860px, calc(100vh - 44px));
+            width:min(1500px, 96vw);
+            height:min(820px, calc(100vh - 32px));
+            min-height:680px;
             display:grid;
-            grid-template-columns:minmax(390px, 37%) minmax(0, 63%);
+            grid-template-columns:minmax(420px, 36%) minmax(0, 64%);
             background:#ffffff;
             border-radius:28px;
             overflow:hidden;
-            box-shadow:0 32px 72px rgba(15, 23, 42, 0.16);
             border:1px solid rgba(15, 23, 42, 0.08);
+            box-shadow:0 28px 70px rgba(15, 23, 42, 0.14);
         }}
         .segav-login-left {{
             background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-            padding:48px 44px 34px 44px;
+            padding:40px 44px 28px 44px;
             display:flex;
             flex-direction:column;
             justify-content:space-between;
             gap:24px;
         }}
-        .segav-login-copy {{display:flex; flex-direction:column; gap:12px;}}
-        .segav-login-kicker {{
+        .segav-login-left-top {{display:flex; flex-direction:column; gap:20px;}}
+        .segav-login-chip {{
             margin:0;
-            font-size:13px;
+            width:max-content;
+            padding:8px 12px;
+            border-radius:999px;
+            background:#edf4ff;
+            color:#0f5fd0;
+            font-size:12px;
             font-weight:800;
-            letter-spacing:0.18em;
+            letter-spacing:0.12em;
             text-transform:uppercase;
-            color:#0e58b6;
         }}
         .segav-login-title {{
             margin:0;
-            font-size:clamp(34px, 2.5vw, 42px);
-            line-height:1.08;
+            font-size:clamp(34px, 2.55vw, 46px);
+            line-height:1.04;
             font-weight:800;
-            color:#0f2547;
-            letter-spacing:-0.03em;
+            letter-spacing:-0.035em;
+            color:#142848;
         }}
         .segav-login-subtitle {{
             margin:0;
-            font-size:16px;
-            line-height:1.65;
-            color:#5b6d86;
-            max-width:460px;
+            max-width:430px;
+            font-size:15px;
+            line-height:1.58;
+            color:#60738f;
         }}
         .segav-login-form-wrap {{
             display:flex;
             flex-direction:column;
-            gap:16px;
-            padding:30px 28px;
+            gap:14px;
+            padding:24px;
             border-radius:22px;
-            background:linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
-            border:1px solid #dde6f2;
-            box-shadow:0 18px 36px rgba(15, 23, 42, 0.06);
+            background:rgba(255,255,255,0.94);
+            border:1px solid #dce5f1;
+            box-shadow:0 16px 34px rgba(15, 23, 42, 0.07);
+            backdrop-filter:blur(8px);
         }}
         .segav-login-form-wrap .stForm {{
             border:none !important;
@@ -3312,18 +3332,18 @@ def auth_gate_ui():
         .segav-login-form-wrap form {{gap:0 !important;}}
         .segav-field-label {{
             margin:0 0 8px 0;
-            font-size:15px;
+            font-size:14px;
             line-height:1.2;
-            font-weight:700;
-            color:#1c3253;
+            font-weight:800;
+            color:#1b3154;
         }}
-        .segav-login-form-wrap div[data-testid="stTextInput"] {{margin:0 0 18px 0 !important;}}
+        .segav-login-form-wrap div[data-testid="stTextInput"] {{margin:0 0 16px 0 !important;}}
         .segav-login-form-wrap div[data-testid="stTextInputRootElement"] {{
-            background:#f8fbff !important;
-            border:1px solid #d6dfeb !important;
+            background:#fbfdff !important;
+            border:1px solid #d4deea !important;
             border-radius:14px !important;
             box-shadow:none !important;
-            min-height:56px !important;
+            min-height:54px !important;
             transition:border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
         }}
         .segav-login-form-wrap div[data-testid="stTextInputRootElement"]:focus-within {{
@@ -3332,8 +3352,8 @@ def auth_gate_ui():
             box-shadow:0 0 0 4px rgba(14, 88, 182, 0.12) !important;
         }}
         .segav-login-form-wrap div[data-testid="stTextInputRootElement"] input {{
-            height:56px !important;
-            min-height:56px !important;
+            height:54px !important;
+            min-height:54px !important;
             font-size:16px !important;
             color:#112949 !important;
             padding:0 16px !important;
@@ -3344,14 +3364,14 @@ def auth_gate_ui():
             margin:-2px 0 16px 0;
             text-align:right;
             font-size:14px;
-            font-weight:600;
+            font-weight:700;
             color:#0e58b6;
         }}
         .segav-login-form-wrap div[data-testid="stFormSubmitButton"] {{margin:0 !important;}}
         .segav-login-form-wrap div[data-testid="stFormSubmitButton"] > button {{
             width:100% !important;
-            min-height:56px !important;
-            height:56px !important;
+            min-height:54px !important;
+            height:54px !important;
             border:none !important;
             border-radius:14px !important;
             background:linear-gradient(135deg, #0f63d8 0%, #0c4da5 100%) !important;
@@ -3359,7 +3379,7 @@ def auth_gate_ui():
             font-size:18px !important;
             font-weight:800 !important;
             letter-spacing:-0.01em;
-            box-shadow:0 18px 34px rgba(15, 99, 216, 0.28) !important;
+            box-shadow:0 18px 32px rgba(15, 99, 216, 0.28) !important;
             transition:transform .18s ease, box-shadow .18s ease, filter .18s ease;
         }}
         .segav-login-form-wrap div[data-testid="stFormSubmitButton"] > button:hover {{
@@ -3372,19 +3392,29 @@ def auth_gate_ui():
         }}
         .segav-login-brand {{
             display:flex;
+            flex-direction:column;
             align-items:center;
             justify-content:center;
+            gap:8px;
             padding-top:4px;
         }}
         .segav-login-brand img {{
-            width:clamp(170px, 14vw, 230px);
+            width:clamp(150px, 11vw, 210px);
             max-width:100%;
             height:auto;
             object-fit:contain;
             display:block;
         }}
+        .segav-login-brand-text {{
+            margin:0;
+            font-size:18px;
+            line-height:1;
+            font-weight:800;
+            letter-spacing:0.02em;
+            color:#0f5bbb;
+        }}
         .segav-login-brand-fallback {{
-            font-size:38px;
+            font-size:36px;
             line-height:1;
             font-weight:800;
             color:#0e58b6;
@@ -3397,78 +3427,68 @@ def auth_gate_ui():
             background-size:cover;
             background-position:center center;
             background-repeat:no-repeat;
-            display:flex;
-            align-items:stretch;
         }}
         .segav-login-right::before {{
             content:"";
             position:absolute;
             inset:0;
-            background:linear-gradient(180deg, rgba(10, 47, 104, 0.04) 0%, rgba(10, 47, 104, 0.10) 100%);
+            background:linear-gradient(180deg, rgba(8, 32, 77, 0.05) 0%, rgba(8, 32, 77, 0.12) 100%);
         }}
-        .segav-login-right::after {{
-            content:"";
+        .segav-login-right-glow {{
             position:absolute;
-            inset:auto 28px 28px 28px;
-            height:86px;
-            border-radius:22px;
-            background:linear-gradient(90deg, rgba(15, 37, 71, 0.92) 0%, rgba(14, 88, 182, 0.82) 100%);
-            box-shadow:0 20px 36px rgba(8, 32, 77, 0.18);
+            inset:auto auto 26px 26px;
+            width:220px;
+            height:220px;
+            border-radius:999px;
+            background:radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 72%);
+            filter:blur(6px);
+            z-index:1;
+        }}
+        .segav-login-right-badge {{
+            position:absolute;
+            top:26px;
+            right:26px;
             z-index:2;
-        }}
-        .segav-login-right-meta {{
-            position:absolute;
-            inset:auto 44px 44px 44px;
-            z-index:3;
-            display:grid;
-            grid-template-columns:repeat(3, minmax(0, 1fr));
-            gap:20px;
+            display:flex;
+            flex-direction:column;
+            gap:4px;
+            padding:14px 16px;
+            border-radius:18px;
             color:#ffffff;
+            background:rgba(8, 32, 77, 0.28);
+            border:1px solid rgba(255,255,255,0.18);
+            backdrop-filter:blur(12px);
+            box-shadow:0 16px 32px rgba(8, 32, 77, 0.18);
         }}
-        .segav-login-right-item {{display:flex; flex-direction:column; gap:6px;}}
-        .segav-login-right-label {{
-            margin:0;
-            font-size:12px;
-            line-height:1.2;
-            font-weight:700;
-            letter-spacing:0.12em;
-            text-transform:uppercase;
-            color:rgba(255,255,255,0.72);
-        }}
-        .segav-login-right-value {{
-            margin:0;
-            font-size:18px;
-            line-height:1.2;
-            font-weight:800;
-            color:#ffffff;
-        }}
-        @media (max-width: 1180px) {{
-            .segav-login-shell {{grid-template-columns:minmax(360px, 42%) minmax(0, 58%);}}
-            .segav-login-left {{padding:40px 36px 30px 36px;}}
-            .segav-login-right-meta {{grid-template-columns:1fr; gap:10px; inset:auto 38px 40px 38px;}}
-            .segav-login-right::after {{height:132px;}}
+        .segav-login-right-badge strong {{font-size:14px; line-height:1.2;}}
+        .segav-login-right-badge span {{font-size:12px; line-height:1.25; color:rgba(255,255,255,0.88);}}
+        @media (max-width: 1280px) {{
+            .segav-login-shell {{grid-template-columns:minmax(390px, 38%) minmax(0, 62%); height:min(780px, calc(100vh - 28px));}}
+            .segav-login-left {{padding:34px 34px 24px 34px;}}
         }}
         @media (max-width: 980px) {{
             html, body, [data-testid="stAppViewContainer"], .stApp {{height:auto !important; min-height:100vh !important; overflow:auto !important;}}
-            .segav-login-root {{height:auto; min-height:100vh; align-items:flex-start; padding:16px; overflow:auto;}}
+            .segav-login-root {{height:auto; min-height:100vh; align-items:flex-start; overflow:auto;}}
             .segav-login-shell {{
-                width:min(100%, 860px);
+                width:min(100%, 900px);
                 height:auto;
+                min-height:0;
                 grid-template-columns:1fr;
             }}
-            .segav-login-left {{padding:34px 24px 28px 24px;}}
-            .segav-login-right {{min-height:420px;}}
-            .segav-login-right::after {{inset:auto 18px 18px 18px; height:170px;}}
-            .segav-login-right-meta {{grid-template-columns:1fr; gap:12px; inset:auto 30px 30px 30px;}}
+            .segav-login-left {{padding:28px 22px 24px 22px;}}
+            .segav-login-right {{min-height:360px;}}
+            .segav-login-right-badge {{top:18px; right:18px;}}
         }}
         </style>
         <div class="segav-login-root">
             <div class="segav-login-shell">
                 <section class="segav-login-left">
-                    <div class="segav-login-copy">
-                        <p class="segav-login-kicker">SEGAV ERP</p>
-                        <h1 class="segav-login-title">Acceso al sistema</h1>
-                        <p class="segav-login-subtitle">Plataforma ERP multiempresa para gestión documental, seguridad, cumplimiento y operación centralizada.</p>
+                    <div class="segav-login-left-top">
+                        <p class="segav-login-chip">SEGAV ERP</p>
+                        <div>
+                            <h1 class="segav-login-title">Acceso al sistema</h1>
+                            <p class="segav-login-subtitle">ERP multiempresa para gestión documental, seguridad, prevención y cumplimiento operativo con una experiencia de acceso limpia y profesional.</p>
+                        </div>
                     </div>
                     <div class="segav-login-form-wrap">
         """,
@@ -3512,7 +3532,7 @@ def auth_gate_ui():
         ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
 
     brand_markup = (
-        f'<div class="segav-login-brand"><img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}"></div>'
+        f'<div class="segav-login-brand"><img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}"><p class="segav-login-brand-text">SEGAV ERP</p></div>'
         if logo_b64
         else '<div class="segav-login-brand"><div class="segav-login-brand-fallback">SEGAV ERP</div></div>'
     )
@@ -3523,19 +3543,10 @@ def auth_gate_ui():
                     {brand_markup}
                 </section>
                 <section class="segav-login-right">
-                    <div class="segav-login-right-meta">
-                        <div class="segav-login-right-item">
-                            <p class="segav-login-right-label">Control</p>
-                            <p class="segav-login-right-value">Documentos, vigencias y trazabilidad</p>
-                        </div>
-                        <div class="segav-login-right-item">
-                            <p class="segav-login-right-label">Cumplimiento</p>
-                            <p class="segav-login-right-value">SGSST, alertas y seguimiento</p>
-                        </div>
-                        <div class="segav-login-right-item">
-                            <p class="segav-login-right-label">Escalabilidad</p>
-                            <p class="segav-login-right-value">Operación multiempresa centralizada</p>
-                        </div>
+                    <div class="segav-login-right-glow"></div>
+                    <div class="segav-login-right-badge">
+                        <strong>Plataforma ERP Multiempresa</strong>
+                        <span>Documentos · Prevención · Monitoreo</span>
                     </div>
                 </section>
             </div>
