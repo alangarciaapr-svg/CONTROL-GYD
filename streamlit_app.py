@@ -3515,21 +3515,36 @@ def superadmins_count(active_only: bool = True) -> int:
         return 0
 
 def ensure_superadmin_exists():
+    """Garantiza que exista al menos un SUPERADMIN activo y privilegia el usuario por defecto."""
     try:
         ensure_users_table()
+        default_user = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia").strip() or "a.garcia"
+        default_pass = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+        row = fetch_row("SELECT id, role, is_active FROM users WHERE username=?", (default_user,), fresh=True)
+        if row is not None:
+            try:
+                uid = int(row["id"])
+            except Exception:
+                uid = int(row[0])
+            role = str((row.get("role") if hasattr(row, "get") else row[1]) or "").upper()
+            is_active = int((row.get("is_active") if hasattr(row, "get") else row[2]) or 0)
+            if role != "SUPERADMIN" or is_active != 1:
+                execute(
+                    "UPDATE users SET role=?, perms_json=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
+                )
+            return
+
         if superadmins_count(active_only=False) > 0:
             return
-        src = fetch_df("SELECT id FROM users WHERE role='ADMIN' ORDER BY is_active DESC, id ASC LIMIT 1")
-        if src.empty:
-            return
-        uid = int(src.iloc[0]["id"])
+
+        salt_b64, h_b64 = hash_password(default_pass)
         execute(
-            "UPDATE users SET role=?, perms_json=?, updated_at=datetime('now') WHERE id=?",
-            ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
+            "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+            (default_user, salt_b64, h_b64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
         )
     except Exception:
         pass
-
 
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
@@ -3668,7 +3683,7 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso ERP reconstruida desde cero, fija y sin scroll en escritorio."""
+    """Login ERP fijo de una sola pantalla en escritorio."""
 
     def _safe_b64(reader):
         try:
@@ -3693,16 +3708,15 @@ def auth_gate_ui():
         or _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit.png"))
         or _safe_file_b64(LOCAL_LOGIN_PANEL_FIT_PATH)
         or _safe_file_b64(LOCAL_LOGIN_PANEL_APPROVED_PATH)
-        or _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_exact.png"))
         or _safe_b64(get_login_panel_approved_bytes)
     )
     hero_b64 = _safe_b64(get_login_hero_bytes)
 
     hero_background = (
-        f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.78) 42%, rgba(3,19,45,0.94) 100%), url('data:image/png;base64,{panel_b64}')"
+        f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.80) 45%, rgba(3,19,45,0.95) 100%), url('data:image/png;base64,{panel_b64}')"
         if panel_b64
         else (
-            f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.78) 42%, rgba(3,19,45,0.94) 100%), url('data:image/svg+xml;base64,{hero_b64}')"
+            f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.80) 45%, rgba(3,19,45,0.95) 100%), url('data:image/svg+xml;base64,{hero_b64}')"
             if hero_b64
             else "linear-gradient(135deg, #0b2e69 0%, #0f5fcf 100%)"
         )
@@ -3718,13 +3732,13 @@ def auth_gate_ui():
         min-height:100dvh !important;
         overflow:hidden !important;
         background:
-            radial-gradient(circle at 12% 10%, rgba(105, 150, 255, 0.18) 0%, rgba(105, 150, 255, 0.00) 30%),
-            radial-gradient(circle at 86% 12%, rgba(18, 92, 205, 0.12) 0%, rgba(18, 92, 205, 0.00) 28%),
+            radial-gradient(circle at 12% 10%, rgba(105,150,255,0.18) 0%, rgba(105,150,255,0) 28%),
+            radial-gradient(circle at 88% 14%, rgba(18,92,205,0.12) 0%, rgba(18,92,205,0) 28%),
             linear-gradient(180deg, #eef3fb 0%, #e7edf7 100%) !important;
     }
     .block-container {
-        max-width:1340px !important;
-        padding:10px !important;
+        max-width:1380px !important;
+        padding:12px !important;
         height:100dvh !important;
         min-height:100dvh !important;
         display:flex !important;
@@ -3733,15 +3747,16 @@ def auth_gate_ui():
         overflow:hidden !important;
     }
     .block-container > div[data-testid="stHorizontalBlock"] {
+        width:100% !important;
+        max-width:1340px !important;
+        height:min(620px, calc(100dvh - 24px)) !important;
+        min-height:min(620px, calc(100dvh - 24px)) !important;
+        max-height:min(620px, calc(100dvh - 24px)) !important;
         gap:0 !important;
         align-items:stretch !important;
-        width:100% !important;
-        height:min(590px, calc(100dvh - 20px)) !important;
-        min-height:min(590px, calc(100dvh - 20px)) !important;
-        max-height:min(590px, calc(100dvh - 20px)) !important;
         background:rgba(255,255,255,0.985) !important;
         border:1px solid rgba(19,56,104,0.10) !important;
-        border-radius:30px !important;
+        border-radius:28px !important;
         overflow:hidden !important;
         box-shadow:0 24px 64px rgba(15, 23, 42, 0.12) !important;
     }
@@ -3749,7 +3764,6 @@ def auth_gate_ui():
         height:100% !important;
         min-height:100% !important;
         max-height:100% !important;
-        overflow:hidden !important;
     }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] {
         height:100% !important;
@@ -3761,44 +3775,45 @@ def auth_gate_ui():
         width:100% !important;
     }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
-        background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
-        padding:18px 30px !important;
+        padding:24px 28px !important;
         display:flex !important;
         flex-direction:column !important;
-        align-items:center !important;
         justify-content:center !important;
+        align-items:center !important;
+        background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
     }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .element-container,
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stMarkdown"],
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stMarkdownContainer"] {
         width:100% !important;
     }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] {
-        width:100% !important;
-        max-width:500px !important;
-        margin:0 auto !important;
-        padding:16px 18px 14px 18px !important;
-        border-radius:24px !important;
-        border:1px solid #d9e5f2 !important;
-        background:rgba(255,255,255,0.995) !important;
-        box-shadow:0 16px 32px rgba(15,23,42,0.07) !important;
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {
+        padding:0 !important;
+        display:flex !important;
+        align-items:stretch !important;
+        justify-content:stretch !important;
+        background:#0b2e69 !important;
     }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child form { gap:0 !important; }
-    .segav-auth-left {
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] > div,
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container,
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"],
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdownContainer"] {
+        height:100% !important;
+        min-height:100% !important;
+        max-height:100% !important;
+        margin:0 !important;
+    }
+    .segav-login-intro {
         width:100%;
-        max-width:500px;
-        display:flex;
-        flex-direction:column;
-        align-items:center;
-        justify-content:center;
-        text-align:center;
+        max-width:520px;
         margin:0 auto 14px auto;
+        text-align:center;
     }
-    .segav-auth-kicker {
+    .segav-login-kicker {
         display:inline-flex;
         align-items:center;
         gap:10px;
-        padding:8px 15px;
+        padding:8px 14px;
         border-radius:999px;
         background:#eaf2ff;
         border:1px solid #d7e4f7;
@@ -3808,43 +3823,68 @@ def auth_gate_ui():
         letter-spacing:0.13em;
         text-transform:uppercase;
     }
-    .segav-auth-kicker::before {
+    .segav-login-kicker::before {
         content:"";
-        width:8px; height:8px; border-radius:999px;
+        width:8px;
+        height:8px;
+        border-radius:999px;
         background:#1fc66e;
         box-shadow:0 0 0 5px rgba(31,198,110,0.14);
     }
-    .segav-auth-title {
-        margin:16px 0 8px 0;
-        max-width:460px;
-        font-size:clamp(26px, 2.4vw, 44px);
-        line-height:1.06;
+    .segav-login-title {
+        margin:16px auto 10px auto;
+        max-width:480px;
+        font-size:clamp(24px, 2.3vw, 40px);
+        line-height:1.08;
         letter-spacing:-0.05em;
         color:#172d4d;
         font-weight:900;
     }
-    .segav-auth-text {
-        margin:0;
+    .segav-login-text {
+        margin:0 auto;
         max-width:430px;
         color:#627691;
         font-size:14px;
-        line-height:1.58;
+        line-height:1.55;
     }
-    .segav-auth-brand {
+    .segav-login-form {
+        width:100% !important;
+        max-width:500px !important;
+        margin:0 auto !important;
+        padding:20px 22px 18px 22px !important;
+        border-radius:24px !important;
+        border:1px solid #d9e5f2 !important;
+        background:rgba(255,255,255,0.995) !important;
+        box-shadow:0 16px 32px rgba(15,23,42,0.07) !important;
+    }
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] {
+        width:100% !important;
+        max-width:500px !important;
+        margin:0 auto !important;
+    }
+    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] > form {
+        padding:0 !important;
+        border:none !important;
+        box-shadow:none !important;
+        background:transparent !important;
+    }
+    .segav-login-brand {
         display:flex;
         align-items:center;
-        justify-content:flex-start;
         gap:12px;
+        margin:0 0 14px 0;
+    }
+    .segav-login-brand img { width:60px; height:auto; display:block; object-fit:contain; }
+    .segav-login-brand-fallback { font-size:30px; font-weight:900; color:#0f58b7; letter-spacing:-0.05em; }
+    .segav-login-brand strong { display:block; font-size:19px; line-height:1.05; color:#153761; font-weight:900; letter-spacing:-0.04em; }
+    .segav-login-brand span { display:block; margin-top:4px; font-size:11px; line-height:1.45; color:#6d829d; }
+    .segav-login-head {
+        text-align:left;
         margin:0 0 12px 0;
     }
-    .segav-auth-brand img { width:64px; height:auto; display:block; object-fit:contain; flex:0 0 auto; }
-    .segav-auth-brand-fallback { font-size:30px; line-height:1; font-weight:900; color:#0f58b7; letter-spacing:-0.05em; }
-    .segav-auth-brand-copy strong { display:block; font-size:20px; line-height:1.02; letter-spacing:-0.045em; color:#153761; font-weight:900; }
-    .segav-auth-brand-copy span { display:block; margin-top:4px; font-size:11px; line-height:1.45; color:#6d829d; }
-    .segav-auth-form-head { text-align:left; margin:0 0 12px 0; }
-    .segav-auth-form-head h3 { margin:0; font-size:20px; line-height:1.04; color:#183153; font-weight:900; letter-spacing:-0.03em; }
-    .segav-auth-form-head p { margin:5px 0 0 0; font-size:12px; line-height:1.45; color:#778aa3; }
-    .segav-auth-label { margin:0 0 6px 0; font-size:12px; color:#1a3357; font-weight:800; }
+    .segav-login-head h3 { margin:0; font-size:22px; line-height:1.05; color:#183153; font-weight:900; letter-spacing:-0.03em; }
+    .segav-login-head p { margin:5px 0 0 0; font-size:12px; line-height:1.45; color:#778aa3; }
+    .segav-login-label { margin:0 0 6px 0; font-size:12px; color:#1a3357; font-weight:800; }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInput"] { margin:0 0 10px 0 !important; }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] {
         border:1px solid #d4deea !important;
@@ -3867,125 +3907,97 @@ def auth_gate_ui():
         background:transparent !important;
     }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] input::placeholder { color:#8a9aae !important; }
-    .segav-auth-inline {
+    .segav-login-inline {
         display:flex;
-        align-items:center;
         justify-content:flex-end;
-        margin:-1px 0 12px 0;
+        margin:0 0 12px 0;
     }
-    .segav-auth-inline a { color:#0f5fcf; text-decoration:none; font-size:12px; font-weight:700; }
+    .segav-login-inline span {
+        color:#0f5fcf;
+        font-size:12px;
+        font-weight:700;
+    }
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .stFormSubmitButton > button,
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stFormSubmitButton"] > button,
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primaryFormSubmit"],
     .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primary"] {
-        width:100% !important;
-        min-height:46px !important;
-        height:46px !important;
+        min-height:48px !important;
+        height:48px !important;
         border:none !important;
         border-radius:14px !important;
-        background:linear-gradient(135deg, #1161d9 0%, #0b469a 100%) !important;
+        background:linear-gradient(180deg, #0f6ae0 0%, #0d57bb 100%) !important;
         color:#ffffff !important;
-        font-size:14px !important;
-        font-weight:850 !important;
-        box-shadow:0 12px 22px rgba(15,98,214,0.18) !important;
+        font-size:15px !important;
+        font-weight:800 !important;
+        box-shadow:0 14px 28px rgba(13,87,187,0.22) !important;
     }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .stFormSubmitButton > button:hover,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stFormSubmitButton"] > button:hover,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primaryFormSubmit"]:hover,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primary"]:hover {
-        filter:brightness(1.02);
-        transform:translateY(-1px);
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {
-        background:#0b2e69 !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {
-        padding:0 !important;
-        display:flex !important;
-        align-items:stretch !important;
-        justify-content:stretch !important;
-        background:linear-gradient(135deg, rgba(4,22,58,0.90) 0%, rgba(7,57,135,0.72) 42%, rgba(3,19,45,0.92) 100%) !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] > div,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"],
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdownContainer"] {
-        height:100% !important;
-        min-height:100% !important;
-        max-height:100% !important;
-        margin:0 !important;
-        padding:0 !important;
-        flex:1 1 auto !important;
-        display:flex !important;
-    }
-    .segav-auth-right-panel {
-        position:relative;
+    .segav-login-hero {
         width:100%;
         height:100%;
         min-height:100%;
-        background:__HERO_BG__;
-        background-size:cover;
-        background-position:center center;
-        background-repeat:no-repeat;
         display:flex;
         align-items:center;
         justify-content:center;
+        padding:34px;
+        background:__HERO_BG__;
+        background-size:cover !important;
+        background-position:center !important;
+        background-repeat:no-repeat !important;
+        position:relative;
         overflow:hidden;
     }
-    .segav-auth-right-panel::before {
+    .segav-login-hero::before {
         content:"";
         position:absolute;
         inset:0;
-        background:
-            linear-gradient(180deg, rgba(4,23,58,0.12) 0%, rgba(4,23,58,0.34) 48%, rgba(4,20,48,0.62) 100%),
-            linear-gradient(135deg, rgba(6,38,100,0.34) 0%, rgba(6,38,100,0.10) 42%, rgba(4,18,46,0.46) 100%);
-        z-index:0;
+        background:linear-gradient(180deg, rgba(7,18,44,0.04) 0%, rgba(7,18,44,0.14) 100%);
     }
-    .segav-auth-right-content {
+    .segav-login-hero-content {
         position:relative;
         z-index:1;
-        width:min(100%, 610px);
-        padding:34px 34px;
+        width:100%;
+        max-width:560px;
+        text-align:center;
+        color:#ffffff;
         display:flex;
         flex-direction:column;
         align-items:center;
         justify-content:center;
         gap:18px;
-        text-align:center;
     }
-    .segav-auth-right-badge {
+    .segav-login-hero-badge {
         display:inline-flex;
         align-items:center;
         justify-content:center;
         padding:10px 18px;
         border-radius:999px;
-        background:rgba(255,255,255,0.15);
+        background:rgba(255,255,255,0.14);
         border:1px solid rgba(255,255,255,0.24);
-        backdrop-filter:blur(14px);
+        backdrop-filter:blur(12px);
         color:#f7fbff !important;
         font-size:11px;
         font-weight:800;
         letter-spacing:0.12em;
         text-transform:uppercase;
     }
-    .segav-auth-right-title {
+    .segav-login-hero-title {
         margin:0;
-        font-size:clamp(30px, 2.2vw, 42px);
-        line-height:1.04;
+        font-size:clamp(28px, 2.2vw, 42px);
+        line-height:1.05;
         letter-spacing:-0.05em;
         font-weight:900;
         color:#ffffff !important;
         text-shadow:0 10px 24px rgba(3,18,48,0.28);
     }
-    .segav-auth-right-text {
+    .segav-login-hero-text {
         margin:0;
-        max-width:540px;
+        max-width:520px;
         font-size:15px;
-        line-height:1.52;
+        line-height:1.55;
         color:rgba(240,247,255,0.97) !important;
     }
-    .segav-auth-right-strip { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px; }
-    .segav-auth-right-pill {
+    .segav-login-hero-strip { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px; }
+    .segav-login-hero-pill {
         padding:10px 15px;
         border-radius:999px;
         background:rgba(255,255,255,0.16);
@@ -3995,17 +4007,19 @@ def auth_gate_ui():
         font-weight:700;
         backdrop-filter:blur(10px);
     }
-    @media (max-width: 1180px) {
+    @media (max-width: 1100px) {
         .block-container > div[data-testid="stHorizontalBlock"] {
-            height:min(560px, calc(100dvh - 18px)) !important;
-            min-height:min(560px, calc(100dvh - 18px)) !important;
-            max-height:min(560px, calc(100dvh - 18px)) !important;
+            height:min(590px, calc(100dvh - 20px)) !important;
+            min-height:min(590px, calc(100dvh - 20px)) !important;
+            max-height:min(590px, calc(100dvh - 20px)) !important;
         }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] { padding:16px 22px !important; }
-        .segav-auth-title { font-size:clamp(24px, 2.2vw, 38px); }
-        .segav-auth-right-title { font-size:clamp(28px, 2.2vw, 38px); }
+        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
+            padding:22px 22px !important;
+        }
+        .segav-login-title { font-size:clamp(22px, 2.1vw, 34px); }
+        .segav-login-hero-title { font-size:clamp(26px, 2.1vw, 36px); }
     }
-    @media (max-width: 980px) {
+    @media (max-width: 920px) {
         html, body, [data-testid="stAppViewContainer"], .stApp, [data-testid="stAppViewContainer"] > .main, .main {
             height:auto !important;
             min-height:100vh !important;
@@ -4024,15 +4038,7 @@ def auth_gate_ui():
             flex-direction:column !important;
         }
         .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"],
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] {
-            height:auto !important;
-            min-height:0 !important;
-            max-height:none !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
-            padding:20px 18px !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] > div,
+        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"],
         .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container,
         .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"],
         .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdownContainer"] {
@@ -4040,11 +4046,16 @@ def auth_gate_ui():
             min-height:0 !important;
             max-height:none !important;
         }
-        .segav-auth-right-panel { min-height:300px; height:300px; }
-        .segav-auth-right-content { padding:26px 20px; }
-        .segav-auth-title { font-size:clamp(26px, 8vw, 38px); }
-        .segav-auth-right-title { font-size:clamp(26px, 8vw, 36px); }
-        .segav-auth-right-text { font-size:14px; }
+        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
+            padding:20px 18px !important;
+        }
+        .segav-login-hero {
+            min-height:300px;
+            height:300px;
+            padding:26px 20px;
+        }
+        .segav-login-title { font-size:clamp(24px, 8vw, 34px); }
+        .segav-login-hero-title { font-size:clamp(24px, 8vw, 34px); }
     }
     </style>
     """.replace("__HERO_BG__", hero_background)
@@ -4053,29 +4064,15 @@ def auth_gate_ui():
     ensure_users_table()
     ensure_superadmin_exists()
 
-    if users_count() == 0:
-        DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-        DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
-        try:
-            salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
-            perms_json = json.dumps(SUPERADMIN_PERMS)
-            execute(
-                "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
-            )
-            auto_backup_db("users_seed_default_superadmin")
-        except Exception:
-            pass
-
     left, right = st.columns([4.85, 5.15], gap="small")
 
     with left:
         st.markdown(
             """
-            <div class="segav-auth-left">
-                <div class="segav-auth-kicker">ERP Multiempresa · SEGAV</div>
-                <h1 class="segav-auth-title">Acceso corporativo limpio, compacto y profesional.</h1>
-                <p class="segav-auth-text">Ingreso centralizado para operar el ERP multiempresa con una portada clara, estable y enfocada en el acceso.</p>
+            <div class="segav-login-intro">
+                <div class="segav-login-kicker">ERP Multiempresa · SEGAV</div>
+                <h1 class="segav-login-title">Acceso ejecutivo en una sola pantalla.</h1>
+                <p class="segav-login-text">Ingreso centralizado para operar el ERP con una experiencia limpia, estable y lista para uso corporativo.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -4087,9 +4084,9 @@ def auth_gate_ui():
             if logo_b64:
                 st.markdown(
                     f"""
-                    <div class="segav-auth-brand">
+                    <div class="segav-login-brand">
                         <img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}">
-                        <div class="segav-auth-brand-copy">
+                        <div>
                             <strong>SEGAV ERP</strong>
                             <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
                         </div>
@@ -4100,9 +4097,9 @@ def auth_gate_ui():
             else:
                 st.markdown(
                     """
-                    <div class="segav-auth-brand">
-                        <div class="segav-auth-brand-fallback">SEGAV</div>
-                        <div class="segav-auth-brand-copy">
+                    <div class="segav-login-brand">
+                        <div class="segav-login-brand-fallback">SEGAV</div>
+                        <div>
                             <strong>SEGAV ERP</strong>
                             <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
                         </div>
@@ -4112,21 +4109,21 @@ def auth_gate_ui():
                 )
             st.markdown(
                 """
-                <div class="segav-auth-form-head">
+                <div class="segav-login-head">
                     <h3>Iniciar sesión</h3>
                     <p>Ingrese sus credenciales para continuar.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.markdown('<p class="segav-auth-label">Usuario</p>', unsafe_allow_html=True)
+            st.markdown('<p class="segav-login-label">Usuario</p>', unsafe_allow_html=True)
             username = st.text_input(
                 "Usuario",
                 label_visibility="collapsed",
                 placeholder="Ingrese su usuario",
                 key="login_username_clean",
             )
-            st.markdown('<p class="segav-auth-label">Contraseña</p>', unsafe_allow_html=True)
+            st.markdown('<p class="segav-login-label">Contraseña</p>', unsafe_allow_html=True)
             password = st.text_input(
                 "Contraseña",
                 type="password",
@@ -4134,24 +4131,21 @@ def auth_gate_ui():
                 placeholder="Ingrese su contraseña",
                 key="login_password_clean",
             )
-            st.markdown(
-                '<div class="segav-auth-inline"><a href="javascript:void(0)">¿Olvidó su contraseña?</a></div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="segav-login-inline"><span>¿Olvidó su contraseña?</span></div>', unsafe_allow_html=True)
             ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
 
     with right:
         st.markdown(
             """
-            <div class="segav-auth-right-panel" aria-hidden="true">
-                <div class="segav-auth-right-content">
-                    <div class="segav-auth-right-badge">Seguridad · Cumplimiento · Operación</div>
-                    <h2 class="segav-auth-right-title">SEGAV ERP Multiempresa</h2>
-                    <p class="segav-auth-right-text">Plataforma lista para operar múltiples empresas con una entrada visual sólida, equilibrada y preparada para presentación comercial.</p>
-                    <div class="segav-auth-right-strip">
-                        <div class="segav-auth-right-pill">Documentos</div>
-                        <div class="segav-auth-right-pill">SGSST</div>
-                        <div class="segav-auth-right-pill">Multiempresa</div>
+            <div class="segav-login-hero" aria-hidden="true">
+                <div class="segav-login-hero-content">
+                    <div class="segav-login-hero-badge">Seguridad · Cumplimiento · Operación</div>
+                    <h2 class="segav-login-hero-title">SEGAV ERP Multiempresa</h2>
+                    <p class="segav-login-hero-text">Plataforma preparada para operar múltiples empresas con una portada visual sólida, ordenada y lista para presentación comercial.</p>
+                    <div class="segav-login-hero-strip">
+                        <div class="segav-login-hero-pill">Documentos</div>
+                        <div class="segav-login-hero-pill">SGSST</div>
+                        <div class="segav-login-hero-pill">Multiempresa</div>
                     </div>
                 </div>
             </div>
@@ -4174,7 +4168,6 @@ def auth_gate_ui():
                     login_message = "Contraseña incorrecta."
                 else:
                     auth_set_session(row)
-                    st.success("Ingreso exitoso.")
                     st.rerun()
 
     if login_message:
