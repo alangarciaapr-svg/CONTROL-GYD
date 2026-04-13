@@ -31,7 +31,6 @@ from segav_core.catalogs import (
     SGSST_MATRIZ_BASE,
 )
 from segav_core.formatters import clean_rut, make_erp_key
-from segav_core.storage import ensure_storage_columns_sqlite
 
 
 def ensure_dirs():
