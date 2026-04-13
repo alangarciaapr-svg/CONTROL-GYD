@@ -1010,6 +1010,19 @@ def safe_name(s: str) -> str:
 
 
 
+def fetch_df(q: str, params=()):
+    """SELECT con cache de corta duración (20 s). Usar para lecturas frecuentes."""
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
+
+
 def fetch_df_uncached(q: str, params=()):
     """SELECT sin cache para flujos que deben reflejar cambios inmediatamente."""
     if DB_BACKEND == "postgres":
@@ -1259,7 +1272,125 @@ def ensure_dirs():
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
 
-@st.cache_resource(show_spinner=False)
+
+# ---------------------------------------------------------------
+# Storage helpers (definidos aquí para el scope de streamlit_app)
+# ---------------------------------------------------------------
+_STORAGE_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+def _storage_safe_segment(value: str) -> str:
+    import unicodedata as _ud
+    raw = str(value or "").strip().replace("\\", "/").split("/")[-1]
+    raw = _ud.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    if "." in raw:
+        stem, ext = raw.rsplit(".", 1)
+        ext = "." + re.sub(r"[^A-Za-z0-9]+", "", ext)[:12]
+    else:
+        stem, ext = raw, ""
+    stem = _STORAGE_SAFE_RE.sub("_", stem).strip("._-") or "archivo"
+    return f"{stem[:120]}{ext}"
+
+def _safe_path_parts(parts):
+    if isinstance(parts, str):
+        parts = [parts]
+    result = []
+    for p in (parts or []):
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(p or "")).strip("._")
+        if safe:
+            result.append(safe)
+    return result or ["misc"]
+
+def save_file(folder_parts, file_name: str, file_bytes: bytes) -> str:
+    """Guarda un archivo en disco local y devuelve la ruta."""
+    folder = os.path.join(UPLOAD_ROOT, *_safe_path_parts(folder_parts))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, _storage_safe_segment(file_name))
+    with open(path, "wb") as f:
+        f.write(file_bytes)
+    return path
+
+_FILE_REF_TABLES = [
+    "contratos_faena", "faena_anexos", "trabajador_documentos",
+    "empresa_documentos", "faena_empresa_documentos",
+    "export_historial", "export_historial_mes",
+]
+_DOCUMENT_TABLES = {"trabajador_documentos", "empresa_documentos", "faena_empresa_documentos"}
+
+def fetch_file_refs(table_name: str, where_sql: str = "", params=()):
+    """Devuelve lista de dicts con file_path/bucket/object_path de una tabla."""
+    q = f"SELECT file_path, bucket, object_path FROM {table_name}"
+    if where_sql:
+        q += f" WHERE {where_sql}"
+    df = fetch_df(q, params)
+    if df is None or df.empty:
+        return []
+    return [row.to_dict() for _, row in df.iterrows()]
+
+def _count_file_refs(file_path, bucket, object_path, *, exclude_table=None, exclude_id=None):
+    total = 0
+    for tbl in _FILE_REF_TABLES:
+        where, params = [], []
+        if object_path:
+            where.append("object_path=?"); params.append(str(object_path))
+            if bucket:
+                where.append("bucket=?"); params.append(str(bucket))
+        elif file_path:
+            where.append("file_path=?"); params.append(str(file_path))
+        else:
+            continue
+        if exclude_table == tbl and exclude_id is not None:
+            where.append("id<>?"); params.append(int(exclude_id))
+        try:
+            df = fetch_df(f"SELECT COUNT(*) AS n FROM {tbl} WHERE " + " AND ".join(where), tuple(params))
+            if df is not None and not df.empty:
+                total += int(df.iloc[0]["n"] or 0)
+        except Exception:
+            pass
+    return total
+
+def cleanup_deleted_file_refs(file_refs):
+    """Elimina archivos físicos/Storage de refs que ya no tienen registros en BD."""
+    issues = []
+    seen = set()
+    for ref in (file_refs or []):
+        fp = ref.get("file_path"); bkt = ref.get("bucket"); op = ref.get("object_path")
+        key = (str(fp or ""), str(bkt or ""), str(op or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _count_file_refs(fp, bkt, op) == 0:
+            if op and storage_admin_enabled():
+                try:
+                    storage_delete(str(op))
+                except Exception as e:
+                    issues.append(f"Storage: {e}")
+            if fp:
+                try:
+                    if os.path.exists(str(fp)):
+                        os.remove(str(fp))
+                except Exception as e:
+                    issues.append(f"Local: {e}")
+    return issues
+
+def delete_uploaded_document_record(table_name: str, row_id: int):
+    """Elimina un registro de documento y sus archivos asociados si no hay otras refs."""
+    if table_name not in _DOCUMENT_TABLES:
+        raise ValueError("Tabla no permitida para eliminación.")
+    df = fetch_df(f"SELECT id, nombre_archivo, file_path, bucket, object_path FROM {table_name} WHERE id=?", (int(row_id),))
+    if df is None or df.empty:
+        raise FileNotFoundError("El documento ya no existe en la base de datos.")
+    row = df.iloc[0]
+    fp = row.get("file_path"); bkt = row.get("bucket"); op = row.get("object_path")
+    file_name = row.get("nombre_archivo", "documento")
+    refs = _count_file_refs(fp, bkt, op, exclude_table=table_name, exclude_id=int(row_id))
+    execute(f"DELETE FROM {table_name} WHERE id=?", (int(row_id),))
+    cleanup_issues = []
+    if refs == 0:
+        cleanup_issues = cleanup_deleted_file_refs([{"file_path": fp, "bucket": bkt, "object_path": op}])
+    return {"file_name": file_name, "cleanup_issues": cleanup_issues, "shared_refs": refs}
+
+# ---------------------------------------------------------------
+
 def get_pg_pool(dsn: str):
     if not dsn or psycopg is None or ConnectionPool is None:
         return None
@@ -2071,6 +2202,357 @@ def ensure_sgsst_seed_data():
     except Exception:
         pass
 
+
+
+# ============================================================
+# FUNCIONES UTILITARIAS RECONSTRUIDAS
+# ============================================================
+
+def parse_date_maybe(value):
+    """Convierte un valor de fecha (str, date, datetime o None) a date o None."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    s = str(value).strip()
+    if not s or s in ("None", "nan", "NaT", ""):
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def go(page_name: str, faena_id: int | None = None):
+    """Navega a otra página del ERP desde cualquier parte del código."""
+    st.session_state["nav_request"] = page_name
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = faena_id
+    st.rerun()
+
+
+def auto_backup_db(tag: str = "auto"):
+    """Genera un backup automático de la base de datos SQLite en el historial."""
+    if DB_BACKEND != "sqlite":
+        return
+    try:
+        db_path = DB_PATH
+        if not os.path.exists(db_path):
+            return
+        with open(db_path, "rb") as f:
+            raw = f.read()
+        sha = hashlib.sha256(raw).hexdigest()
+        size = len(raw)
+        now = datetime.now().isoformat(timespec="seconds")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(UPLOAD_ROOT, "_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", (tag or "auto"))[:40]
+        fname = f"backup_{ts}_{safe_tag}.db"
+        fpath = os.path.join(backup_dir, fname)
+        with open(fpath, "wb") as f:
+            f.write(raw)
+        execute(
+            "INSERT INTO auto_backup_historial(tag, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+            (tag, fpath, sha, size, now),
+        )
+        # Mantiene solo los últimos 20 backups en historial
+        try:
+            old = fetch_df("SELECT id, file_path FROM auto_backup_historial ORDER BY id DESC LIMIT -1 OFFSET 20")
+            if old is not None and not old.empty:
+                for _, row in old.iterrows():
+                    try:
+                        if row.get("file_path") and os.path.exists(str(row["file_path"])):
+                            os.remove(str(row["file_path"]))
+                    except Exception:
+                        pass
+                    execute("DELETE FROM auto_backup_historial WHERE id=?", (int(row["id"]),))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def restore_from_backup_zip(zip_bytes: bytes):
+    """Restaura la base de datos SQLite desde un ZIP de backup."""
+    if DB_BACKEND != "sqlite":
+        raise RuntimeError("La restauración manual solo está disponible con SQLite.")
+    mem = io.BytesIO(zip_bytes)
+    with zipfile.ZipFile(mem, "r") as zf:
+        db_files = [n for n in zf.namelist() if n.endswith(".db")]
+        if not db_files:
+            raise ValueError("El ZIP no contiene ningún archivo .db")
+        db_file = db_files[0]
+        db_bytes = zf.read(db_file)
+    backup_path = DB_PATH + ".pre_restore_backup"
+    if os.path.exists(DB_PATH):
+        with open(DB_PATH, "rb") as f:
+            with open(backup_path, "wb") as bf:
+                bf.write(f.read())
+    with open(DB_PATH, "wb") as f:
+        f.write(db_bytes)
+    clear_app_caches()
+
+
+def worker_required_docs_for_record(cargo: str) -> list:
+    """Devuelve los tipos de documentos obligatorios para un cargo."""
+    cargo_upper = str(cargo or "").strip().upper()
+    rules = CARGO_DOCS_RULES.get(cargo_upper, None)
+    if rules is not None:
+        return list(rules)
+    return list(DOC_OBLIGATORIOS)
+
+
+def pendientes_obligatorios(faena_id: int) -> dict:
+    """
+    Retorna dict {nombre_trabajador: [doc_tipos_faltantes]} para todos los
+    trabajadores asignados a la faena.
+    """
+    try:
+        trab = fetch_df(
+            """
+            SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre, t.cargo
+            FROM asignaciones a
+            JOIN trabajadores t ON t.id = a.trabajador_id
+            WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
+            ORDER BY t.apellidos, t.nombres
+            """,
+            (int(faena_id),),
+        )
+        if trab is None or trab.empty:
+            return {}
+        result = {}
+        for _, row in trab.iterrows():
+            tid = int(row["id"])
+            cargo = str(row.get("cargo") or "")
+            required = worker_required_docs_for_record(cargo)
+            if not required:
+                result[str(row["nombre"])] = []
+                continue
+            docs = fetch_df(
+                "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
+                (tid,),
+            )
+            present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
+            missing = [d for d in required if d not in present]
+            result[str(row["nombre"])] = missing
+        return result
+    except Exception:
+        return {}
+
+
+def pendientes_empresa_faena(faena_id: int) -> list:
+    """
+    Retorna lista de doc_tipos de empresa por faena que faltan (sin período).
+    """
+    try:
+        required = get_empresa_monthly_doc_types()
+        if not required:
+            return []
+        docs = fetch_df(
+            "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?",
+            (int(faena_id),),
+        )
+        present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
+        return [d for d in required if d not in present]
+    except Exception:
+        return []
+
+
+def _export_collect_files(faena_id: int,
+                          include_global_empresa_docs: bool = True,
+                          include_contrato: bool = True,
+                          include_anexos: bool = True,
+                          include_empresa_faena: bool = True,
+                          include_trabajadores: bool = True,
+                          doc_types_empresa_global=None,
+                          doc_types_empresa_faena=None,
+                          doc_types_trabajador=None,
+                          selected_empresa_faena_doc_ids=None,
+                          selected_trabajador_ids=None,
+                          selected_trabajador_doc_ids=None) -> list:
+    """Recopila todos los archivos para un ZIP de exportación de faena."""
+    entries = []  # list of (arcpath, file_path, bucket, object_path)
+
+    # Contrato de faena
+    if include_contrato:
+        row = fetch_df("SELECT nombre, file_path FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)", (int(faena_id),))
+        if row is not None and not row.empty:
+            r = row.iloc[0]
+            if r.get("file_path"):
+                entries.append((f"Contrato/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+
+    # Anexos
+    if include_anexos:
+        anexos = fetch_df("SELECT nombre, file_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        if anexos is not None and not anexos.empty:
+            for _, r in anexos.iterrows():
+                if r.get("file_path"):
+                    entries.append((f"Anexos/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+
+    # Documentos empresa global
+    if include_global_empresa_docs:
+        q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
+        emp_docs = fetch_df(q_emp)
+        if emp_docs is not None and not emp_docs.empty:
+            for _, r in emp_docs.iterrows():
+                if doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
+                    continue
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                entries.append((f"Empresa_Global/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
+
+    # Documentos empresa por faena
+    if include_empresa_faena:
+        q_ef = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, id"
+        ef_docs = fetch_df(q_ef, (int(faena_id),))
+        if ef_docs is not None and not ef_docs.empty:
+            for _, r in ef_docs.iterrows():
+                if selected_empresa_faena_doc_ids is not None and int(r["id"]) not in selected_empresa_faena_doc_ids:
+                    continue
+                if doc_types_empresa_faena and r.get("doc_tipo") not in doc_types_empresa_faena:
+                    continue
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                entries.append((f"Empresa_Faena/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
+
+    # Documentos trabajadores
+    if include_trabajadores:
+        trab = fetch_df("""
+            SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre
+            FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
+            ORDER BY t.apellidos, t.nombres
+        """, (int(faena_id),))
+        if trab is not None and not trab.empty:
+            for _, tr in trab.iterrows():
+                tid = int(tr["id"])
+                if selected_trabajador_ids is not None and tid not in selected_trabajador_ids:
+                    continue
+                t_docs = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, id", (tid,))
+                if t_docs is None or t_docs.empty:
+                    continue
+                folder_name = re.sub(r"[^a-zA-Z0-9 _.-]", "_", str(tr["nombre"]))[:40]
+                for _, dr in t_docs.iterrows():
+                    did = int(dr["id"])
+                    sel_ids = (selected_trabajador_doc_ids or {}).get(tid)
+                    if sel_ids is not None and did not in sel_ids:
+                        continue
+                    if doc_types_trabajador and dr.get("doc_tipo") not in doc_types_trabajador:
+                        continue
+                    fname = str(dr.get("nombre_archivo") or dr.get("file_path") or f"doc_{did}")
+                    entries.append((f"Trabajadores/{folder_name}/{os.path.basename(fname)}", dr.get("file_path"), dr.get("bucket"), dr.get("object_path")))
+    return entries
+
+
+def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
+    """Genera un ZIP con todos los documentos de una faena. Retorna (bytes, nombre_archivo)."""
+    faena = fetch_df("SELECT nombre, fecha_inicio FROM faenas WHERE id=?", (int(faena_id),))
+    faena_nombre = "faena"
+    if faena is not None and not faena.empty:
+        faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_name = f"export_{faena_nombre}_{ts}.zip"
+
+    entries = _export_collect_files(faena_id, **kwargs)
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        seen_paths = {}
+        for arcpath, file_path, bucket, object_path in entries:
+            try:
+                file_bytes = load_file_anywhere(file_path, bucket, object_path)
+            except Exception:
+                continue
+            # Evitar duplicados en el ZIP
+            base, ext = os.path.splitext(arcpath)
+            counter = seen_paths.get(arcpath, 0)
+            seen_paths[arcpath] = counter + 1
+            if counter > 0:
+                arcpath = f"{base}_{counter}{ext}"
+            zf.writestr(arcpath, file_bytes)
+    return mem.getvalue(), zip_name
+
+
+def persist_export(faena_id: int, zip_bytes: bytes, zip_name: str) -> str:
+    """Guarda un ZIP de export en disco y registra en export_historial."""
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports", str(faena_id))
+    os.makedirs(export_dir, exist_ok=True)
+    fpath = os.path.join(export_dir, zip_name)
+    with open(fpath, "wb") as f:
+        f.write(zip_bytes)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+    now = datetime.now().isoformat(timespec="seconds")
+    # La tabla export_historial no tiene columna "archivo"; guarda el path completo
+    execute(
+        "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+        (int(faena_id), fpath, sha, len(zip_bytes), now),
+    )
+    return fpath
+
+
+def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool = True) -> tuple:
+    """Genera un ZIP mensual con todos los documentos empresa de todas las faenas del mes."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ym = f"{int(year):04d}-{int(month):02d}"
+    zip_name = f"export_mes_{ym}_{ts}.zip"
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Documentos empresa faena del período
+        ef_docs = fetch_df(
+            "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
+            (int(year), int(month)),
+        )
+        if ef_docs is not None and not ef_docs.empty:
+            for _, r in ef_docs.iterrows():
+                try:
+                    fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
+                    fname = str(r.get("nombre_archivo") or r.get("file_path") or f"doc_{r['id']}")
+                    arc = f"Faena_{r['faena_id']}/{os.path.basename(fname)}"
+                    zf.writestr(arc, fb)
+                except Exception:
+                    continue
+
+        # Documentos empresa global (sin período)
+        if include_global_empresa_docs:
+            emp_docs = fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
+            if emp_docs is not None and not emp_docs.empty:
+                for _, r in emp_docs.iterrows():
+                    try:
+                        fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
+                        fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                        arc = f"Empresa_Global/{os.path.basename(fname)}"
+                        zf.writestr(arc, fb)
+                    except Exception:
+                        continue
+
+    return mem.getvalue(), ym
+
+
+def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
+    """Guarda un ZIP de export mensual en disco y registra en export_historial_mes."""
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes")
+    os.makedirs(export_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"export_mes_{ym}_{ts}.zip"
+    fpath = os.path.join(export_dir, fname)
+    with open(fpath, "wb") as f:
+        f.write(zip_bytes)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+    now = datetime.now().isoformat(timespec="seconds")
+    execute(
+        "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+        (ym, fpath, sha, len(zip_bytes), now),
+    )
+    return fpath
+
+
+# ============================================================
+# FIN FUNCIONES RECONSTRUIDAS
+# ============================================================
 
 
 def ensure_segav_erp_tables():
