@@ -3900,16 +3900,16 @@ def auth_gate_ui():
             filter:brightness(1.02);
             transform:translateY(-1px);
         }}
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child {{
             background:#0b2e69 !important;
-        }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {
+        }}
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {{
             padding:0 !important;
             display:flex !important;
             align-items:stretch !important;
             justify-content:stretch !important;
             background:linear-gradient(135deg, rgba(4,22,58,0.90) 0%, rgba(7,57,135,0.72) 42%, rgba(3,19,45,0.92) 100%) !important;
-        }
+        }}
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container:has(.segav-auth-right-panel),
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stElementContainer"]:has(.segav-auth-right-panel),
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"]:has(.segav-auth-right-panel),
