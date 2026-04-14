@@ -3649,177 +3649,211 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso corporativa, de una sola vista y sin scroll en escritorio."""
+    """Pantalla de acceso corporativa — una sola vista, sin scroll, layout fijo."""
+
+    # ── Obtener recursos antes de inyectar HTML ──────────────────────────────
+    panel_bytes = get_login_panel_approved_bytes()
+    panel_src = ""
+    if panel_bytes:
+        panel_src = f"data:image/png;base64,{_b64e(panel_bytes)}"
+
+    logo_bytes = get_login_logo_bytes()
+    logo_src = ""
+    if logo_bytes:
+        logo_src = f"data:image/png;base64,{_b64e(logo_bytes)}"
+
+    # ── CSS global: bloquea todo scroll, oculta chrome de Streamlit ─────────
+    st.markdown("""
+<style>
+/* Ocultar header, toolbar y sidebar de Streamlit */
+header[data-testid="stHeader"],
+div[data-testid="stToolbar"],
+section[data-testid="stSidebar"],
+[data-testid="stDecoration"] { display:none !important; }
+
+/* Bloquear scroll en toda la página */
+html, body {
+    height:100% !important;
+    overflow:hidden !important;
+    margin:0 !important; padding:0 !important;
+    background:#f1f5f9 !important;
+}
+.stApp, [data-testid="stAppViewContainer"] {
+    height:100vh !important;
+    overflow:hidden !important;
+    background:#f1f5f9 !important;
+}
+.main, [data-testid="stMainBlockContainer"],
+.main .block-container, [data-testid="stMain"] > div {
+    padding:0 !important; margin:0 !important;
+    max-width:none !important;
+    height:100vh !important;
+    overflow:hidden !important;
+}
+
+/* ── PANEL DERECHO (position:fixed, no participa en el flujo) ── */
+#segav-right-panel {
+    position: fixed;
+    top: 0; right: 0;
+    width: 57%;
+    height: 100vh;
+    padding: 14px 14px 14px 0;
+    box-sizing: border-box;
+    z-index: 10;
+    pointer-events: none;
+}
+#segav-right-panel .rp-inner {
+    width: 100%; height: 100%;
+    border-radius: 24px;
+    overflow: hidden;
+    background: linear-gradient(135deg, #0b2540 0%, #163d6b 100%);
+    box-shadow: 0 20px 60px rgba(2,8,23,.22);
+}
+#segav-right-panel .rp-inner img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+}
+
+/* ── COLUMNA IZQUIERDA (form + logo) ── */
+/* Forzar que el primer column de Streamlit ocupe el 43% izquierdo */
+[data-testid="stHorizontalBlock"] {
+    height: 100vh !important;
+    overflow: hidden !important;
+    align-items: center !important;
+    gap: 0 !important;
+}
+/* Columna izquierda */
+[data-testid="stHorizontalBlock"] > div:first-child {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 100vh !important;
+    overflow: hidden !important;
+    padding: 20px 16px 20px 20px !important;
+    box-sizing: border-box !important;
+    background: #f1f5f9 !important;
+}
+/* Columna derecha — invisible (el panel real es fixed) */
+[data-testid="stHorizontalBlock"] > div:last-child {
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+/* ── CARD DEL LOGIN ── */
+.segav-card {
+    width: min(440px, 100%);
+    background: #fff;
+    border: 1px solid rgba(15,23,42,.08);
+    border-radius: 22px;
+    box-shadow: 0 16px 48px rgba(15,23,42,.10);
+    padding: 28px 28px 20px 28px;
+    box-sizing: border-box;
+}
+.segav-chip {
+    display: inline-flex; align-items: center;
+    padding: 5px 12px; border-radius: 999px;
+    background: #eff6ff; color: #1d4ed8;
+    font-size: 11px; font-weight: 800; letter-spacing: .04em;
+}
+.segav-title {
+    margin: 10px 0 0 0;
+    color: #0f172a; font-size: 28px;
+    font-weight: 800; line-height: 1.1;
+}
+.segav-sub {
+    margin-top: 8px; color: #475569;
+    font-size: 12.5px; line-height: 1.5;
+}
+.segav-logo-row {
+    display: flex; flex-direction: column;
+    align-items: center; margin-top: 14px; gap: 6px;
+}
+.segav-logo-row img { width: 110px; height: auto; }
+.segav-logo-label {
+    color: #1e3a5f; font-size: 14px;
+    font-weight: 800; letter-spacing: .02em;
+}
+.segav-hint {
+    margin-top: 8px; color: #94a3b8;
+    font-size: 11px; text-align: center; line-height: 1.4;
+}
+/* Afinar inputs dentro del card */
+.segav-card [data-testid="stForm"] {
+    border: none !important; background: transparent !important;
+    padding: 0 !important; margin-top: 12px !important;
+}
+.segav-card [data-testid="stForm"] > div:first-child { border:none !important; padding:0 !important; }
+.segav-card [data-testid="stTextInputRootElement"] { border-radius: 12px !important; }
+.segav-card div[data-testid="stFormSubmitButton"] > button {
+    min-height: 46px; font-weight: 700; border-radius: 12px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+    # ── Panel derecho inyectado como elemento FIXED (un solo markdown = un bloque) ──
+    if panel_src:
+        rp_content = f'<img alt="SEGAV ERP" src="{panel_src}">'
+    else:
+        rp_content = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:22px;font-weight:700;flex-direction:column;gap:12px;"><span style="font-size:48px;">🏗️</span>SEGAV ERP</div>'
 
     st.markdown(
-        """
-        <style>
-        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"] {display:none !important;}
-        html, body, [data-testid="stAppViewContainer"], .stApp {height:100vh !important; overflow:hidden !important;}
-        .main, .block-container {
-            padding:0 !important;
-            margin:0 !important;
-            max-width:none !important;
-        }
-        [data-testid="stAppViewContainer"] > .main {padding:0 !important;}
-        .segav-login-screen {
-            height:100vh;
-            display:flex;
-            align-items:stretch;
-            background:#f5f7fb;
-            overflow:hidden;
-        }
-        .segav-login-left {
-            height:100vh;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            padding:28px 24px;
-        }
-        .segav-login-card {
-            width:min(460px, 100%);
-            background:#ffffff;
-            border:1px solid rgba(15,23,42,0.08);
-            border-radius:24px;
-            box-shadow:0 18px 52px rgba(15,23,42,0.10);
-            padding:28px 28px 22px 28px;
-        }
-        .segav-chip {
-            display:inline-flex;
-            align-items:center;
-            gap:8px;
-            padding:6px 12px;
-            border-radius:999px;
-            background:#eff6ff;
-            color:#1d4ed8;
-            font-size:11px;
-            font-weight:800;
-            letter-spacing:0.03em;
-        }
-        .segav-login-title {
-            margin:12px 0 0 0;
-            color:#0f172a;
-            font-size:30px;
-            line-height:1.05;
-            font-weight:800;
-        }
-        .segav-login-sub {
-            margin-top:10px;
-            color:#475569;
-            font-size:13px;
-            line-height:1.5;
-        }
-        .segav-login-card [data-testid="stForm"] {
-            border:none !important;
-            background:transparent !important;
-            padding:0 !important;
-            margin-top:14px;
-        }
-        .segav-login-card [data-testid="stForm"] > div:first-child {
-            border:none !important;
-            padding:0 !important;
-        }
-        .segav-login-card [data-testid="stTextInputRootElement"] {
-            border-radius:14px !important;
-        }
-        .segav-login-card div[data-testid="stFormSubmitButton"] > button {
-            min-height:46px;
-            font-weight:700;
-            border-radius:14px !important;
-        }
-        .segav-logo-wrap {
-            display:flex;
-            flex-direction:column;
-            align-items:center;
-            justify-content:center;
-            margin-top:14px;
-            gap:8px;
-        }
-        .segav-logo-note {
-            text-align:center;
-            color:#334155;
-            font-size:15px;
-            font-weight:700;
-            letter-spacing:0.02em;
-        }
-        .segav-footnote {
-            margin-top:10px;
-            color:#64748b;
-            font-size:11px;
-            line-height:1.4;
-            text-align:center;
-        }
-        .segav-login-right {
-            height:100vh;
-            padding:18px 18px 18px 0;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-        }
-        .segav-login-panel {
-            width:100%;
-            height:calc(100vh - 36px);
-            border-radius:28px;
-            overflow:hidden;
-            box-shadow:0 18px 52px rgba(2,8,23,0.18);
-            border:1px solid rgba(255,255,255,0.18);
-            background:linear-gradient(135deg, #0b2540 0%, #10395f 100%);
-        }
-        .segav-login-panel img {
-            width:100%;
-            height:100%;
-            object-fit:cover;
-            display:block;
-        }
-        @media (max-width: 980px) {
-            html, body, [data-testid="stAppViewContainer"], .stApp {height:auto !important; overflow:auto !important;}
-            .segav-login-screen {height:auto;}
-            .segav-login-left, .segav-login-right {height:auto; padding:16px;}
-            .segav-login-panel {height:auto;}
-        }
-        </style>
-        """,
+        f'<div id="segav-right-panel"><div class="rp-inner">{rp_content}</div></div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="segav-login-screen">', unsafe_allow_html=True)
-    left_col, right_col = st.columns([0.42, 0.58], gap="small")
+    # ── Layout: dos columnas (izquierda=form, derecha=placeholder invisible) ──
+    left_col, _ = st.columns([0.43, 0.57], gap="small")
 
     with left_col:
-        st.markdown('<div class="segav-login-left"><div class="segav-login-card">', unsafe_allow_html=True)
-        st.markdown('<span class="segav-chip">SEGAV ERP · Acceso seguro</span>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-login-title">Iniciar sesión</div>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-login-sub">Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>', unsafe_allow_html=True)
-
+        # ── DB init (silencioso) ──────────────────────────────────────────────
         ensure_users_table()
         ensure_superadmin_exists()
-
         if users_count() == 0:
-            DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-            DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
             try:
-                salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
-                perms_json = json.dumps(SUPERADMIN_PERMS)
+                _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+                _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+                sb64, hb64 = hash_password(_p)
                 execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
+                    "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active) VALUES(?,?,?,?,?,1)",
+                    (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
                 )
                 auto_backup_db("users_seed_default_superadmin")
             except Exception:
                 pass
 
+        # ── Card HTML (chip + título + subtítulo) ────────────────────────────
+        st.markdown("""
+<div class="segav-card">
+  <span class="segav-chip">SEGAV ERP · Acceso seguro</span>
+  <div class="segav-title">Iniciar sesión</div>
+  <div class="segav-sub">Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>
+</div>
+""", unsafe_allow_html=True)
+
+        # ── Formulario Streamlit nativo ──────────────────────────────────────
         with st.form("form_login"):
             username = st.text_input("Usuario", placeholder="ej: a.garcia")
             password = st.text_input("Contraseña", type="password")
             ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
 
+        # ── Logo + nombre + hint ─────────────────────────────────────────────
+        logo_img_tag = f'<img src="{logo_src}" alt="SEGAV">' if logo_src else ""
+        st.markdown(f"""
+<div class="segav-logo-row">
+  {logo_img_tag}
+  <span class="segav-logo-label">SEGAV ERP</span>
+</div>
+<div class="segav-hint">Si olvidaste tu contraseña, un administrador puede restablecerla desde Usuarios.</div>
+""", unsafe_allow_html=True)
+
+        # ── Lógica de autenticación ──────────────────────────────────────────
         if ok:
             u = (username or "").strip()
             if not u or not password:
                 st.error("Usuario y contraseña son obligatorios.")
                 st.stop()
             df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
-            if df.empty:
+            if df is None or df.empty:
                 st.error("Usuario no existe o está desactivado.")
                 st.stop()
             row = df.iloc[0].to_dict()
@@ -3827,30 +3861,7 @@ def auth_gate_ui():
                 st.error("Contraseña incorrecta.")
                 st.stop()
             auth_set_session(row)
-            st.success("Ingreso exitoso.")
             st.rerun()
-
-        st.markdown('<div class="segav-logo-wrap">', unsafe_allow_html=True)
-        render_brand_logo(width=140)
-        st.markdown('<div class="segav-logo-note">SEGAV ERP</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<div class="segav-footnote">Si olvidaste tu contraseña, un administrador puede restablecerla desde Usuarios.</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
-
-    with right_col:
-        panel_bytes = get_login_panel_approved_bytes()
-        st.markdown('<div class="segav-login-right"><div class="segav-login-panel">', unsafe_allow_html=True)
-        if panel_bytes:
-            panel_b64 = _b64e(panel_bytes)
-            st.markdown(
-                f'<img alt="SEGAV ERP Login Panel" src="data:image/png;base64,{panel_b64}">',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown('<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;">SEGAV ERP</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
 # ----------------------------
 # Init
 # ----------------------------
