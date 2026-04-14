@@ -944,7 +944,7 @@ section[data-testid="stSidebar"] { border-right: 1px solid rgba(49,51,63,0.12); 
 section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* Cards */
-.gyd-card {
+.segav-card {
     background: rgba(255,255,255,0.72);
     border: 1px solid rgba(49,51,63,0.10);
     border-radius: 18px;
@@ -954,7 +954,7 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
     -webkit-backdrop-filter: blur(10px);
     margin-bottom: 12px;
 }
-.gyd-muted { opacity: 0.75; }
+.segav-muted { opacity: 0.75; }
 
 /* Buttons */
 div.stButton > button, div.stDownloadButton > button {
@@ -992,9 +992,9 @@ button[data-baseweb="tab"] {
 def ui_header(title: str, desc: str = ""):
     st.markdown(
         f"""
-        <div class="gyd-card">
+        <div class="segav-card">
             <div style="font-size:1.35rem; font-weight:700; line-height:1.25;">{title}</div>
-            {f'<div class="gyd-muted" style="margin-top:6px;">{desc}</div>' if desc else ''}
+            {f'<div class="segav-muted" style="margin-top:6px;">{desc}</div>' if desc else ''}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1271,6 +1271,8 @@ def ensure_dirs():
     os.makedirs(UPLOAD_ROOT, exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
+    os.makedirs(os.path.join(UPLOAD_ROOT, "_backups"), exist_ok=True)
+    os.makedirs(os.path.join(UPLOAD_ROOT, "_exports_mes"), exist_ok=True)
 
 
 # ---------------------------------------------------------------
@@ -2298,15 +2300,6 @@ def restore_from_backup_zip(zip_bytes: bytes):
     clear_app_caches()
 
 
-def worker_required_docs_for_record(cargo: str) -> list:
-    """Devuelve los tipos de documentos obligatorios para un cargo."""
-    cargo_upper = str(cargo or "").strip().upper()
-    rules = CARGO_DOCS_RULES.get(cargo_upper, None)
-    if rules is not None:
-        return list(rules)
-    return list(DOC_OBLIGATORIOS)
-
-
 def pendientes_obligatorios(faena_id: int) -> dict:
     """
     Retorna dict {nombre_trabajador: [doc_tipos_faltantes]} para todos los
@@ -2329,7 +2322,7 @@ def pendientes_obligatorios(faena_id: int) -> dict:
         for _, row in trab.iterrows():
             tid = int(row["id"])
             cargo = str(row.get("cargo") or "")
-            required = worker_required_docs_for_record(cargo)
+            required = worker_required_docs(cargo)
             if not required:
                 result[str(row["nombre"])] = []
                 continue
