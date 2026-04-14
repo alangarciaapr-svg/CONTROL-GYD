@@ -25,6 +25,7 @@ def page_sgsst(
     segav_templates_df,
     ERP_TEMPLATE_PRESETS,
     apply_segav_template,
+    segav_template_payload,
     sgsst_log,
     make_erp_key,
     segav_erp_value,
