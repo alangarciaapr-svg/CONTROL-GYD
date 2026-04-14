@@ -5,7 +5,6 @@ import zipfile
 import hashlib
 import base64
 import sqlite3
-import sys
 
 # Postgres (Supabase)
 try:
@@ -29,29 +28,14 @@ import json
 import secrets
 import unicodedata
 
-from segav_core.storage import (
-    save_file as _storage_save_file,
-    fetch_file_refs as _storage_fetch_file_refs,
-    cleanup_deleted_file_refs as _storage_cleanup_deleted_file_refs,
-    delete_uploaded_document_record as _storage_delete_uploaded_document_record,
-)
-
-APP_DIR = os.path.dirname(__file__)
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
-
 # ----------------------------
 # Config
 # ----------------------------
-LOCAL_BRAND_LOGO_FINAL_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo_final.png")
 LOCAL_BRAND_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "segav_logo.png")
 LOCAL_LOGIN_HERO_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_hero_segav.svg")
 LOCAL_LOGIN_PANEL_APPROVED_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_approved.png")
-LOCAL_LOGIN_PANEL_FIT_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit_fullbleed_wide.png")
-LOCAL_LOGIN_FRAME_EXACT_PATH = os.path.join(os.path.dirname(__file__), "assets", "branding", "login_frame_exact_full.png")
-PAGE_ICON_PATH = LOCAL_BRAND_LOGO_FINAL_PATH if os.path.exists(LOCAL_BRAND_LOGO_FINAL_PATH) else LOCAL_BRAND_LOGO_PATH
-if os.path.exists(PAGE_ICON_PATH):
-    st.set_page_config(page_title="SEGAV ERP", page_icon=PAGE_ICON_PATH, layout="wide")
+if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+    st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
 else:
     st.set_page_config(page_title="SEGAV ERP", layout="wide")
 
@@ -63,22 +47,6 @@ UPLOAD_HELP_TEXT = (
     "Máximo por archivo: 1,5 MB. Si el archivo supera ese tamaño, la app intentará comprimirlo automáticamente. "
     "Si aun así excede el límite, redúcelo antes de subirlo. Sugerencia: puedes comprimirlo en iLovePDF."
 )
-
-
-def _record_soft_error(context: str, exc: Exception | None = None):
-    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
-    try:
-        logs = st.session_state.setdefault("soft_errors", [])
-        msg = str(exc).strip() if exc is not None else ""
-        logs.append({
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "context": str(context or "").strip(),
-            "message": msg[:300],
-        })
-        if len(logs) > 30:
-            del logs[:-30]
-    except Exception:
-        pass
 
 
 # Fingerprints/cache helpers
@@ -215,65 +183,6 @@ def _is_select_query(q: str) -> bool:
     txt = re.sub(r"--.*?$", " ", txt, flags=re.M).strip().lower()
     return txt.startswith("select") or txt.startswith("with")
 
-
-def fetch_df(q: str, params=()):
-    params_cache = _cacheable_params(params)
-    if _is_select_query(q):
-        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            return pd.read_sql_query(q2, c, params=params)
-    with conn() as c:
-        return pd.read_sql_query(q, c, params=params)
-
-
-def execute(q: str, params=()):
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            c.execute(q2, params)
-            c.commit()
-            return
-    with conn() as c:
-        c.execute(q, params)
-        c.commit()
-
-
-def execute_rowcount(q: str, params=()):
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            cur = c.execute(q2, params)
-            c.commit()
-            try:
-                return int(cur.rowcount or 0)
-            except Exception:
-                return 0
-    with conn() as c:
-        cur = c.execute(q, params)
-        c.commit()
-        try:
-            return int(cur.rowcount or 0)
-        except Exception:
-            return 0
-
-
-def executemany(q: str, seq_params):
-    clear_app_caches()
-    if DB_BACKEND == "postgres":
-        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
-        with conn() as c:
-            with c.cursor() as cur:
-                cur.executemany(q2, seq_params)
-            c.commit()
-            return
-    with conn() as c:
-        c.executemany(q, seq_params)
-        c.commit()
-
 @st.cache_resource(show_spinner=False)
 def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     ensure_dirs()
@@ -290,13 +199,19 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         pass
     return True
 
-
 def bootstrap_app_or_stop():
+    """Inicializa la app. Si falla algo crítico, muestra error y detiene Streamlit."""
     try:
         _bootstrap_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception as exc:
-        st.error("No se pudo iniciar la app por un problema de arranque o conexión a la base de datos.")
-        st.code(str(exc))
+    except Exception as _boot_exc:
+        st.error("❌ No se pudo iniciar SEGAV ERP. Revisa la conexión a base de datos.")
+        st.code(str(_boot_exc))
+        st.markdown("""
+**Posibles causas:**
+- Falta `SUPABASE_DB_URL` (o `PG_DSN`) en Secrets / ENV.
+- Credenciales incorrectas o caducadas.
+- Si usas SQLite local, verifica que el directorio de datos tenga permisos de escritura.
+        """)
         st.stop()
 
 def _qmark_to_pct(sql: str) -> str:
@@ -644,402 +559,6 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
         f"Sugerencia: puedes comprimirlo en iLovePDF."
     )
     st.stop()
-
-
-def save_file(folder_parts, file_name: str, file_bytes: bytes):
-    return _storage_save_file(folder_parts, file_name, file_bytes)
-
-
-def fetch_file_refs(table_name: str, where_sql: str = "", params=()):
-    return _storage_fetch_file_refs(table_name, where_sql, params)
-
-
-def cleanup_deleted_file_refs(file_refs):
-    return _storage_cleanup_deleted_file_refs(file_refs)
-
-
-def delete_uploaded_document_record(table_name: str, row_id: int):
-    if table_name in TENANT_SCOPE_TABLES:
-        tenant_key = current_tenant_key()
-        probe = fetch_df(
-            f"SELECT id, cliente_key FROM {table_name} WHERE id=?",
-            (int(row_id),),
-        )
-        if probe.empty:
-            raise FileNotFoundError("El documento ya no existe en la base de datos.")
-        if tenant_key and str(probe.iloc[0].get("cliente_key") or "") != tenant_key:
-            raise PermissionError("El documento no pertenece a la empresa activa.")
-    return _storage_delete_uploaded_document_record(table_name, int(row_id))
-
-
-def parse_date_maybe(value):
-    if value in (None, "", "None"):
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    txt = str(value).strip()
-    if not txt:
-        return None
-    txt = txt.split("T")[0].split(" ")[0]
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(txt, fmt).date()
-        except Exception:
-            pass
-    try:
-        return pd.to_datetime(txt, errors="coerce").date()
-    except Exception:
-        return None
-
-
-def auto_backup_db(tag: str = "manual"):
-    if not st.session_state.get("auto_backup_enabled", True):
-        return None
-    ensure_dirs()
-    source_db = os.path.join(APP_DIR, DB_PATH) if not os.path.isabs(DB_PATH) else DB_PATH
-    if not os.path.exists(source_db):
-        return None
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"segav_auto_{safe_name(tag)}_{ts}.db"
-    backup_path = os.path.join(UPLOAD_ROOT, "auto_backups", backup_name)
-    with open(source_db, "rb") as src, open(backup_path, "wb") as dst:
-        data = src.read()
-        dst.write(data)
-    sha = sha256_bytes(data)
-    size = len(data)
-    try:
-        execute(
-            "INSERT INTO auto_backup_historial(tag, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
-            (str(tag or "manual"), backup_path, sha, int(size), datetime.utcnow().isoformat(timespec="seconds")),
-        )
-    except Exception:
-        pass
-    st.session_state["last_auto_backup"] = {
-        "name": backup_name,
-        "bytes": data,
-        "path": backup_path,
-        "tag": str(tag or "manual"),
-    }
-    return backup_path
-
-
-def validate_faena_dates(fecha_inicio, fecha_termino=None, estado: str | None = None):
-    errors = []
-    fi = parse_date_maybe(fecha_inicio)
-    ft = parse_date_maybe(fecha_termino)
-    estado_txt = str(estado or "ACTIVA").strip().upper()
-    if fi is None:
-        errors.append("Fecha de inicio inválida.")
-    if ft is not None and fi is not None and ft < fi:
-        errors.append("La fecha término no puede ser menor que la fecha inicio.")
-    if estado_txt == "ACTIVA" and ft is not None and ft < date.today():
-        errors.append("Una faena activa no debería tener fecha término vencida.")
-    if estado_txt == "TERMINADA" and ft is None:
-        errors.append("Una faena terminada debería registrar fecha término.")
-    return errors
-
-
-def pendientes_obligatorios(faena_id: int):
-    df = fetch_assigned_workers(int(faena_id), fresh=True)
-    results = {}
-    if df is None or df.empty:
-        return results
-    for _, row in df.iterrows():
-        trabajador_id = int(row.get("id") or 0)
-        if trabajador_id <= 0:
-            continue
-        req = worker_required_docs_by_id(trabajador_id)
-        docs_df = tenant_fetch_df_uncached(
-            "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
-            (trabajador_id,),
-        )
-        present = set(docs_df["doc_tipo"].astype(str).tolist()) if docs_df is not None and not docs_df.empty else set()
-        missing = [doc for doc in req if doc not in present]
-        label = f"{row.get('apellidos','')}, {row.get('nombres','')} · {row.get('rut','')}".strip(" ·")
-        results[label] = missing
-    return results
-
-
-def pendientes_empresa_faena(faena_id: int):
-    df = tenant_fetch_df_uncached(
-        "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?",
-        (int(faena_id),),
-    )
-    present = set(df["doc_tipo"].astype(str).tolist()) if df is not None and not df.empty else set()
-    required = get_empresa_monthly_doc_types()
-    return [doc for doc in required if doc not in present]
-
-
-def faena_progress_table():
-    faenas_df = tenant_fetch_df_uncached(
-        """
-        SELECT f.id AS faena_id, f.nombre AS faena, f.estado, f.fecha_inicio, f.fecha_termino,
-               m.nombre AS mandante
-        FROM faenas f
-        JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-        """
-    )
-    if faenas_df is None or faenas_df.empty:
-        return pd.DataFrame()
-    rows = []
-    for _, row in faenas_df.iterrows():
-        fid = int(row.get("faena_id") or 0)
-        workers = fetch_assigned_workers(fid, fresh=True)
-        trabajadores = 0 if workers is None else int(len(workers))
-        trab_ok = 0
-        faltantes_total = 0
-        total_req = 0
-        for _, w in (workers.iterrows() if workers is not None else []):
-            req = worker_required_docs_by_id(int(w.get("id") or 0))
-            total_req += len(req)
-            docs_df = tenant_fetch_df_uncached(
-                "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
-                (int(w.get("id") or 0),),
-            )
-            present = set(docs_df["doc_tipo"].astype(str).tolist()) if docs_df is not None and not docs_df.empty else set()
-            missing = [doc for doc in req if doc not in present]
-            if not missing:
-                trab_ok += 1
-            faltantes_total += len(missing)
-        cobertura = 100.0 if total_req == 0 else max(0.0, (total_req - faltantes_total) * 100.0 / total_req)
-        rows.append({
-            "faena_id": fid,
-            "mandante": row.get("mandante"),
-            "faena": row.get("faena"),
-            "estado": row.get("estado"),
-            "fecha_inicio": row.get("fecha_inicio"),
-            "fecha_termino": row.get("fecha_termino"),
-            "trabajadores": trabajadores,
-            "trab_ok": trab_ok,
-            "faltantes_total": faltantes_total,
-            "cobertura_docs_pct": cobertura,
-        })
-    return pd.DataFrame(rows)
-
-
-def _zip_add_if_available(zf, arcname: str, file_path=None, bucket=None, object_path=None):
-    try:
-        data = load_file_anywhere(file_path, bucket, object_path)
-    except Exception:
-        return False
-    zf.writestr(arcname, data)
-    return True
-
-
-def export_zip_for_faena(
-    faena_id: int,
-    *,
-    include_global_empresa_docs: bool = True,
-    include_contrato: bool = True,
-    include_anexos: bool = True,
-    include_empresa_faena: bool = True,
-    include_trabajadores: bool = True,
-    doc_types_empresa_global=None,
-    doc_types_empresa_faena=None,
-    doc_types_trabajador=None,
-    selected_empresa_faena_doc_ids=None,
-    selected_trabajador_ids=None,
-    selected_trabajador_doc_ids=None,
-):
-    faena_df = tenant_fetch_df_uncached(
-        """
-        SELECT f.id, f.nombre, m.nombre AS mandante, COALESCE(cf.nombre,'') AS contrato_nombre,
-               cf.file_path AS contrato_file_path, cf.bucket AS contrato_bucket, cf.object_path AS contrato_object_path
-        FROM faenas f
-        JOIN mandantes m ON m.id=f.mandante_id
-        LEFT JOIN contratos_faena cf ON cf.id=f.contrato_faena_id
-        WHERE f.id=?
-        LIMIT 1
-        """,
-        (int(faena_id),),
-    )
-    if faena_df.empty:
-        raise ValueError("Faena no encontrada.")
-    faena = faena_df.iloc[0]
-    zip_io = io.BytesIO()
-    base_folder = safe_name(f"{faena.get('mandante','mandante')}_{faena.get('nombre','faena')}")
-    with zipfile.ZipFile(zip_io, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        manifest = [
-            f"Mandante: {faena.get('mandante','')}",
-            f"Faena: {faena.get('nombre','')}",
-            f"Generado: {datetime.utcnow().isoformat(timespec='seconds')}Z",
-            "",
-        ]
-        if include_contrato and (faena.get("contrato_file_path") or faena.get("contrato_object_path")):
-            contract_name = os.path.basename(str(faena.get('contrato_file_path') or faena.get('contrato_object_path') or 'contrato'))
-            _zip_add_if_available(zf, f"{base_folder}/01_contrato_faena/{contract_name}", faena.get("contrato_file_path"), faena.get("contrato_bucket"), faena.get("contrato_object_path"))
-            manifest.append(f"Contrato: {contract_name}")
-        if include_anexos:
-            anexos_df = tenant_fetch_df_uncached(
-                "SELECT nombre, file_path, bucket, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id",
-                (int(faena_id),),
-            )
-            for _, ax in anexos_df.iterrows():
-                nombre = os.path.basename(str(ax.get('nombre') or ax.get('file_path') or ax.get('object_path') or 'anexo'))
-                _zip_add_if_available(zf, f"{base_folder}/02_anexos/{nombre}", ax.get('file_path'), ax.get('bucket'), ax.get('object_path'))
-        if include_global_empresa_docs:
-            q = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos"
-            params = ()
-            if doc_types_empresa_global:
-                q += " WHERE doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_empresa_global))
-                params = tuple(doc_types_empresa_global)
-            q += " ORDER BY doc_tipo, nombre_archivo, id"
-            gdf = tenant_fetch_df_uncached(q, params)
-            for _, doc in gdf.iterrows():
-                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
-                tipo = safe_name(doc.get('doc_tipo') or 'empresa')
-                _zip_add_if_available(zf, f"{base_folder}/03_empresa_global/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
-        if include_empresa_faena:
-            q = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE faena_id=?"
-            params = [int(faena_id)]
-            if doc_types_empresa_faena:
-                q += " AND doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_empresa_faena))
-                params.extend(list(doc_types_empresa_faena))
-            if selected_empresa_faena_doc_ids is not None:
-                if selected_empresa_faena_doc_ids:
-                    q += " AND id IN (%s)" % ",".join(["?"] * len(selected_empresa_faena_doc_ids))
-                    params.extend([int(x) for x in selected_empresa_faena_doc_ids])
-                else:
-                    q += " AND 1=0"
-            q += " ORDER BY doc_tipo, nombre_archivo, id"
-            edf = tenant_fetch_df_uncached(q, tuple(params))
-            for _, doc in edf.iterrows():
-                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
-                tipo = safe_name(doc.get('doc_tipo') or 'empresa_faena')
-                _zip_add_if_available(zf, f"{base_folder}/04_empresa_faena/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
-        if include_trabajadores:
-            q = """
-                SELECT DISTINCT t.id, t.rut, t.nombres, t.apellidos
-                FROM asignaciones a
-                JOIN trabajadores t ON t.id=a.trabajador_id
-                WHERE a.faena_id=?
-                  AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
-            """
-            params = [int(faena_id)]
-            if selected_trabajador_ids is not None:
-                if selected_trabajador_ids:
-                    q += " AND t.id IN (%s)" % ",".join(["?"] * len(selected_trabajador_ids))
-                    params.extend([int(x) for x in selected_trabajador_ids])
-                else:
-                    q += " AND 1=0"
-            q += " ORDER BY t.apellidos, t.nombres, t.id"
-            tdf = tenant_fetch_df_uncached(q, tuple(params))
-            for _, trab in tdf.iterrows():
-                tid = int(trab.get('id') or 0)
-                dq = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=?"
-                dparams = [tid]
-                if doc_types_trabajador:
-                    dq += " AND doc_tipo IN (%s)" % ",".join(["?"] * len(doc_types_trabajador))
-                    dparams.extend(list(doc_types_trabajador))
-                selected_ids = (selected_trabajador_doc_ids or {}).get(tid) if isinstance(selected_trabajador_doc_ids, dict) else None
-                if selected_ids is not None:
-                    if selected_ids:
-                        dq += " AND id IN (%s)" % ",".join(["?"] * len(selected_ids))
-                        dparams.extend([int(x) for x in selected_ids])
-                    else:
-                        dq += " AND 1=0"
-                dq += " ORDER BY doc_tipo, nombre_archivo, id"
-                docs_df = tenant_fetch_df_uncached(dq, tuple(dparams))
-                worker_folder = safe_name(f"{trab.get('apellidos','')}_{trab.get('nombres','')}_{trab.get('rut','')}")
-                for _, doc in docs_df.iterrows():
-                    nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
-                    tipo = safe_name(doc.get('doc_tipo') or 'trabajador')
-                    _zip_add_if_available(zf, f"{base_folder}/05_trabajadores/{worker_folder}/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
-        manifest.extend([
-            "",
-            "Pendientes trabajadores:",
-        ])
-        for label, missing in pendientes_obligatorios(int(faena_id)).items():
-            manifest.append(f"- {label}: {', '.join(missing) if missing else 'OK'}")
-        miss_emp = pendientes_empresa_faena(int(faena_id))
-        manifest.extend([
-            "",
-            f"Pendientes empresa/faena: {', '.join(miss_emp) if miss_emp else 'OK'}",
-        ])
-        zf.writestr(f"{base_folder}/00_resumen.txt", "\n".join(manifest))
-    zip_bytes = zip_io.getvalue()
-    export_name = f"segav_export_faena_{int(faena_id)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-    return zip_bytes, export_name
-
-
-def persist_export(faena_id: int, zip_bytes: bytes, file_name: str):
-    file_path, bucket, object_path = save_file_online(["exports", "faenas", int(faena_id)], file_name, zip_bytes, content_type="application/zip")
-    execute(
-        "INSERT INTO export_historial(faena_id, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (int(faena_id), file_path, bucket, object_path, sha256_bytes(zip_bytes), len(zip_bytes), datetime.utcnow().isoformat(timespec="seconds")),
-    )
-    return file_path
-
-
-def export_zip_for_mes(year: int, month: int, *, include_global_empresa_docs: bool = True):
-    ym = f"{int(year):04d}-{int(month):02d}"
-    zip_io = io.BytesIO()
-    with zipfile.ZipFile(zip_io, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        if include_global_empresa_docs:
-            gdf = tenant_fetch_df_uncached(
-                "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, nombre_archivo, id"
-            )
-            for _, doc in gdf.iterrows():
-                nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
-                tipo = safe_name(doc.get('doc_tipo') or 'empresa')
-                _zip_add_if_available(zf, f"{ym}/empresa_global/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
-        fdf = tenant_fetch_df_uncached(
-            """
-            SELECT fed.faena_id, fed.doc_tipo, fed.nombre_archivo, fed.file_path, fed.bucket, fed.object_path,
-                   f.nombre AS faena_nombre, m.nombre AS mandante
-            FROM faena_empresa_documentos fed
-            JOIN faenas f ON f.id=fed.faena_id
-            JOIN mandantes m ON m.id=f.mandante_id
-            WHERE COALESCE(fed.periodo_anio,0)=? AND COALESCE(fed.periodo_mes,0)=?
-            ORDER BY m.nombre, f.nombre, fed.doc_tipo, fed.nombre_archivo, fed.id
-            """,
-            (int(year), int(month)),
-        )
-        for _, doc in fdf.iterrows():
-            faena_folder = safe_name(f"{doc.get('mandante','mandante')}_{doc.get('faena_nombre','faena')}")
-            nombre = os.path.basename(str(doc.get('nombre_archivo') or doc.get('file_path') or doc.get('object_path') or 'documento'))
-            tipo = safe_name(doc.get('doc_tipo') or 'empresa_faena')
-            _zip_add_if_available(zf, f"{ym}/empresa_faena/{faena_folder}/{tipo}_{nombre}", doc.get('file_path'), doc.get('bucket'), doc.get('object_path'))
-    return zip_io.getvalue(), ym
-
-
-def persist_export_mes(year_month: str, zip_bytes: bytes):
-    file_name = f"segav_export_{safe_name(year_month)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-    file_path, bucket, object_path = save_file_online(["exports", "mensual", safe_name(year_month)], file_name, zip_bytes, content_type="application/zip")
-    execute(
-        "INSERT INTO export_historial_mes(year_month, file_path, bucket, object_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?,?,?)",
-        (str(year_month), file_path, bucket, object_path, sha256_bytes(zip_bytes), len(zip_bytes), datetime.utcnow().isoformat(timespec="seconds")),
-    )
-    return file_path
-
-
-def restore_from_backup_zip(zip_bytes: bytes):
-    ensure_dirs()
-    mem = io.BytesIO(zip_bytes)
-    with zipfile.ZipFile(mem, "r") as zf:
-        members = zf.namelist()
-        db_member = next((m for m in members if m.endswith("app.db") or os.path.basename(m) == "app.db"), None)
-        if db_member:
-            with zf.open(db_member) as src, open(DB_PATH, "wb") as dst:
-                dst.write(src.read())
-        for member in members:
-            clean = member.strip().lstrip("/")
-            if not clean or clean.endswith("/"):
-                continue
-            if clean == db_member or os.path.basename(clean) == "app.db":
-                continue
-            target = os.path.abspath(os.path.join(APP_DIR, clean))
-            root = os.path.abspath(APP_DIR)
-            if not target.startswith(root):
-                continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with zf.open(member) as src, open(target, "wb") as dst:
-                dst.write(src.read())
-    clear_app_caches()
-    return True
 
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
@@ -1425,7 +944,7 @@ section[data-testid="stSidebar"] { border-right: 1px solid rgba(49,51,63,0.12); 
 section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* Cards */
-.gyd-card {
+.segav-card {
     background: rgba(255,255,255,0.72);
     border: 1px solid rgba(49,51,63,0.10);
     border-radius: 18px;
@@ -1435,7 +954,7 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
     -webkit-backdrop-filter: blur(10px);
     margin-bottom: 12px;
 }
-.gyd-muted { opacity: 0.75; }
+.segav-muted { opacity: 0.75; }
 
 /* Buttons */
 div.stButton > button, div.stDownloadButton > button {
@@ -1473,9 +992,9 @@ button[data-baseweb="tab"] {
 def ui_header(title: str, desc: str = ""):
     st.markdown(
         f"""
-        <div class="gyd-card">
+        <div class="segav-card">
             <div style="font-size:1.35rem; font-weight:700; line-height:1.25;">{title}</div>
-            {f'<div class="gyd-muted" style="margin-top:6px;">{desc}</div>' if desc else ''}
+            {f'<div class="segav-muted" style="margin-top:6px;">{desc}</div>' if desc else ''}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1484,18 +1003,24 @@ def ui_header(title: str, desc: str = ""):
 def ui_tip(text: str):
     st.info(text, icon="ℹ️")
 
-
-def go(page: str, faena_id: int | None = None):
-    st.session_state["nav_request"] = page
-    if faena_id is not None:
-        st.session_state["nav_request_faena_id"] = int(faena_id)
-    st.rerun()
-
 def safe_name(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
 
+
+
+def fetch_df(q: str, params=()):
+    """SELECT con cache de corta duración (20 s). Usar para lecturas frecuentes."""
+    params_cache = _cacheable_params(params)
+    if _is_select_query(q):
+        return _cached_fetch_df(DB_BACKEND, PG_DSN_FINGERPRINT, q, params_cache)
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            return pd.read_sql_query(q2, c, params=params)
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=params)
 
 
 def fetch_df_uncached(q: str, params=()):
@@ -1746,8 +1271,128 @@ def ensure_dirs():
     os.makedirs(UPLOAD_ROOT, exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "exports"), exist_ok=True)
     os.makedirs(os.path.join(UPLOAD_ROOT, "auto_backups"), exist_ok=True)
+    os.makedirs(os.path.join(UPLOAD_ROOT, "_backups"), exist_ok=True)
+    os.makedirs(os.path.join(UPLOAD_ROOT, "_exports_mes"), exist_ok=True)
 
-@st.cache_resource(show_spinner=False)
+
+# ---------------------------------------------------------------
+# Storage helpers (definidos aquí para el scope de streamlit_app)
+# ---------------------------------------------------------------
+_STORAGE_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+def _storage_safe_segment(value: str) -> str:
+    import unicodedata as _ud
+    raw = str(value or "").strip().replace("\\", "/").split("/")[-1]
+    raw = _ud.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    if "." in raw:
+        stem, ext = raw.rsplit(".", 1)
+        ext = "." + re.sub(r"[^A-Za-z0-9]+", "", ext)[:12]
+    else:
+        stem, ext = raw, ""
+    stem = _STORAGE_SAFE_RE.sub("_", stem).strip("._-") or "archivo"
+    return f"{stem[:120]}{ext}"
+
+def _safe_path_parts(parts):
+    if isinstance(parts, str):
+        parts = [parts]
+    result = []
+    for p in (parts or []):
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(p or "")).strip("._")
+        if safe:
+            result.append(safe)
+    return result or ["misc"]
+
+def save_file(folder_parts, file_name: str, file_bytes: bytes) -> str:
+    """Guarda un archivo en disco local y devuelve la ruta."""
+    folder = os.path.join(UPLOAD_ROOT, *_safe_path_parts(folder_parts))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, _storage_safe_segment(file_name))
+    with open(path, "wb") as f:
+        f.write(file_bytes)
+    return path
+
+_FILE_REF_TABLES = [
+    "contratos_faena", "faena_anexos", "trabajador_documentos",
+    "empresa_documentos", "faena_empresa_documentos",
+    "export_historial", "export_historial_mes",
+]
+_DOCUMENT_TABLES = {"trabajador_documentos", "empresa_documentos", "faena_empresa_documentos"}
+
+def fetch_file_refs(table_name: str, where_sql: str = "", params=()):
+    """Devuelve lista de dicts con file_path/bucket/object_path de una tabla."""
+    q = f"SELECT file_path, bucket, object_path FROM {table_name}"
+    if where_sql:
+        q += f" WHERE {where_sql}"
+    df = fetch_df(q, params)
+    if df is None or df.empty:
+        return []
+    return [row.to_dict() for _, row in df.iterrows()]
+
+def _count_file_refs(file_path, bucket, object_path, *, exclude_table=None, exclude_id=None):
+    total = 0
+    for tbl in _FILE_REF_TABLES:
+        where, params = [], []
+        if object_path:
+            where.append("object_path=?"); params.append(str(object_path))
+            if bucket:
+                where.append("bucket=?"); params.append(str(bucket))
+        elif file_path:
+            where.append("file_path=?"); params.append(str(file_path))
+        else:
+            continue
+        if exclude_table == tbl and exclude_id is not None:
+            where.append("id<>?"); params.append(int(exclude_id))
+        try:
+            df = fetch_df(f"SELECT COUNT(*) AS n FROM {tbl} WHERE " + " AND ".join(where), tuple(params))
+            if df is not None and not df.empty:
+                total += int(df.iloc[0]["n"] or 0)
+        except Exception:
+            pass
+    return total
+
+def cleanup_deleted_file_refs(file_refs):
+    """Elimina archivos físicos/Storage de refs que ya no tienen registros en BD."""
+    issues = []
+    seen = set()
+    for ref in (file_refs or []):
+        fp = ref.get("file_path"); bkt = ref.get("bucket"); op = ref.get("object_path")
+        key = (str(fp or ""), str(bkt or ""), str(op or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _count_file_refs(fp, bkt, op) == 0:
+            if op and storage_admin_enabled():
+                try:
+                    storage_delete(str(op))
+                except Exception as e:
+                    issues.append(f"Storage: {e}")
+            if fp:
+                try:
+                    if os.path.exists(str(fp)):
+                        os.remove(str(fp))
+                except Exception as e:
+                    issues.append(f"Local: {e}")
+    return issues
+
+def delete_uploaded_document_record(table_name: str, row_id: int):
+    """Elimina un registro de documento y sus archivos asociados si no hay otras refs."""
+    if table_name not in _DOCUMENT_TABLES:
+        raise ValueError("Tabla no permitida para eliminación.")
+    df = fetch_df(f"SELECT id, nombre_archivo, file_path, bucket, object_path FROM {table_name} WHERE id=?", (int(row_id),))
+    if df is None or df.empty:
+        raise FileNotFoundError("El documento ya no existe en la base de datos.")
+    row = df.iloc[0]
+    fp = row.get("file_path"); bkt = row.get("bucket"); op = row.get("object_path")
+    file_name = row.get("nombre_archivo", "documento")
+    refs = _count_file_refs(fp, bkt, op, exclude_table=table_name, exclude_id=int(row_id))
+    execute(f"DELETE FROM {table_name} WHERE id=?", (int(row_id),))
+    cleanup_issues = []
+    if refs == 0:
+        cleanup_issues = cleanup_deleted_file_refs([{"file_path": fp, "bucket": bkt, "object_path": op}])
+    return {"file_name": file_name, "cleanup_issues": cleanup_issues, "shared_refs": refs}
+
+# ---------------------------------------------------------------
+
 def get_pg_pool(dsn: str):
     if not dsn or psycopg is None or ConnectionPool is None:
         return None
@@ -1803,6 +1448,56 @@ def cursor_execute(cur, q: str, params=()):
     if DB_BACKEND == "postgres":
         q = _qmark_to_pct(q).replace("datetime('now')", "now()")
     return cur.execute(q, params)
+
+
+def execute(q: str, params=()):
+    """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches automáticamente."""
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            c.execute(q2, params)
+            c.commit()
+            return
+    with conn() as c:
+        c.execute(q, params)
+        c.commit()
+
+
+def execute_rowcount(q: str, params=()):
+    """Ejecuta DML y devuelve el número de filas afectadas."""
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            cur = c.execute(q2, params)
+            c.commit()
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+    with conn() as c:
+        cur = c.execute(q, params)
+        c.commit()
+        try:
+            return int(cur.rowcount or 0)
+        except Exception:
+            return 0
+
+
+def executemany(q: str, seq_params):
+    """Ejecuta DML en lote."""
+    clear_app_caches()
+    if DB_BACKEND == "postgres":
+        q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
+        with conn() as c:
+            with c.cursor() as cur:
+                cur.executemany(q2, seq_params)
+            c.commit()
+            return
+    with conn() as c:
+        c.executemany(q, seq_params)
+        c.commit()
 
 
 def ensure_core_tables_postgres():
@@ -2511,6 +2206,348 @@ def ensure_sgsst_seed_data():
 
 
 
+# ============================================================
+# FUNCIONES UTILITARIAS RECONSTRUIDAS
+# ============================================================
+
+def parse_date_maybe(value):
+    """Convierte un valor de fecha (str, date, datetime o None) a date o None."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    s = str(value).strip()
+    if not s or s in ("None", "nan", "NaT", ""):
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def go(page_name: str, faena_id: int | None = None):
+    """Navega a otra página del ERP desde cualquier parte del código."""
+    st.session_state["nav_request"] = page_name
+    if faena_id is not None:
+        st.session_state["nav_request_faena_id"] = faena_id
+    st.rerun()
+
+
+def auto_backup_db(tag: str = "auto"):
+    """Genera un backup automático de la base de datos SQLite en el historial."""
+    if DB_BACKEND != "sqlite":
+        return
+    try:
+        db_path = DB_PATH
+        if not os.path.exists(db_path):
+            return
+        with open(db_path, "rb") as f:
+            raw = f.read()
+        sha = hashlib.sha256(raw).hexdigest()
+        size = len(raw)
+        now = datetime.now().isoformat(timespec="seconds")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(UPLOAD_ROOT, "_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", (tag or "auto"))[:40]
+        fname = f"backup_{ts}_{safe_tag}.db"
+        fpath = os.path.join(backup_dir, fname)
+        with open(fpath, "wb") as f:
+            f.write(raw)
+        execute(
+            "INSERT INTO auto_backup_historial(tag, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+            (tag, fpath, sha, size, now),
+        )
+        # Mantiene solo los últimos 20 backups en historial
+        try:
+            old = fetch_df("SELECT id, file_path FROM auto_backup_historial ORDER BY id DESC LIMIT -1 OFFSET 20")
+            if old is not None and not old.empty:
+                for _, row in old.iterrows():
+                    try:
+                        if row.get("file_path") and os.path.exists(str(row["file_path"])):
+                            os.remove(str(row["file_path"]))
+                    except Exception:
+                        pass
+                    execute("DELETE FROM auto_backup_historial WHERE id=?", (int(row["id"]),))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def restore_from_backup_zip(zip_bytes: bytes):
+    """Restaura la base de datos SQLite desde un ZIP de backup."""
+    if DB_BACKEND != "sqlite":
+        raise RuntimeError("La restauración manual solo está disponible con SQLite.")
+    mem = io.BytesIO(zip_bytes)
+    with zipfile.ZipFile(mem, "r") as zf:
+        db_files = [n for n in zf.namelist() if n.endswith(".db")]
+        if not db_files:
+            raise ValueError("El ZIP no contiene ningún archivo .db")
+        db_file = db_files[0]
+        db_bytes = zf.read(db_file)
+    backup_path = DB_PATH + ".pre_restore_backup"
+    if os.path.exists(DB_PATH):
+        with open(DB_PATH, "rb") as f:
+            with open(backup_path, "wb") as bf:
+                bf.write(f.read())
+    with open(DB_PATH, "wb") as f:
+        f.write(db_bytes)
+    clear_app_caches()
+
+
+def pendientes_obligatorios(faena_id: int) -> dict:
+    """
+    Retorna dict {nombre_trabajador: [doc_tipos_faltantes]} para todos los
+    trabajadores asignados a la faena.
+    """
+    try:
+        trab = fetch_df(
+            """
+            SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre, t.cargo
+            FROM asignaciones a
+            JOIN trabajadores t ON t.id = a.trabajador_id
+            WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
+            ORDER BY t.apellidos, t.nombres
+            """,
+            (int(faena_id),),
+        )
+        if trab is None or trab.empty:
+            return {}
+        result = {}
+        for _, row in trab.iterrows():
+            tid = int(row["id"])
+            cargo = str(row.get("cargo") or "")
+            required = worker_required_docs(cargo)
+            if not required:
+                result[str(row["nombre"])] = []
+                continue
+            docs = fetch_df(
+                "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
+                (tid,),
+            )
+            present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
+            missing = [d for d in required if d not in present]
+            result[str(row["nombre"])] = missing
+        return result
+    except Exception:
+        return {}
+
+
+def pendientes_empresa_faena(faena_id: int) -> list:
+    """
+    Retorna lista de doc_tipos de empresa por faena que faltan (sin período).
+    """
+    try:
+        required = get_empresa_monthly_doc_types()
+        if not required:
+            return []
+        docs = fetch_df(
+            "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?",
+            (int(faena_id),),
+        )
+        present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
+        return [d for d in required if d not in present]
+    except Exception:
+        return []
+
+
+def _export_collect_files(faena_id: int,
+                          include_global_empresa_docs: bool = True,
+                          include_contrato: bool = True,
+                          include_anexos: bool = True,
+                          include_empresa_faena: bool = True,
+                          include_trabajadores: bool = True,
+                          doc_types_empresa_global=None,
+                          doc_types_empresa_faena=None,
+                          doc_types_trabajador=None,
+                          selected_empresa_faena_doc_ids=None,
+                          selected_trabajador_ids=None,
+                          selected_trabajador_doc_ids=None) -> list:
+    """Recopila todos los archivos para un ZIP de exportación de faena."""
+    entries = []  # list of (arcpath, file_path, bucket, object_path)
+
+    # Contrato de faena
+    if include_contrato:
+        row = fetch_df("SELECT nombre, file_path FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)", (int(faena_id),))
+        if row is not None and not row.empty:
+            r = row.iloc[0]
+            if r.get("file_path"):
+                entries.append((f"Contrato/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+
+    # Anexos
+    if include_anexos:
+        anexos = fetch_df("SELECT nombre, file_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        if anexos is not None and not anexos.empty:
+            for _, r in anexos.iterrows():
+                if r.get("file_path"):
+                    entries.append((f"Anexos/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+
+    # Documentos empresa global
+    if include_global_empresa_docs:
+        q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
+        emp_docs = fetch_df(q_emp)
+        if emp_docs is not None and not emp_docs.empty:
+            for _, r in emp_docs.iterrows():
+                if doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
+                    continue
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                entries.append((f"Empresa_Global/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
+
+    # Documentos empresa por faena
+    if include_empresa_faena:
+        q_ef = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, id"
+        ef_docs = fetch_df(q_ef, (int(faena_id),))
+        if ef_docs is not None and not ef_docs.empty:
+            for _, r in ef_docs.iterrows():
+                if selected_empresa_faena_doc_ids is not None and int(r["id"]) not in selected_empresa_faena_doc_ids:
+                    continue
+                if doc_types_empresa_faena and r.get("doc_tipo") not in doc_types_empresa_faena:
+                    continue
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                entries.append((f"Empresa_Faena/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
+
+    # Documentos trabajadores
+    if include_trabajadores:
+        trab = fetch_df("""
+            SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre
+            FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
+            ORDER BY t.apellidos, t.nombres
+        """, (int(faena_id),))
+        if trab is not None and not trab.empty:
+            for _, tr in trab.iterrows():
+                tid = int(tr["id"])
+                if selected_trabajador_ids is not None and tid not in selected_trabajador_ids:
+                    continue
+                t_docs = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, id", (tid,))
+                if t_docs is None or t_docs.empty:
+                    continue
+                folder_name = re.sub(r"[^a-zA-Z0-9 _.-]", "_", str(tr["nombre"]))[:40]
+                for _, dr in t_docs.iterrows():
+                    did = int(dr["id"])
+                    sel_ids = (selected_trabajador_doc_ids or {}).get(tid)
+                    if sel_ids is not None and did not in sel_ids:
+                        continue
+                    if doc_types_trabajador and dr.get("doc_tipo") not in doc_types_trabajador:
+                        continue
+                    fname = str(dr.get("nombre_archivo") or dr.get("file_path") or f"doc_{did}")
+                    entries.append((f"Trabajadores/{folder_name}/{os.path.basename(fname)}", dr.get("file_path"), dr.get("bucket"), dr.get("object_path")))
+    return entries
+
+
+def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
+    """Genera un ZIP con todos los documentos de una faena. Retorna (bytes, nombre_archivo)."""
+    faena = fetch_df("SELECT nombre, fecha_inicio FROM faenas WHERE id=?", (int(faena_id),))
+    faena_nombre = "faena"
+    if faena is not None and not faena.empty:
+        faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_name = f"export_{faena_nombre}_{ts}.zip"
+
+    entries = _export_collect_files(faena_id, **kwargs)
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        seen_paths = {}
+        for arcpath, file_path, bucket, object_path in entries:
+            try:
+                file_bytes = load_file_anywhere(file_path, bucket, object_path)
+            except Exception:
+                continue
+            # Evitar duplicados en el ZIP
+            base, ext = os.path.splitext(arcpath)
+            counter = seen_paths.get(arcpath, 0)
+            seen_paths[arcpath] = counter + 1
+            if counter > 0:
+                arcpath = f"{base}_{counter}{ext}"
+            zf.writestr(arcpath, file_bytes)
+    return mem.getvalue(), zip_name
+
+
+def persist_export(faena_id: int, zip_bytes: bytes, zip_name: str) -> str:
+    """Guarda un ZIP de export en disco y registra en export_historial."""
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports", str(faena_id))
+    os.makedirs(export_dir, exist_ok=True)
+    fpath = os.path.join(export_dir, zip_name)
+    with open(fpath, "wb") as f:
+        f.write(zip_bytes)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+    now = datetime.now().isoformat(timespec="seconds")
+    # La tabla export_historial no tiene columna "archivo"; guarda el path completo
+    execute(
+        "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+        (int(faena_id), fpath, sha, len(zip_bytes), now),
+    )
+    return fpath
+
+
+def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool = True) -> tuple:
+    """Genera un ZIP mensual con todos los documentos empresa de todas las faenas del mes."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ym = f"{int(year):04d}-{int(month):02d}"
+    zip_name = f"export_mes_{ym}_{ts}.zip"
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Documentos empresa faena del período
+        ef_docs = fetch_df(
+            "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
+            (int(year), int(month)),
+        )
+        if ef_docs is not None and not ef_docs.empty:
+            for _, r in ef_docs.iterrows():
+                try:
+                    fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
+                    fname = str(r.get("nombre_archivo") or r.get("file_path") or f"doc_{r['id']}")
+                    arc = f"Faena_{r['faena_id']}/{os.path.basename(fname)}"
+                    zf.writestr(arc, fb)
+                except Exception:
+                    continue
+
+        # Documentos empresa global (sin período)
+        if include_global_empresa_docs:
+            emp_docs = fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
+            if emp_docs is not None and not emp_docs.empty:
+                for _, r in emp_docs.iterrows():
+                    try:
+                        fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
+                        fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                        arc = f"Empresa_Global/{os.path.basename(fname)}"
+                        zf.writestr(arc, fb)
+                    except Exception:
+                        continue
+
+    return mem.getvalue(), ym
+
+
+def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
+    """Guarda un ZIP de export mensual en disco y registra en export_historial_mes."""
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes")
+    os.makedirs(export_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"export_mes_{ym}_{ts}.zip"
+    fpath = os.path.join(export_dir, fname)
+    with open(fpath, "wb") as f:
+        f.write(zip_bytes)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+    now = datetime.now().isoformat(timespec="seconds")
+    execute(
+        "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
+        (ym, fpath, sha, len(zip_bytes), now),
+    )
+    return fpath
+
+
+# ============================================================
+# FIN FUNCIONES RECONSTRUIDAS
+# ============================================================
+
+
 def ensure_segav_erp_tables():
     stmts = [
         """
@@ -2952,79 +2989,31 @@ TENANT_SCOPE_FILE_TABLES = (
 )
 
 
-def _parse_top_level_from_table(sql: str):
-    pos = _find_top_level_clause(sql, ' from ')
-    if pos == -1:
-        return None, None
-    rest = sql[pos + len(' from '):].lstrip()
-    m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)(?:\s+([A-Za-z_][A-Za-z0-9_]*))?', rest, flags=re.I)
-    if not m:
-        return None, None
-    table = str(m.group(1) or '').strip()
-    alias = str(m.group(2) or '').strip()
-    if alias.upper() in {'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
-        alias = ''
-    return table, alias or table
-
-
 def _tenant_scope_target_table(sql: str) -> str | None:
-    q = str(sql or '').strip()
-    if not q:
-        return None
-    lower_q = q.lower()
-    if lower_q.startswith('select') or lower_q.startswith('with'):
-        table, _alias = _parse_top_level_from_table(q)
-        return table if table in TENANT_SCOPE_TABLES else None
-    for patt in [
-        r'^\s*update\s+([A-Za-z_][A-Za-z0-9_]*)',
-        r'^\s*delete\s+from\s+([A-Za-z_][A-Za-z0-9_]*)',
-        r'^\s*insert\s+into\s+([A-Za-z_][A-Za-z0-9_]*)',
-    ]:
+    q = str(sql or '')
+    patterns = [
+        r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
+    ]
+    for patt in patterns:
         m = re.search(patt, q, flags=re.I)
         if m:
             table = str(m.group(1) or '').strip()
-            return table if table in TENANT_SCOPE_TABLES else None
+            if table in TENANT_SCOPE_TABLES:
+                return table
     return None
-
-
-def _find_top_level_clause(sql: str, clause: str) -> int:
-    lower_sql = sql.lower()
-    clause_l = clause.lower()
-    depth = 0
-    in_single = False
-    i = 0
-    while i < len(sql):
-        ch = sql[i]
-        if ch == "'":
-            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
-                i += 2
-                continue
-            in_single = not in_single
-        elif not in_single:
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth = max(0, depth - 1)
-            elif depth == 0 and lower_sql.startswith(clause_l, i):
-                return i
-        i += 1
-    return -1
 
 
 def _inject_tenant_condition_sql(sql: str, alias_or_table: str) -> str:
     tenant_cond = f"COALESCE({alias_or_table}.cliente_key,'')=?"
-    cut_positions = [
-        _find_top_level_clause(sql, ' order by '),
-        _find_top_level_clause(sql, ' group by '),
-        _find_top_level_clause(sql, ' limit '),
-        _find_top_level_clause(sql, ' union '),
-    ]
-    valid_positions = [p for p in cut_positions if p != -1]
-    cut = min(valid_positions) if valid_positions else len(sql)
+    lower_sql = sql.lower()
+    clause_positions = [p for p in [lower_sql.find(' order by '), lower_sql.find(' group by '), lower_sql.find(' limit '), lower_sql.find(' union ')] if p != -1]
+    cut = min(clause_positions) if clause_positions else len(sql)
     head = sql[:cut]
     tail = sql[cut:]
-    where_pos = _find_top_level_clause(head, ' where ')
-    if where_pos != -1:
+    if re.search(r"\bwhere\b", head, flags=re.I):
         return head + f" AND {tenant_cond}" + tail
     return head + f" WHERE {tenant_cond}" + tail
 
@@ -3056,18 +3045,12 @@ def _scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None):
         return q, params_t
 
     # UPDATE / DELETE / SELECT root table scoping
+    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
     alias = table
-    lower_q = q.lstrip().lower()
-    if lower_q.startswith('select') or lower_q.startswith('with'):
-        _table_parsed, _alias_parsed = _parse_top_level_from_table(q)
-        if _table_parsed == table and _alias_parsed:
-            alias = _alias_parsed
-    else:
-        m_root = re.search(r"^\s*(UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
-        if m_root:
-            alias_candidate = str(m_root.group(2) or '').strip()
-            if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
-                alias = alias_candidate
+    if m_root:
+        alias_candidate = str(m_root.group(2) or '').strip()
+        if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
+            alias = alias_candidate
     q2 = _inject_tenant_condition_sql(q, alias)
     return q2, (*params_t, tenant_key)
 
@@ -3201,13 +3184,12 @@ LOGIN_LOGO_URL = "https://www.maderasgyd.cl/wp-content/uploads/2024/02/logo-made
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_login_logo_bytes():
-    for logo_path in (LOCAL_BRAND_LOGO_FINAL_PATH, LOCAL_BRAND_LOGO_PATH):
-        if os.path.exists(logo_path):
-            try:
-                with open(logo_path, "rb") as fp:
-                    return fp.read()
-            except Exception:
-                pass
+    if os.path.exists(LOCAL_BRAND_LOGO_PATH):
+        try:
+            with open(LOCAL_BRAND_LOGO_PATH, "rb") as fp:
+                return fp.read()
+        except Exception:
+            pass
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -3515,36 +3497,21 @@ def superadmins_count(active_only: bool = True) -> int:
         return 0
 
 def ensure_superadmin_exists():
-    """Garantiza que exista al menos un SUPERADMIN activo y privilegia el usuario por defecto."""
     try:
         ensure_users_table()
-        default_user = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia").strip() or "a.garcia"
-        default_pass = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
-        row = fetch_row("SELECT id, role, is_active FROM users WHERE username=?", (default_user,), fresh=True)
-        if row is not None:
-            try:
-                uid = int(row["id"])
-            except Exception:
-                uid = int(row[0])
-            role = str((row.get("role") if hasattr(row, "get") else row[1]) or "").upper()
-            is_active = int((row.get("is_active") if hasattr(row, "get") else row[2]) or 0)
-            if role != "SUPERADMIN" or is_active != 1:
-                execute(
-                    "UPDATE users SET role=?, perms_json=?, is_active=1, updated_at=datetime('now') WHERE id=?",
-                    ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
-                )
-            return
-
         if superadmins_count(active_only=False) > 0:
             return
-
-        salt_b64, h_b64 = hash_password(default_pass)
+        src = fetch_df("SELECT id FROM users WHERE role='ADMIN' ORDER BY is_active DESC, id ASC LIMIT 1")
+        if src.empty:
+            return
+        uid = int(src.iloc[0]["id"])
         execute(
-            "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-            (default_user, salt_b64, h_b64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
+            "UPDATE users SET role=?, perms_json=?, updated_at=datetime('now') WHERE id=?",
+            ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
         )
     except Exception:
         pass
+
 
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
@@ -3681,499 +3648,241 @@ def visible_clientes_df():
         return df
 
 
-
 def auth_gate_ui():
-    """Login ERP fijo de una sola pantalla en escritorio."""
+    """Pantalla de acceso corporativa, de una sola vista y sin scroll en escritorio."""
 
-    def _safe_b64(reader):
-        try:
-            data = reader()
-            return _b64e(data) if data else ""
-        except Exception:
-            return ""
-
-    def _safe_file_b64(path: str) -> str:
-        try:
-            if path and os.path.exists(path):
-                with open(path, "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
-        except Exception:
-            return ""
-        return ""
-
-    logo_b64 = _safe_b64(get_login_logo_bytes)
-    panel_b64 = (
-        _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit_fullbleed_wide.png"))
-        or _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit_fullbleed.png"))
-        or _safe_file_b64(os.path.join(os.path.dirname(__file__), "assets", "branding", "login_right_panel_fit.png"))
-        or _safe_file_b64(LOCAL_LOGIN_PANEL_FIT_PATH)
-        or _safe_file_b64(LOCAL_LOGIN_PANEL_APPROVED_PATH)
-        or _safe_b64(get_login_panel_approved_bytes)
+    st.markdown(
+        """
+        <style>
+        header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"] {display:none !important;}
+        html, body, [data-testid="stAppViewContainer"], .stApp {height:100vh !important; overflow:hidden !important;}
+        .main, .block-container {
+            padding:0 !important;
+            margin:0 !important;
+            max-width:none !important;
+        }
+        [data-testid="stAppViewContainer"] > .main {padding:0 !important;}
+        .segav-login-screen {
+            height:100vh;
+            display:flex;
+            align-items:stretch;
+            background:#f5f7fb;
+            overflow:hidden;
+        }
+        .segav-login-left {
+            height:100vh;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            padding:28px 24px;
+        }
+        .segav-login-card {
+            width:min(460px, 100%);
+            background:#ffffff;
+            border:1px solid rgba(15,23,42,0.08);
+            border-radius:24px;
+            box-shadow:0 18px 52px rgba(15,23,42,0.10);
+            padding:28px 28px 22px 28px;
+        }
+        .segav-chip {
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            padding:6px 12px;
+            border-radius:999px;
+            background:#eff6ff;
+            color:#1d4ed8;
+            font-size:11px;
+            font-weight:800;
+            letter-spacing:0.03em;
+        }
+        .segav-login-title {
+            margin:12px 0 0 0;
+            color:#0f172a;
+            font-size:30px;
+            line-height:1.05;
+            font-weight:800;
+        }
+        .segav-login-sub {
+            margin-top:10px;
+            color:#475569;
+            font-size:13px;
+            line-height:1.5;
+        }
+        .segav-login-card [data-testid="stForm"] {
+            border:none !important;
+            background:transparent !important;
+            padding:0 !important;
+            margin-top:14px;
+        }
+        .segav-login-card [data-testid="stForm"] > div:first-child {
+            border:none !important;
+            padding:0 !important;
+        }
+        .segav-login-card [data-testid="stTextInputRootElement"] {
+            border-radius:14px !important;
+        }
+        .segav-login-card div[data-testid="stFormSubmitButton"] > button {
+            min-height:46px;
+            font-weight:700;
+            border-radius:14px !important;
+        }
+        .segav-logo-wrap {
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            justify-content:center;
+            margin-top:14px;
+            gap:8px;
+        }
+        .segav-logo-note {
+            text-align:center;
+            color:#334155;
+            font-size:15px;
+            font-weight:700;
+            letter-spacing:0.02em;
+        }
+        .segav-footnote {
+            margin-top:10px;
+            color:#64748b;
+            font-size:11px;
+            line-height:1.4;
+            text-align:center;
+        }
+        .segav-login-right {
+            height:100vh;
+            padding:18px 18px 18px 0;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+        }
+        .segav-login-panel {
+            width:100%;
+            height:calc(100vh - 36px);
+            border-radius:28px;
+            overflow:hidden;
+            box-shadow:0 18px 52px rgba(2,8,23,0.18);
+            border:1px solid rgba(255,255,255,0.18);
+            background:linear-gradient(135deg, #0b2540 0%, #10395f 100%);
+        }
+        .segav-login-panel img {
+            width:100%;
+            height:100%;
+            object-fit:cover;
+            display:block;
+        }
+        @media (max-width: 980px) {
+            html, body, [data-testid="stAppViewContainer"], .stApp {height:auto !important; overflow:auto !important;}
+            .segav-login-screen {height:auto;}
+            .segav-login-left, .segav-login-right {height:auto; padding:16px;}
+            .segav-login-panel {height:auto;}
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    hero_b64 = _safe_b64(get_login_hero_bytes)
 
-    hero_background = (
-        f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.80) 45%, rgba(3,19,45,0.95) 100%), url('data:image/png;base64,{panel_b64}')"
-        if panel_b64
-        else (
-            f"linear-gradient(135deg, rgba(5,24,63,0.92) 0%, rgba(10,52,122,0.80) 45%, rgba(3,19,45,0.95) 100%), url('data:image/svg+xml;base64,{hero_b64}')"
-            if hero_b64
-            else "linear-gradient(135deg, #0b2e69 0%, #0f5fcf 100%)"
-        )
-    )
+    st.markdown('<div class="segav-login-screen">', unsafe_allow_html=True)
+    left_col, right_col = st.columns([0.42, 0.58], gap="small")
 
-    css = """
-    <style>
-    header[data-testid="stHeader"], div[data-testid="stToolbar"], section[data-testid="stSidebar"], footer {
-        display:none !important;
-    }
-    html, body, [data-testid="stAppViewContainer"], .stApp, [data-testid="stAppViewContainer"] > .main, .main {
-        height:100dvh !important;
-        min-height:100dvh !important;
-        overflow:hidden !important;
-        background:
-            radial-gradient(circle at 12% 10%, rgba(105,150,255,0.18) 0%, rgba(105,150,255,0) 28%),
-            radial-gradient(circle at 88% 14%, rgba(18,92,205,0.12) 0%, rgba(18,92,205,0) 28%),
-            linear-gradient(180deg, #eef3fb 0%, #e7edf7 100%) !important;
-    }
-    .block-container {
-        max-width:1380px !important;
-        padding:12px !important;
-        height:100dvh !important;
-        min-height:100dvh !important;
-        display:flex !important;
-        align-items:center !important;
-        justify-content:center !important;
-        overflow:hidden !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] {
-        width:100% !important;
-        max-width:1340px !important;
-        height:min(620px, calc(100dvh - 24px)) !important;
-        min-height:min(620px, calc(100dvh - 24px)) !important;
-        max-height:min(620px, calc(100dvh - 24px)) !important;
-        gap:0 !important;
-        align-items:stretch !important;
-        background:rgba(255,255,255,0.985) !important;
-        border:1px solid rgba(19,56,104,0.10) !important;
-        border-radius:28px !important;
-        overflow:hidden !important;
-        box-shadow:0 24px 64px rgba(15, 23, 42, 0.12) !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        height:100% !important;
-        min-height:100% !important;
-        max-height:100% !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] {
-        height:100% !important;
-        min-height:100% !important;
-        max-height:100% !important;
-        gap:0 !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"] > div {
-        width:100% !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
-        padding:24px 28px !important;
-        display:flex !important;
-        flex-direction:column !important;
-        justify-content:center !important;
-        align-items:center !important;
-        background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .element-container,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stMarkdown"],
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stMarkdownContainer"] {
-        width:100% !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {
-        padding:0 !important;
-        display:flex !important;
-        align-items:stretch !important;
-        justify-content:stretch !important;
-        background:#0b2e69 !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] > div,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"],
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdownContainer"] {
-        height:100% !important;
-        min-height:100% !important;
-        max-height:100% !important;
-        margin:0 !important;
-    }
-    .segav-login-intro {
-        width:100%;
-        max-width:520px;
-        margin:0 auto 14px auto;
-        text-align:center;
-    }
-    .segav-login-kicker {
-        display:inline-flex;
-        align-items:center;
-        gap:10px;
-        padding:8px 14px;
-        border-radius:999px;
-        background:#eaf2ff;
-        border:1px solid #d7e4f7;
-        color:#0f4ea8;
-        font-size:11px;
-        font-weight:800;
-        letter-spacing:0.13em;
-        text-transform:uppercase;
-    }
-    .segav-login-kicker::before {
-        content:"";
-        width:8px;
-        height:8px;
-        border-radius:999px;
-        background:#1fc66e;
-        box-shadow:0 0 0 5px rgba(31,198,110,0.14);
-    }
-    .segav-login-title {
-        margin:16px auto 10px auto;
-        max-width:480px;
-        font-size:clamp(24px, 2.3vw, 40px);
-        line-height:1.08;
-        letter-spacing:-0.05em;
-        color:#172d4d;
-        font-weight:900;
-    }
-    .segav-login-text {
-        margin:0 auto;
-        max-width:430px;
-        color:#627691;
-        font-size:14px;
-        line-height:1.55;
-    }
-    .segav-login-form {
-        width:100% !important;
-        max-width:500px !important;
-        margin:0 auto !important;
-        padding:20px 22px 18px 22px !important;
-        border-radius:24px !important;
-        border:1px solid #d9e5f2 !important;
-        background:rgba(255,255,255,0.995) !important;
-        box-shadow:0 16px 32px rgba(15,23,42,0.07) !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] {
-        width:100% !important;
-        max-width:500px !important;
-        margin:0 auto !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stForm"] > form {
-        padding:0 !important;
-        border:none !important;
-        box-shadow:none !important;
-        background:transparent !important;
-    }
-    .segav-login-brand {
-        display:flex;
-        align-items:center;
-        gap:12px;
-        margin:0 0 14px 0;
-    }
-    .segav-login-brand img { width:60px; height:auto; display:block; object-fit:contain; }
-    .segav-login-brand-fallback { font-size:30px; font-weight:900; color:#0f58b7; letter-spacing:-0.05em; }
-    .segav-login-brand strong { display:block; font-size:19px; line-height:1.05; color:#153761; font-weight:900; letter-spacing:-0.04em; }
-    .segav-login-brand span { display:block; margin-top:4px; font-size:11px; line-height:1.45; color:#6d829d; }
-    .segav-login-head {
-        text-align:left;
-        margin:0 0 12px 0;
-    }
-    .segav-login-head h3 { margin:0; font-size:22px; line-height:1.05; color:#183153; font-weight:900; letter-spacing:-0.03em; }
-    .segav-login-head p { margin:5px 0 0 0; font-size:12px; line-height:1.45; color:#778aa3; }
-    .segav-login-label { margin:0 0 6px 0; font-size:12px; color:#1a3357; font-weight:800; }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInput"] { margin:0 0 10px 0 !important; }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] {
-        border:1px solid #d4deea !important;
-        border-radius:14px !important;
-        min-height:46px !important;
-        background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
-        box-shadow:none !important;
-        transition:border-color .18s ease, box-shadow .18s ease;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"]:focus-within {
-        border-color:#0f60d2 !important;
-        box-shadow:0 0 0 4px rgba(15,96,210,0.12) !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] input {
-        min-height:46px !important;
-        height:46px !important;
-        padding:0 14px !important;
-        color:#122b4a !important;
-        font-size:14px !important;
-        background:transparent !important;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stTextInputRootElement"] input::placeholder { color:#8a9aae !important; }
-    .segav-login-inline {
-        display:flex;
-        justify-content:flex-end;
-        margin:0 0 12px 0;
-    }
-    .segav-login-inline span {
-        color:#0f5fcf;
-        font-size:12px;
-        font-weight:700;
-    }
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child .stFormSubmitButton > button,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child div[data-testid="stFormSubmitButton"] > button,
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primaryFormSubmit"],
-    .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child button[kind="primary"] {
-        min-height:48px !important;
-        height:48px !important;
-        border:none !important;
-        border-radius:14px !important;
-        background:linear-gradient(180deg, #0f6ae0 0%, #0d57bb 100%) !important;
-        color:#ffffff !important;
-        font-size:15px !important;
-        font-weight:800 !important;
-        box-shadow:0 14px 28px rgba(13,87,187,0.22) !important;
-    }
-    .segav-login-hero {
-        width:100%;
-        height:100%;
-        min-height:100%;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        padding:34px;
-        background:__HERO_BG__;
-        background-size:cover !important;
-        background-position:center !important;
-        background-repeat:no-repeat !important;
-        position:relative;
-        overflow:hidden;
-    }
-    .segav-login-hero::before {
-        content:"";
-        position:absolute;
-        inset:0;
-        background:linear-gradient(180deg, rgba(7,18,44,0.04) 0%, rgba(7,18,44,0.14) 100%);
-    }
-    .segav-login-hero-content {
-        position:relative;
-        z-index:1;
-        width:100%;
-        max-width:560px;
-        text-align:center;
-        color:#ffffff;
-        display:flex;
-        flex-direction:column;
-        align-items:center;
-        justify-content:center;
-        gap:18px;
-    }
-    .segav-login-hero-badge {
-        display:inline-flex;
-        align-items:center;
-        justify-content:center;
-        padding:10px 18px;
-        border-radius:999px;
-        background:rgba(255,255,255,0.14);
-        border:1px solid rgba(255,255,255,0.24);
-        backdrop-filter:blur(12px);
-        color:#f7fbff !important;
-        font-size:11px;
-        font-weight:800;
-        letter-spacing:0.12em;
-        text-transform:uppercase;
-    }
-    .segav-login-hero-title {
-        margin:0;
-        font-size:clamp(28px, 2.2vw, 42px);
-        line-height:1.05;
-        letter-spacing:-0.05em;
-        font-weight:900;
-        color:#ffffff !important;
-        text-shadow:0 10px 24px rgba(3,18,48,0.28);
-    }
-    .segav-login-hero-text {
-        margin:0;
-        max-width:520px;
-        font-size:15px;
-        line-height:1.55;
-        color:rgba(240,247,255,0.97) !important;
-    }
-    .segav-login-hero-strip { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px; }
-    .segav-login-hero-pill {
-        padding:10px 15px;
-        border-radius:999px;
-        background:rgba(255,255,255,0.16);
-        border:1px solid rgba(255,255,255,0.22);
-        color:#ffffff !important;
-        font-size:12px;
-        font-weight:700;
-        backdrop-filter:blur(10px);
-    }
-    @media (max-width: 1100px) {
-        .block-container > div[data-testid="stHorizontalBlock"] {
-            height:min(590px, calc(100dvh - 20px)) !important;
-            min-height:min(590px, calc(100dvh - 20px)) !important;
-            max-height:min(590px, calc(100dvh - 20px)) !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
-            padding:22px 22px !important;
-        }
-        .segav-login-title { font-size:clamp(22px, 2.1vw, 34px); }
-        .segav-login-hero-title { font-size:clamp(26px, 2.1vw, 36px); }
-    }
-    @media (max-width: 920px) {
-        html, body, [data-testid="stAppViewContainer"], .stApp, [data-testid="stAppViewContainer"] > .main, .main {
-            height:auto !important;
-            min-height:100vh !important;
-            overflow:auto !important;
-        }
-        .block-container {
-            height:auto !important;
-            min-height:100vh !important;
-            overflow:visible !important;
-            padding:12px !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] {
-            height:auto !important;
-            min-height:0 !important;
-            max-height:none !important;
-            flex-direction:column !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"],
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stVerticalBlock"],
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child .element-container,
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdown"],
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child div[data-testid="stMarkdownContainer"] {
-            height:auto !important;
-            min-height:0 !important;
-            max-height:none !important;
-        }
-        .block-container > div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child > div[data-testid="stVerticalBlock"] {
-            padding:20px 18px !important;
-        }
-        .segav-login-hero {
-            min-height:300px;
-            height:300px;
-            padding:26px 20px;
-        }
-        .segav-login-title { font-size:clamp(24px, 8vw, 34px); }
-        .segav-login-hero-title { font-size:clamp(24px, 8vw, 34px); }
-    }
-    </style>
-    """.replace("__HERO_BG__", hero_background)
-    st.markdown(css, unsafe_allow_html=True)
+    with left_col:
+        st.markdown('<div class="segav-login-left"><div class="segav-login-card">', unsafe_allow_html=True)
+        st.markdown('<span class="segav-chip">SEGAV ERP · Acceso seguro</span>', unsafe_allow_html=True)
+        st.markdown('<div class="segav-login-title">Iniciar sesión</div>', unsafe_allow_html=True)
+        st.markdown('<div class="segav-login-sub">Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.</div>', unsafe_allow_html=True)
 
-    ensure_users_table()
-    ensure_superadmin_exists()
+        ensure_users_table()
+        ensure_superadmin_exists()
 
-    left, right = st.columns([4.85, 5.15], gap="small")
-
-    with left:
-        st.markdown(
-            """
-            <div class="segav-login-intro">
-                <div class="segav-login-kicker">ERP Multiempresa · SEGAV</div>
-                <h1 class="segav-login-title">Acceso ejecutivo en una sola pantalla.</h1>
-                <p class="segav-login-text">Ingreso centralizado para operar el ERP con una experiencia limpia, estable y lista para uso corporativo.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        message_slot = st.empty()
+        if users_count() == 0:
+            DEFAULT_ADMIN_USER = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+            DEFAULT_ADMIN_PASS = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            try:
+                salt_b64, h_b64 = hash_password(DEFAULT_ADMIN_PASS)
+                perms_json = json.dumps(SUPERADMIN_PERMS)
+                execute(
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
+                    (DEFAULT_ADMIN_USER, salt_b64, h_b64, "SUPERADMIN", perms_json),
+                )
+                auto_backup_db("users_seed_default_superadmin")
+            except Exception:
+                pass
 
         with st.form("form_login"):
-            if logo_b64:
-                st.markdown(
-                    f"""
-                    <div class="segav-login-brand">
-                        <img alt="SEGAV ERP" src="data:image/png;base64,{logo_b64}">
-                        <div>
-                            <strong>SEGAV ERP</strong>
-                            <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    """
-                    <div class="segav-login-brand">
-                        <div class="segav-login-brand-fallback">SEGAV</div>
-                        <div>
-                            <strong>SEGAV ERP</strong>
-                            <span>Acceso principal para SuperAdmin, administradores y responsables de empresa.</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            st.markdown(
-                """
-                <div class="segav-login-head">
-                    <h3>Iniciar sesión</h3>
-                    <p>Ingrese sus credenciales para continuar.</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown('<p class="segav-login-label">Usuario</p>', unsafe_allow_html=True)
-            username = st.text_input(
-                "Usuario",
-                label_visibility="collapsed",
-                placeholder="Ingrese su usuario",
-                key="login_username_clean",
-            )
-            st.markdown('<p class="segav-login-label">Contraseña</p>', unsafe_allow_html=True)
-            password = st.text_input(
-                "Contraseña",
-                type="password",
-                label_visibility="collapsed",
-                placeholder="Ingrese su contraseña",
-                key="login_password_clean",
-            )
-            st.markdown('<div class="segav-login-inline"><span>¿Olvidó su contraseña?</span></div>', unsafe_allow_html=True)
-            ok = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            username = st.text_input("Usuario", placeholder="ej: a.garcia")
+            password = st.text_input("Contraseña", type="password")
+            ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
 
-    with right:
-        st.markdown(
-            """
-            <div class="segav-login-hero" aria-hidden="true">
-                <div class="segav-login-hero-content">
-                    <div class="segav-login-hero-badge">Seguridad · Cumplimiento · Operación</div>
-                    <h2 class="segav-login-hero-title">SEGAV ERP Multiempresa</h2>
-                    <p class="segav-login-hero-text">Plataforma preparada para operar múltiples empresas con una portada visual sólida, ordenada y lista para presentación comercial.</p>
-                    <div class="segav-login-hero-strip">
-                        <div class="segav-login-hero-pill">Documentos</div>
-                        <div class="segav-login-hero-pill">SGSST</div>
-                        <div class="segav-login-hero-pill">Multiempresa</div>
-                    </div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    login_message = None
-    if ok:
-        u = (username or "").strip()
-        if not u or not password:
-            login_message = "Usuario y contraseña son obligatorios."
-        else:
+        if ok:
+            u = (username or "").strip()
+            if not u or not password:
+                st.error("Usuario y contraseña son obligatorios.")
+                st.stop()
             df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
             if df.empty:
-                login_message = "Usuario no existe o está desactivado."
-            else:
-                row = df.iloc[0].to_dict()
-                if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
-                    login_message = "Contraseña incorrecta."
-                else:
-                    auth_set_session(row)
-                    st.rerun()
+                st.error("Usuario no existe o está desactivado.")
+                st.stop()
+            row = df.iloc[0].to_dict()
+            if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
+                st.error("Contraseña incorrecta.")
+                st.stop()
+            auth_set_session(row)
+            st.success("Ingreso exitoso.")
+            st.rerun()
 
-    if login_message:
-        message_slot.error(login_message)
+        st.markdown('<div class="segav-logo-wrap">', unsafe_allow_html=True)
+        render_brand_logo(width=140)
+        st.markdown('<div class="segav-logo-note">SEGAV ERP</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="segav-footnote">Si olvidaste tu contraseña, un administrador puede restablecerla desde Usuarios.</div>', unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)
+
+    with right_col:
+        panel_bytes = get_login_panel_approved_bytes()
+        st.markdown('<div class="segav-login-right"><div class="segav-login-panel">', unsafe_allow_html=True)
+        if panel_bytes:
+            panel_b64 = _b64e(panel_bytes)
+            st.markdown(
+                f'<img alt="SEGAV ERP Login Panel" src="data:image/png;base64,{panel_b64}">',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;">SEGAV ERP</div>', unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+# ----------------------------
+# Init
+# ----------------------------
+bootstrap_app_or_stop()
+
+inject_css()
+
+def _record_soft_error(context: str, exc: Exception | None = None):
+    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
+    try:
+        logs = st.session_state.setdefault("soft_errors", [])
+        msg = str(exc).strip() if exc is not None else ""
+        logs.append({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "context": str(context or "").strip(),
+            "message": msg[:300],
+        })
+        # evita crecimiento infinito
+        if len(logs) > 30:
+            del logs[:-30]
+    except Exception:
+        pass
 
 
+# ----------------------------
+# Auth gate
+# ----------------------------
+if current_user() is None:
+    auth_gate_ui()
+
+
+# ----------------------------
 # Sidebar navigation
 # ----------------------------
 PAGES = [
@@ -4198,6 +3907,7 @@ if is_superadmin():
 if has_perm("manage_users"):
     VISIBLE_PAGES.append("Admin Usuarios")
 
+
 # Aplica navegación solicitada por botones (antes de crear el widget del sidebar)
 if st.session_state.get("nav_request") is not None:
     _req = st.session_state.get("nav_request")
@@ -4212,9 +3922,9 @@ if st.session_state.get("nav_request") is not None:
 if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = "Dashboard"
 
+
 if "nav_page" not in st.session_state:
     st.session_state["nav_page"] = "Dashboard"
-
 # Si quedó algo inválido tras login/permisos, fuerza el primero visible
 if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
@@ -6301,7 +6011,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, segav_template_payload=segav_template_payload, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
 
 
 def page_superadmin_empresas():
