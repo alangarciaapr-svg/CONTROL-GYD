@@ -3722,277 +3722,476 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Login corporativo — tarjeta centrada, idéntica al diseño de referencia."""
+    """Login profesional — UI HTML/CSS/JS completa, form Streamlit oculto como backend."""
 
+    # ── Recursos ─────────────────────────────────────────────────────────────
     panel_bytes = get_login_panel_approved_bytes()
-    panel_src = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
-    logo_bytes = get_login_logo_bytes()
-    logo_src = f"data:image/png;base64,{_b64e(logo_bytes)}" if logo_bytes else ""
+    panel_src   = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
+    logo_bytes  = get_login_logo_bytes()
+    logo_src    = f"data:image/png;base64,{_b64e(logo_bytes)}" if logo_bytes else ""
 
-    # ── DB bootstrap silencioso ─────────────────────────────────────────────
+    # ── DB bootstrap silencioso ───────────────────────────────────────────────
     ensure_users_table()
     ensure_superadmin_exists()
     if users_count() == 0:
         try:
-            _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-            _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            _u  = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+            _p  = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
             sb64, hb64 = hash_password(_p)
             execute(
                 "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active)"
                 " VALUES(?,?,?,?,?,1)",
                 (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
             )
-            auto_backup_db("users_seed_default_superadmin")
         except Exception:
             pass
 
-    # ── CSS ─────────────────────────────────────────────────────────────────
-    st.markdown("""
-<style>
-/* Ocultar todo el chrome de Streamlit */
-header[data-testid="stHeader"], div[data-testid="stToolbar"],
-section[data-testid="stSidebar"], [data-testid="stDecoration"],
-footer, #MainMenu { display:none !important; }
+    # ── Form oculto de Streamlit (backend de auth) — fuera de la vista ───────
+    with st.form("_login_hidden", clear_on_submit=False):
+        _uname = st.text_input("u", key="_lgu", label_visibility="collapsed")
+        _passw = st.text_input("p", key="_lgp", type="password", label_visibility="collapsed")
+        _submit = st.form_submit_button("ok", use_container_width=False)
 
-/* Fondo gris y sin scroll */
-html, body {
-    background: #dde3ec !important;
-    margin: 0; padding: 0;
-    min-height: 100vh;
-}
-.stApp, [data-testid="stAppViewContainer"] {
-    background: #dde3ec !important;
-    min-height: 100vh;
-}
-.main .block-container,
-[data-testid="stMainBlockContainer"] {
-    padding: 0 !important; margin: 0 !important;
-    max-width: none !important;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
+    # ── Autenticación ─────────────────────────────────────────────────────────
+    if _submit:
+        u = (_uname or "").strip()
+        if not u or not _passw:
+            st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
+        else:
+            df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+            if df is None or df.empty:
+                st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
+            else:
+                row = df.iloc[0].to_dict()
+                if not verify_password(_passw, row["salt_b64"], row["pass_hash_b64"]):
+                    st.session_state["_lg_err"] = "Contraseña incorrecta."
+                else:
+                    st.session_state.pop("_lg_err", None)
+                    auth_set_session(row)
+                    try:
+                        audit_log("LOGIN", "users", f"Login exitoso: {u}")
+                    except Exception:
+                        pass
+                    st.rerun()
 
-/* ── TARJETA PRINCIPAL ── */
-.sgv-card-wrap {
-    display: flex;
-    width: min(1100px, 96vw);
-    min-height: min(620px, 90vh);
-    border-radius: 18px;
-    overflow: hidden;
-    box-shadow: 0 24px 72px rgba(2,8,23,.22);
-    background: #fff;
-    margin: auto;
-}
-
-/* Lado izquierdo — blanco */
-.sgv-left {
-    flex: 0 0 44%;
-    background: #fff;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 48px 40px;
-    box-sizing: border-box;
-}
-.sgv-left-inner { width: 100%; max-width: 360px; }
-
-/* Título */
-.sgv-login-h1 {
-    font-size: 26px; font-weight: 800;
-    color: #0f172a; text-align: center;
-    margin: 0 0 28px 0;
-}
-
-/* Labels de inputs */
-.sgv-label {
-    font-size: 13px; font-weight: 700;
-    color: #1e293b; margin-bottom: 6px; display: block;
-}
-
-/* Input con ícono */
-.sgv-input-wrap {
-    position: relative; margin-bottom: 18px;
-}
-.sgv-input-wrap svg {
-    position: absolute; left: 12px; top: 50%;
-    transform: translateY(-50%);
-    width: 18px; height: 18px;
-    color: #94a3b8; pointer-events: none;
-}
-.sgv-input-wrap input {
-    width: 100%; box-sizing: border-box;
-    padding: 11px 14px 11px 40px;
-    border: 1.5px solid #e2e8f0;
-    border-radius: 10px;
-    font-size: 14px; color: #0f172a;
-    outline: none; background: #f8fafc;
-    transition: border-color .15s;
-}
-.sgv-input-wrap input:focus { border-color: #2563eb; background: #fff; }
-.sgv-input-wrap input::placeholder { color: #94a3b8; }
-
-/* Link olvidé contraseña */
-.sgv-forgot {
-    display: block; text-align: center;
-    font-size: 12.5px; color: #2563eb;
-    text-decoration: none; margin-bottom: 16px;
-    cursor: default; opacity: .8;
-}
-
-/* Botón ingresar */
-.sgv-btn {
-    width: 100%; padding: 13px;
-    background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
-    color: #fff; border: none; border-radius: 10px;
-    font-size: 15px; font-weight: 700;
-    cursor: pointer; letter-spacing: .02em;
-    box-shadow: 0 4px 14px rgba(37,99,235,.35);
-    transition: opacity .15s;
-    margin-bottom: 28px;
-}
-.sgv-btn:hover { opacity: .93; }
-
-/* Logo y nombre */
-.sgv-logo-block {
-    display: flex; flex-direction: column;
-    align-items: center; gap: 8px;
-}
-.sgv-logo-block img { width: 110px; height: auto; }
-.sgv-brand-line {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 14px; font-weight: 800;
-    color: #1e3a5f; letter-spacing: .08em;
-}
-.sgv-brand-line::before,
-.sgv-brand-line::after {
-    content: ""; display: block;
-    width: 28px; height: 1.5px; background: #1e3a5f;
-}
-
-/* Lado derecho — imagen */
-.sgv-right {
-    flex: 1;
-    background: linear-gradient(160deg,#0a2240 0%,#1a4b7a 100%);
-    position: relative; overflow: hidden;
-}
-.sgv-right img {
-    width: 100%; height: 100%;
-    object-fit: cover; display: block;
-}
-
-/* ── Streamlit: ocultar widgets del form debajo de la tarjeta ── */
-[data-testid="stHorizontalBlock"],
-[data-testid="stVerticalBlock"] > div > [data-testid="stForm"],
-[data-testid="stVerticalBlock"] > div > div[data-testid="stText"],
-[data-testid="element-container"]:has([data-testid="stForm"]) {
-    visibility: hidden !important;
-    height: 0 !important; overflow: hidden !important;
-    position: absolute !important;
-    pointer-events: none !important;
-}
-
-/* Feedback de error de Streamlit — VISIBLE */
-[data-testid="stAlert"] {
-    visibility: visible !important;
-    height: auto !important;
-    position: static !important;
-    margin: 8px auto !important;
-    max-width: min(1100px, 96vw) !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-    # Panel derecho HTML
-    right_content = (
-        f'<img src="{panel_src}" alt="SEGAV ERP">'
-        if panel_src else
-        '<div style="height:100%;display:flex;flex-direction:column;align-items:center;'
-        'justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;gap:14px;">'
-        '<span style="font-size:52px">🏗️</span>SEGAV ERP</div>'
+    err_msg  = st.session_state.get("_lg_err", "")
+    err_html = (
+        f'<div class="sgv-error"><svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">'
+        f'<path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>'
+        f'</svg>{err_msg}</div>'
+        if err_msg else ""
     )
 
-    logo_img = f'<img src="{logo_src}" alt="SEGAV">' if logo_src else ""
+    # ── Imagen de panel ────────────────────────────────────────────────────────
+    panel_html = (
+        f'<img src="{panel_src}" alt="SEGAV ERP Platform" class="rp-img">'
+        if panel_src else
+        '<div class="rp-fallback"><span>🏗️</span><span>SEGAV ERP</span></div>'
+    )
+    logo_html = (
+        f'<img src="{logo_src}" alt="SEGAV" class="brand-logo">'
+        if logo_src else
+        '<div class="brand-logo-text">SEGAV</div>'
+    )
 
-    # Formulario HTML puro (manejado con JS → session_state vía query params no disponible,
-    # así que usamos un form oculto de Streamlit para capturar los valores)
     st.markdown(f"""
-<div class="sgv-card-wrap">
-  <div class="sgv-left">
-    <div class="sgv-left-inner">
-      <h1 class="sgv-login-h1">Acceso al Sistema</h1>
+<style>
+/* HIDE STREAMLIT CHROME */
+header[data-testid="stHeader"], div[data-testid="stToolbar"],
+section[data-testid="stSidebar"], [data-testid="stDecoration"],
+#MainMenu, footer {{ display:none !important; }}
 
-      <label class="sgv-label" for="sgv_user_disp">Usuario</label>
-      <div class="sgv-input-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-        </svg>
-        <input id="sgv_user_disp" type="text"
-               placeholder="Ingrese su usuario"
-               oninput="document.getElementById('sgv_user_hidden').value=this.value">
+/* PAGE BASE */
+html, body {{
+    margin:0; padding:0;
+    background:#0d1b2e !important;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    overflow:hidden; height:100vh;
+}}
+.stApp, [data-testid="stAppViewContainer"] {{
+    background:#0d1b2e !important;
+    overflow:hidden !important; height:100vh !important;
+}}
+.main, [data-testid="stMain"],
+.main .block-container,
+[data-testid="stMainBlockContainer"] {{
+    padding:0 !important; margin:0 !important;
+    max-width:none !important; background:transparent !important;
+}}
+
+/* HIDE STREAMLIT FORM VISUALLY */
+[data-testid="stForm"],
+[data-testid="stFormSubmitButton"],
+[data-testid="stTextInput"],
+[data-testid="stVerticalBlock"],
+[data-testid="element-container"] {{
+    height:0 !important; overflow:hidden !important;
+    position:absolute !important; opacity:0 !important;
+    pointer-events:none !important;
+}}
+
+/* FULL-SCREEN WRAPPER */
+#sgv-root {{
+    position:fixed; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    background:#0d1b2e; overflow:hidden; z-index:1000;
+}}
+
+/* ANIMATED ORBS */
+.sgv-orb {{
+    position:absolute; border-radius:50%;
+    filter:blur(90px); pointer-events:none;
+}}
+.sgv-orb-1 {{
+    width:520px; height:520px;
+    background:radial-gradient(circle,rgba(37,99,235,.22) 0%,transparent 70%);
+    top:-140px; left:-120px;
+    animation:sgv-orb 9s ease-in-out infinite;
+}}
+.sgv-orb-2 {{
+    width:420px; height:420px;
+    background:radial-gradient(circle,rgba(99,102,241,.18) 0%,transparent 70%);
+    bottom:-100px; right:28%;
+    animation:sgv-orb 13s ease-in-out infinite reverse;
+}}
+.sgv-orb-3 {{
+    width:300px; height:300px;
+    background:radial-gradient(circle,rgba(16,185,129,.12) 0%,transparent 70%);
+    top:40%; right:-60px;
+    animation:sgv-orb 11s ease-in-out infinite 2s;
+}}
+@keyframes sgv-orb {{
+    0%,100% {{ transform:scale(1) translate(0,0); }}
+    50%     {{ transform:scale(1.18) translate(18px,-18px); }}
+}}
+
+/* PARTICLES */
+.sgv-pt {{
+    position:absolute; border-radius:50%;
+    background:rgba(59,130,246,.14);
+    animation:sgv-float linear infinite;
+}}
+@keyframes sgv-float {{
+    0%   {{ transform:translateY(110vh) scale(.4); opacity:0; }}
+    10%  {{ opacity:1; }}
+    90%  {{ opacity:.5; }}
+    100% {{ transform:translateY(-10vh) scale(1.1); opacity:0; }}
+}}
+
+/* MAIN CARD */
+#sgv-card {{
+    position:relative; z-index:10;
+    display:flex;
+    width:min(980px,95vw);
+    min-height:min(580px,88vh);
+    border-radius:24px; overflow:hidden;
+    box-shadow:
+        0 0 0 1px rgba(255,255,255,.07),
+        0 32px 80px rgba(0,0,0,.6),
+        0 8px 24px rgba(0,0,0,.4);
+    animation:sgv-in .55s cubic-bezier(.22,.68,0,1.15) both;
+}}
+@keyframes sgv-in {{
+    from {{ opacity:0; transform:scale(.93) translateY(22px); }}
+    to   {{ opacity:1; transform:scale(1) translateY(0); }}
+}}
+
+/* LEFT PANEL */
+#sgv-left {{
+    flex:0 0 43%;
+    background:linear-gradient(165deg,#0f2645 0%,#091c34 100%);
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    padding:44px 40px;
+    border-right:1px solid rgba(255,255,255,.06);
+}}
+
+/* Brand */
+.sgv-brand {{
+    display:flex; flex-direction:column;
+    align-items:center; gap:9px;
+    margin-bottom:28px;
+    animation:sgv-fd .5s .15s both;
+}}
+@keyframes sgv-fd {{ from{{opacity:0;transform:translateY(-12px)}} to{{opacity:1;transform:translateY(0)}} }}
+@keyframes sgv-fu {{ from{{opacity:0;transform:translateY(12px)}}  to{{opacity:1;transform:translateY(0)}} }}
+
+.sgv-logo {{ width:88px; height:auto; filter:drop-shadow(0 4px 18px rgba(59,130,246,.45)); }}
+.sgv-bname {{
+    font-size:21px; font-weight:800; color:#f1f5f9;
+    letter-spacing:.07em; text-shadow:0 2px 14px rgba(59,130,246,.3);
+}}
+.sgv-bsub {{
+    font-size:10.5px; color:rgba(148,163,184,.75);
+    letter-spacing:.14em; text-transform:uppercase; margin-top:-4px;
+}}
+
+/* Form */
+#sgv-fwrap {{ width:100%; animation:sgv-fu .5s .25s both; }}
+#sgv-fwrap h2 {{
+    font-size:19px; font-weight:700; color:#f1f5f9;
+    text-align:center; margin-bottom:20px;
+}}
+
+.sgv-fl {{ margin-bottom:13px; position:relative; }}
+.sgv-fl label {{
+    display:block; font-size:11px; font-weight:600;
+    color:rgba(148,163,184,.85); letter-spacing:.06em;
+    text-transform:uppercase; margin-bottom:5px; padding-left:2px;
+}}
+.sgv-ib {{ position:relative; }}
+.sgv-ib .sgv-ico {{
+    position:absolute; left:12px; top:50%; transform:translateY(-50%);
+    width:15px; height:15px; color:rgba(100,116,139,.65);
+    pointer-events:none; transition:color .2s;
+}}
+.sgv-inp {{
+    width:100%; padding:11px 38px 11px 38px;
+    background:rgba(255,255,255,.05);
+    border:1.5px solid rgba(255,255,255,.09);
+    border-radius:11px; color:#f1f5f9; font-size:14px;
+    outline:none; transition:all .2s; box-sizing:border-box;
+}}
+.sgv-inp::placeholder {{ color:rgba(148,163,184,.38); }}
+.sgv-inp:focus {{
+    border-color:rgba(59,130,246,.75);
+    background:rgba(255,255,255,.08);
+    box-shadow:0 0 0 3px rgba(59,130,246,.14);
+}}
+.sgv-ib:focus-within .sgv-ico {{ color:#60a5fa; }}
+
+/* Eye button */
+.sgv-eye {{
+    position:absolute; right:10px; top:50%; transform:translateY(-50%);
+    background:none; border:none; cursor:pointer;
+    color:rgba(100,116,139,.65); padding:3px; transition:color .2s;
+}}
+.sgv-eye:hover {{ color:#94a3b8; }}
+
+/* Error */
+#sgv-err {{
+    display:flex; align-items:center; gap:8px;
+    background:rgba(239,68,68,.12);
+    border:1px solid rgba(239,68,68,.28);
+    border-radius:10px; padding:9px 13px;
+    color:#fca5a5; font-size:12.5px; margin-bottom:12px;
+    animation:sgv-err-in .25s ease;
+}}
+@keyframes sgv-err-in {{ from{{opacity:0;transform:translateY(-6px)}} to{{opacity:1;transform:none}} }}
+
+/* Submit */
+#sgv-btn {{
+    width:100%; padding:13px;
+    background:linear-gradient(135deg,#1d4ed8 0%,#3b82f6 100%);
+    color:#fff; border:none; border-radius:11px;
+    font-size:15px; font-weight:700; cursor:pointer;
+    letter-spacing:.03em; margin-top:6px;
+    box-shadow:0 4px 22px rgba(59,130,246,.42);
+    transition:all .2s; position:relative; overflow:hidden;
+}}
+#sgv-btn::after {{
+    content:""; position:absolute; inset:0;
+    background:linear-gradient(135deg,rgba(255,255,255,0),rgba(255,255,255,.12));
+    opacity:0; transition:opacity .2s;
+}}
+#sgv-btn:hover {{ transform:translateY(-1px); box-shadow:0 6px 30px rgba(59,130,246,.55); }}
+#sgv-btn:hover::after {{ opacity:1; }}
+#sgv-btn:active {{ transform:translateY(0); }}
+#sgv-btn.loading {{ pointer-events:none; opacity:.75; }}
+.sgv-spin {{
+    display:none; width:16px; height:16px; margin:0 auto;
+    border:2px solid rgba(255,255,255,.3);
+    border-top-color:#fff; border-radius:50%;
+    animation:spin .65s linear infinite;
+}}
+@keyframes spin {{ to{{ transform:rotate(360deg); }} }}
+
+.sgv-hint {{
+    text-align:center; margin-top:14px;
+    font-size:11px; color:rgba(100,116,139,.65); line-height:1.5;
+}}
+
+/* RIGHT PANEL */
+#sgv-right {{
+    flex:1; position:relative; overflow:hidden;
+    background:linear-gradient(160deg,#0b2244,#1e4b8a);
+}}
+.rp-img {{
+    width:100%; height:100%; object-fit:cover; display:block;
+    transition:transform 14s ease;
+}}
+#sgv-right:hover .rp-img {{ transform:scale(1.05); }}
+.rp-ov {{
+    position:absolute; inset:0;
+    background:linear-gradient(160deg,rgba(11,34,68,.5) 0%,rgba(30,75,138,.1) 60%,transparent 100%);
+    pointer-events:none;
+}}
+.rp-badge {{
+    position:absolute; bottom:26px; left:24px; right:24px;
+    background:rgba(255,255,255,.07);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid rgba(255,255,255,.13);
+    border-radius:14px; padding:16px 18px;
+    animation:sgv-fu .6s .4s both;
+}}
+.rp-title {{ font-size:14px; font-weight:700; color:#f1f5f9; margin-bottom:3px; }}
+.rp-sub   {{ font-size:11.5px; color:rgba(203,213,225,.7); }}
+.rp-feats {{ display:flex; gap:8px; margin-top:11px; }}
+.rp-feat  {{
+    flex:1; background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:9px; padding:8px 6px; text-align:center;
+}}
+.rp-fi {{ font-size:17px; }}
+.rp-fl {{
+    font-size:9.5px; color:rgba(203,213,225,.78);
+    font-weight:600; text-transform:uppercase; letter-spacing:.05em; margin-top:3px;
+}}
+
+@media(max-width:680px) {{
+    #sgv-right {{ display:none; }}
+    #sgv-left  {{ flex:none; padding:36px 24px; }}
+}}
+</style>
+
+<div id="sgv-root">
+  <div class="sgv-orb sgv-orb-1"></div>
+  <div class="sgv-orb sgv-orb-2"></div>
+  <div class="sgv-orb sgv-orb-3"></div>
+  <div id="sgv-bg-pts"></div>
+
+  <div id="sgv-card">
+    <!-- LEFT -->
+    <div id="sgv-left">
+      <div class="sgv-brand">
+        {logo_html}
+        <div class="sgv-bname">SEGAV ERP</div>
+        <div class="sgv-bsub">Gestion &middot; Seguridad &middot; Cumplimiento</div>
       </div>
 
-      <label class="sgv-label" for="sgv_pass_disp">Contraseña</label>
-      <div class="sgv-input-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="11" width="18" height="11" rx="2"/>
-          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-        </svg>
-        <input id="sgv_pass_disp" type="password"
-               placeholder="Ingrese su contraseña"
-               oninput="document.getElementById('sgv_pass_hidden').value=this.value">
+      <div id="sgv-fwrap">
+        <h2>Iniciar sesion</h2>
+
+        <div id="sgv-err" style="{'display:flex' if err_msg else 'display:none'}">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="#fca5a5">
+            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+          </svg>
+          <span>{err_msg}</span>
+        </div>
+
+        <div class="sgv-fl">
+          <label>Usuario</label>
+          <div class="sgv-ib">
+            <svg class="sgv-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="12" cy="8" r="4"/>
+              <path d="M4 20c0-4 3.58-7 8-7s8 3 8 7"/>
+            </svg>
+            <input id="sgv_u" class="sgv-inp" type="text"
+                   placeholder="Ingresa tu usuario" autocomplete="username"
+                   value="{st.session_state.get('_lgu','')}">
+          </div>
+        </div>
+
+        <div class="sgv-fl">
+          <label>Contrasena</label>
+          <div class="sgv-ib">
+            <svg class="sgv-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="3" y="11" width="18" height="11" rx="2"/>
+              <path d="M7 11V7a5 5 0 0110 0v4"/>
+            </svg>
+            <input id="sgv_p" class="sgv-inp" type="password"
+                   placeholder="Ingresa tu contrasena" autocomplete="current-password">
+            <button class="sgv-eye" type="button" onclick="sgvEye()" title="Ver/ocultar">
+              <svg id="eye-off" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>
+              </svg>
+              <svg id="eye-on" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button id="sgv-btn" onclick="sgvLogin()">
+          <span id="sgv-btxt">Ingresar</span>
+          <div class="sgv-spin" id="sgv-spin"></div>
+        </button>
+        <div class="sgv-hint">Si olvidaste tu contrasena contacta al administrador.</div>
       </div>
+    </div>
 
-      <span class="sgv-forgot">¿Olvidó su contraseña? Contacte al administrador</span>
-
-      <button class="sgv-btn" onclick="
-        var u = document.getElementById('sgv_user_disp').value;
-        var p = document.getElementById('sgv_pass_disp').value;
-        var fu = document.getElementById('sgv_u_st');
-        var fp = document.getElementById('sgv_p_st');
-        if(fu && fp){{fu.value=u; fp.value=p;}}
-        var btn = document.querySelector('[data-testid=\\'stFormSubmitButton\\'] button');
-        if(btn) btn.click();
-      ">Ingresar</button>
-
-      <div class="sgv-logo-block">
-        {logo_img}
-        <span class="sgv-brand-line">SEGAV ERP</span>
+    <!-- RIGHT -->
+    <div id="sgv-right">
+      {panel_html}
+      <div class="rp-ov"></div>
+      <div class="rp-badge">
+        <div class="rp-title">Plataforma ERP Multiempresa</div>
+        <div class="rp-sub">Gestion Integral de Seguridad y Cumplimiento Normativo</div>
+        <div class="rp-feats">
+          <div class="rp-feat"><div class="rp-fi">&#x1F4CB;</div><div class="rp-fl">Docs</div></div>
+          <div class="rp-feat"><div class="rp-fi">&#x1F6E1;&#xFE0F;</div><div class="rp-fl">Prevencion</div></div>
+          <div class="rp-feat"><div class="rp-fi">&#x1F4CA;</div><div class="rp-fl">Dashboard</div></div>
+          <div class="rp-feat"><div class="rp-fi">&#x1F3E2;</div><div class="rp-fl">Empresas</div></div>
+        </div>
       </div>
     </div>
   </div>
-
-  <div class="sgv-right">{right_content}</div>
 </div>
+
+<script>
+(function(){{
+  // Particles
+  var bg=document.getElementById('sgv-bg-pts');
+  if(bg){{for(var i=0;i<16;i++){{
+    var p=document.createElement('div'); p.className='sgv-pt';
+    var s=3+Math.random()*16;
+    p.style.cssText='width:'+s+'px;height:'+s+'px;left:'+(Math.random()*100)+'%;animation-duration:'+(11+Math.random()*16)+'s;animation-delay:'+(Math.random()*10)+'s';
+    bg.appendChild(p);
+  }}}}
+
+  // Sync to Streamlit hidden inputs
+  function syncHidden(u,p){{
+    var doc=window.parent.document;
+    var inputs=doc.querySelectorAll('[data-testid="stTextInput"] input');
+    if(inputs.length>=1){{inputs[0].value=u;inputs[0].dispatchEvent(new Event('input',{{bubbles:true}}));}}
+    if(inputs.length>=2){{inputs[1].value=p;inputs[1].dispatchEvent(new Event('input',{{bubbles:true}}));}}
+  }}
+
+  window.sgvLogin=function(){{
+    var u=(document.getElementById('sgv_u')||{{}}).value||'';
+    var p=(document.getElementById('sgv_p')||{{}}).value||'';
+    u=u.trim();
+    var btn=document.getElementById('sgv-btn');
+    var btxt=document.getElementById('sgv-btxt');
+    var spin=document.getElementById('sgv-spin');
+    if(btn)btn.classList.add('loading');
+    if(btxt)btxt.style.display='none';
+    if(spin)spin.style.display='block';
+    syncHidden(u,p);
+    setTimeout(function(){{
+      var sb=window.parent.document.querySelector('[data-testid="stFormSubmitButton"] button');
+      if(sb){{sb.click();}}
+      else{{if(btn)btn.classList.remove('loading');if(btxt)btxt.style.display='';if(spin)spin.style.display='none';}}
+    }},80);
+  }};
+
+  window.sgvEye=function(){{
+    var i=document.getElementById('sgv_p');
+    var eo=document.getElementById('eye-off');
+    var en=document.getElementById('eye-on');
+    if(!i)return;
+    if(i.type==='password'){{i.type='text';if(eo)eo.style.display='none';if(en)en.style.display='';}}
+    else{{i.type='password';if(eo)eo.style.display='';if(en)en.style.display='none';}}
+  }};
+
+  var u=document.getElementById('sgv_u');
+  var p=document.getElementById('sgv_p');
+  if(u)u.addEventListener('keydown',function(e){{if(e.key==='Enter'){{e.preventDefault();if(p)p.focus();}}}});
+  if(p)p.addEventListener('keydown',function(e){{if(e.key==='Enter'){{e.preventDefault();window.sgvLogin();}}}});
+  setTimeout(function(){{if(u)u.focus();}},400);
+}})();
+</script>
 """, unsafe_allow_html=True)
-
-    # ── Formulario Streamlit OCULTO — captura valores y autentica ───────────
-    with st.form("form_login", clear_on_submit=False):
-        username = st.text_input("u", key="sgv_u_st", label_visibility="collapsed")
-        password = st.text_input("p", key="sgv_p_st", type="password", label_visibility="collapsed")
-        ok = st.form_submit_button("Ingresar", use_container_width=False)
-
-    if ok:
-        u = (username or "").strip()
-        if not u or not password:
-            st.error("Usuario y contraseña son obligatorios.")
-            st.stop()
-        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
-        if df is None or df.empty:
-            st.error("Usuario no existe o está desactivado.")
-            st.stop()
-        row = df.iloc[0].to_dict()
-        if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
-            st.error("Contraseña incorrecta.")
-            st.stop()
-        auth_set_session(row)
-        try:
-            audit_log("LOGIN", "users", f"Login exitoso: {u}")
-        except Exception:
-            pass
-        st.rerun()
 # ----------------------------
 # Init
 # ----------------------------
