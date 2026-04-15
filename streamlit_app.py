@@ -2667,21 +2667,37 @@ def ensure_segav_erp_tables():
             PRIMARY KEY (cliente_key, param_key)
         );
         """,
-        """
-        CREATE TABLE IF NOT EXISTS segav_audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cliente_key TEXT,
-            username TEXT NOT NULL,
-            accion TEXT NOT NULL,
-            entidad TEXT,
-            detalle TEXT,
-            ip TEXT,
-            created_at TEXT NOT NULL
-        );
-        """,
     ]
     for s in stmts:
         execute(s)
+
+    # audit_log: sintaxis diferente entre SQLite y Postgres
+    if DB_BACKEND == "postgres":
+        execute("""
+            CREATE TABLE IF NOT EXISTS segav_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                cliente_key TEXT,
+                username TEXT NOT NULL,
+                accion TEXT NOT NULL,
+                entidad TEXT,
+                detalle TEXT,
+                ip TEXT,
+                created_at TEXT NOT NULL
+            );
+        """)
+    else:
+        execute("""
+            CREATE TABLE IF NOT EXISTS segav_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cliente_key TEXT,
+                username TEXT NOT NULL,
+                accion TEXT NOT NULL,
+                entidad TEXT,
+                detalle TEXT,
+                ip TEXT,
+                created_at TEXT NOT NULL
+            );
+        """)
 
 
 def set_segav_erp_config_value(key: str, value: str):
