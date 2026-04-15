@@ -1152,6 +1152,51 @@ def format_rut_chileno(rut: str) -> str:
     return f"{grouped_rev[::-1]}-{dv}"
 
 
+def validate_rut_dv(rut: str) -> bool:
+    """Valida el dígito verificador de un RUT chileno. Retorna True si es válido."""
+    body, dv = _rut_parts(rut)
+    if not body or not dv:
+        return False
+    try:
+        n = int(body)
+    except ValueError:
+        return False
+    mult, total = 2, 0
+    while n:
+        total += (n % 10) * mult
+        n //= 10
+        mult = 2 if mult == 7 else mult + 1
+    expected = 11 - (total % 11)
+    if expected == 11:
+        expected_dv = "0"
+    elif expected == 10:
+        expected_dv = "k"
+    else:
+        expected_dv = str(expected)
+    return dv.lower() == expected_dv
+
+
+def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: str = ""):
+    """Registra una acción en el log de auditoría."""
+    try:
+        u = current_user()
+        username = u["username"] if u else "sistema"
+        ck = cliente_key or (current_segav_client_key() if u else "")
+        now = datetime.now().isoformat(timespec="seconds")
+        execute(
+            "INSERT INTO segav_audit_log(cliente_key,username,accion,entidad,detalle,created_at)"
+            " VALUES(?,?,?,?,?,?)",
+            (ck, username, str(accion)[:100], str(entidad)[:100], str(detalle)[:500], now),
+        )
+        # Conserva solo los últimos 2000 registros
+        execute(
+            "DELETE FROM segav_audit_log WHERE id NOT IN"
+            " (SELECT id FROM segav_audit_log ORDER BY id DESC LIMIT 2000)"
+        )
+    except Exception:
+        pass
+
+
 def clean_rut(rut: str) -> str:
     return format_rut_chileno(rut)
 
@@ -2622,6 +2667,18 @@ def ensure_segav_erp_tables():
             PRIMARY KEY (cliente_key, param_key)
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS segav_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_key TEXT,
+            username TEXT NOT NULL,
+            accion TEXT NOT NULL,
+            entidad TEXT,
+            detalle TEXT,
+            ip TEXT,
+            created_at TEXT NOT NULL
+        );
+        """,
     ]
     for s in stmts:
         execute(s)
@@ -3649,230 +3706,277 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso — una sola página, sin scroll, panel derecho completo."""
+    """Login corporativo — tarjeta centrada, idéntica al diseño de referencia."""
 
     panel_bytes = get_login_panel_approved_bytes()
     panel_src = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
     logo_bytes = get_login_logo_bytes()
     logo_src = f"data:image/png;base64,{_b64e(logo_bytes)}" if logo_bytes else ""
 
+    # ── DB bootstrap silencioso ─────────────────────────────────────────────
+    ensure_users_table()
+    ensure_superadmin_exists()
+    if users_count() == 0:
+        try:
+            _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+            _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            sb64, hb64 = hash_password(_p)
+            execute(
+                "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active)"
+                " VALUES(?,?,?,?,?,1)",
+                (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
+            )
+            auto_backup_db("users_seed_default_superadmin")
+        except Exception:
+            pass
+
+    # ── CSS ─────────────────────────────────────────────────────────────────
     st.markdown("""
 <style>
-/* ── Ocultar chrome de Streamlit ── */
-header[data-testid="stHeader"],
-div[data-testid="stToolbar"],
-section[data-testid="stSidebar"],
-[data-testid="stDecoration"],
-footer { display:none !important; }
+/* Ocultar todo el chrome de Streamlit */
+header[data-testid="stHeader"], div[data-testid="stToolbar"],
+section[data-testid="stSidebar"], [data-testid="stDecoration"],
+footer, #MainMenu { display:none !important; }
 
-/* ── Sin scroll en toda la app ── */
+/* Fondo gris y sin scroll */
 html, body {
-    height: 100vh !important; width: 100vw !important;
-    overflow: hidden !important;
-    margin: 0 !important; padding: 0 !important;
-    background: #eef2f7 !important;
+    background: #dde3ec !important;
+    margin: 0; padding: 0;
+    min-height: 100vh;
 }
 .stApp, [data-testid="stAppViewContainer"] {
-    height: 100vh !important; overflow: hidden !important;
-    background: #eef2f7 !important;
-}
-[data-testid="stMain"], .main {
-    height: 100vh !important; overflow: hidden !important;
-    padding: 0 !important;
+    background: #dde3ec !important;
+    min-height: 100vh;
 }
 .main .block-container,
 [data-testid="stMainBlockContainer"] {
     padding: 0 !important; margin: 0 !important;
     max-width: none !important;
-    height: 100vh !important; overflow: hidden !important;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
-/* ── Panel derecho FIXED — 58% derecha, pantalla completa ── */
-#sgv-panel {
-    position: fixed !important;
-    top: 0 !important; right: 0 !important;
-    width: 58% !important;
-    height: 100vh !important;
-    padding: 14px 14px 14px 0 !important;
-    box-sizing: border-box !important;
-    z-index: 9999 !important;
-    pointer-events: none !important;
-}
-#sgv-panel .inner {
-    width: 100% !important; height: 100% !important;
-    border-radius: 20px;
+/* ── TARJETA PRINCIPAL ── */
+.sgv-card-wrap {
+    display: flex;
+    width: min(1100px, 96vw);
+    min-height: min(620px, 90vh);
+    border-radius: 18px;
     overflow: hidden;
-    background: linear-gradient(140deg,#0a2240 0%,#1a4b7a 100%);
-    box-shadow: -4px 0 32px rgba(2,8,23,.20);
-}
-#sgv-panel .inner img {
-    width: 100% !important; height: 100% !important;
-    object-fit: cover !important;
-    object-position: center !important;
-    display: block !important;
+    box-shadow: 0 24px 72px rgba(2,8,23,.22);
+    background: #fff;
+    margin: auto;
 }
 
-/* ── Bloque de columnas Streamlit ── */
-[data-testid="stHorizontalBlock"] {
-    height: 100vh !important;
-    overflow: hidden !important;
-    gap: 0 !important;
-    align-items: stretch !important;
-    margin: 0 !important; padding: 0 !important;
+/* Lado izquierdo — blanco */
+.sgv-left {
+    flex: 0 0 44%;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 40px;
+    box-sizing: border-box;
 }
-/* Columna izquierda: ocupa 42% y centra verticalmente */
-[data-testid="stHorizontalBlock"] > div:first-child {
-    width: 42% !important;
-    min-width: 42% !important;
-    max-width: 42% !important;
-    height: 100vh !important;
-    overflow-y: auto !important;
-    overflow-x: hidden !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    padding: 28px 28px !important;
-    background: #eef2f7 !important;
-    box-sizing: border-box !important;
+.sgv-left-inner { width: 100%; max-width: 360px; }
+
+/* Título */
+.sgv-login-h1 {
+    font-size: 26px; font-weight: 800;
+    color: #0f172a; text-align: center;
+    margin: 0 0 28px 0;
 }
-/* Columna derecha: invisible (el panel real es fixed) */
-[data-testid="stHorizontalBlock"] > div:last-child {
+
+/* Labels de inputs */
+.sgv-label {
+    font-size: 13px; font-weight: 700;
+    color: #1e293b; margin-bottom: 6px; display: block;
+}
+
+/* Input con ícono */
+.sgv-input-wrap {
+    position: relative; margin-bottom: 18px;
+}
+.sgv-input-wrap svg {
+    position: absolute; left: 12px; top: 50%;
+    transform: translateY(-50%);
+    width: 18px; height: 18px;
+    color: #94a3b8; pointer-events: none;
+}
+.sgv-input-wrap input {
+    width: 100%; box-sizing: border-box;
+    padding: 11px 14px 11px 40px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 10px;
+    font-size: 14px; color: #0f172a;
+    outline: none; background: #f8fafc;
+    transition: border-color .15s;
+}
+.sgv-input-wrap input:focus { border-color: #2563eb; background: #fff; }
+.sgv-input-wrap input::placeholder { color: #94a3b8; }
+
+/* Link olvidé contraseña */
+.sgv-forgot {
+    display: block; text-align: center;
+    font-size: 12.5px; color: #2563eb;
+    text-decoration: none; margin-bottom: 16px;
+    cursor: default; opacity: .8;
+}
+
+/* Botón ingresar */
+.sgv-btn {
+    width: 100%; padding: 13px;
+    background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
+    color: #fff; border: none; border-radius: 10px;
+    font-size: 15px; font-weight: 700;
+    cursor: pointer; letter-spacing: .02em;
+    box-shadow: 0 4px 14px rgba(37,99,235,.35);
+    transition: opacity .15s;
+    margin-bottom: 28px;
+}
+.sgv-btn:hover { opacity: .93; }
+
+/* Logo y nombre */
+.sgv-logo-block {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+}
+.sgv-logo-block img { width: 110px; height: auto; }
+.sgv-brand-line {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 800;
+    color: #1e3a5f; letter-spacing: .08em;
+}
+.sgv-brand-line::before,
+.sgv-brand-line::after {
+    content: ""; display: block;
+    width: 28px; height: 1.5px; background: #1e3a5f;
+}
+
+/* Lado derecho — imagen */
+.sgv-right {
+    flex: 1;
+    background: linear-gradient(160deg,#0a2240 0%,#1a4b7a 100%);
+    position: relative; overflow: hidden;
+}
+.sgv-right img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+}
+
+/* ── Streamlit: ocultar widgets del form debajo de la tarjeta ── */
+[data-testid="stHorizontalBlock"],
+[data-testid="stVerticalBlock"] > div > [data-testid="stForm"],
+[data-testid="stVerticalBlock"] > div > div[data-testid="stText"],
+[data-testid="element-container"]:has([data-testid="stForm"]) {
     visibility: hidden !important;
+    height: 0 !important; overflow: hidden !important;
+    position: absolute !important;
     pointer-events: none !important;
 }
 
-/* ── Contenedor del contenido izquierdo ── */
-[data-testid="stHorizontalBlock"] > div:first-child > div {
-    width: 100% !important;
-    max-width: 400px !important;
+/* Feedback de error de Streamlit — VISIBLE */
+[data-testid="stAlert"] {
+    visibility: visible !important;
+    height: auto !important;
+    position: static !important;
+    margin: 8px auto !important;
+    max-width: min(1100px, 96vw) !important;
 }
-
-/* ── Chip ── */
-.sgv-chip {
-    display: inline-flex; align-items: center;
-    padding: 5px 14px; border-radius: 999px;
-    background: #dbeafe; color: #1d4ed8;
-    font-size: 11px; font-weight: 800;
-    letter-spacing: .05em; text-transform: uppercase;
-    margin-bottom: 4px;
-}
-
-/* ── Form inputs ── */
-[data-testid="stTextInputRootElement"] { border-radius: 10px !important; }
-div[data-testid="stFormSubmitButton"] > button {
-    min-height: 46px !important;
-    font-size: 15px !important;
-    font-weight: 700 !important;
-    border-radius: 10px !important;
-    width: 100% !important;
-    letter-spacing: .01em;
-}
-[data-testid="stForm"] {
-    border: none !important;
-    background: transparent !important;
-    padding: 0 !important; margin: 0 !important;
-}
-[data-testid="stForm"] > div:first-child {
-    border: none !important; padding: 0 !important;
-}
-
-/* ── Logo y hint ── */
-.sgv-logo-row {
-    display: flex; flex-direction: column;
-    align-items: center; gap: 4px;
-    margin-top: 14px;
-}
-.sgv-logo-row img { width: 88px; height: auto; }
-.sgv-logo-label {
-    color: #1e3a5f; font-size: 13px;
-    font-weight: 800; letter-spacing: .03em;
-    margin-top: 2px;
-}
-.sgv-hint {
-    margin-top: 6px; color: #94a3b8;
-    font-size: 10.5px; text-align: center; line-height: 1.4;
-}
-
-/* ── Eliminar espacio en blanco que Streamlit inyecta ── */
-[data-testid="stHorizontalBlock"] > div:first-child > div > div {
-    gap: 0.4rem !important;
-}
-.stMarkdown { margin-bottom: 0 !important; padding-bottom: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-    # Panel derecho: único markdown con todo el HTML (no se fragmenta)
-    rp_html = (
+    # Panel derecho HTML
+    right_content = (
         f'<img src="{panel_src}" alt="SEGAV ERP">'
         if panel_src else
         '<div style="height:100%;display:flex;flex-direction:column;align-items:center;'
         'justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;gap:14px;">'
-        '<span style="font-size:56px">🏗️</span>SEGAV ERP</div>'
-    )
-    st.markdown(
-        f'<div id="sgv-panel"><div class="inner">{rp_html}</div></div>',
-        unsafe_allow_html=True,
+        '<span style="font-size:52px">🏗️</span>SEGAV ERP</div>'
     )
 
-    # Columna izquierda (form) + columna derecha (placeholder invisible)
-    left, _ = st.columns([0.42, 0.58], gap="small")
+    logo_img = f'<img src="{logo_src}" alt="SEGAV">' if logo_src else ""
 
-    with left:
-        # ── DB init silencioso ────────────────────────────────────────────────
-        ensure_users_table()
-        ensure_superadmin_exists()
-        if users_count() == 0:
-            try:
-                _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-                _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
-                sb64, hb64 = hash_password(_p)
-                execute(
-                    "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active)"
-                    " VALUES(?,?,?,?,?,1)",
-                    (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
-                )
-                auto_backup_db("users_seed_default_superadmin")
-            except Exception:
-                pass
+    # Formulario HTML puro (manejado con JS → session_state vía query params no disponible,
+    # así que usamos un form oculto de Streamlit para capturar los valores)
+    st.markdown(f"""
+<div class="sgv-card-wrap">
+  <div class="sgv-left">
+    <div class="sgv-left-inner">
+      <h1 class="sgv-login-h1">Acceso al Sistema</h1>
 
-        # ── Chip + título + subtítulo ─────────────────────────────────────────
-        st.markdown('<span class="sgv-chip">SEGAV ERP · Acceso seguro</span>', unsafe_allow_html=True)
-        st.markdown("## Iniciar sesión")
-        st.caption("Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.")
+      <label class="sgv-label" for="sgv_user_disp">Usuario</label>
+      <div class="sgv-input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+        </svg>
+        <input id="sgv_user_disp" type="text"
+               placeholder="Ingrese su usuario"
+               oninput="document.getElementById('sgv_user_hidden').value=this.value">
+      </div>
 
-        # ── Formulario ────────────────────────────────────────────────────────
-        with st.form("form_login", clear_on_submit=False):
-            username = st.text_input("Usuario", placeholder="ej: a.garcia")
-            password = st.text_input("Contraseña", type="password")
-            ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
+      <label class="sgv-label" for="sgv_pass_disp">Contraseña</label>
+      <div class="sgv-input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        <input id="sgv_pass_disp" type="password"
+               placeholder="Ingrese su contraseña"
+               oninput="document.getElementById('sgv_pass_hidden').value=this.value">
+      </div>
 
-        # ── Logo + nombre ─────────────────────────────────────────────────────
-        logo_tag = f'<img src="{logo_src}" alt="SEGAV">' if logo_src else ""
-        st.markdown(
-            f'<div class="sgv-logo-row">{logo_tag}'
-            f'<span class="sgv-logo-label">SEGAV ERP</span></div>'
-            f'<div class="sgv-hint">Si olvidaste tu contraseña, un administrador'
-            f' puede restablecerla desde Usuarios.</div>',
-            unsafe_allow_html=True,
-        )
+      <span class="sgv-forgot">¿Olvidó su contraseña? Contacte al administrador</span>
 
-        # ── Autenticación ─────────────────────────────────────────────────────
-        if ok:
-            u = (username or "").strip()
-            if not u or not password:
-                st.error("Usuario y contraseña son obligatorios.")
-                st.stop()
-            df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
-            if df is None or df.empty:
-                st.error("Usuario no existe o está desactivado.")
-                st.stop()
-            row = df.iloc[0].to_dict()
-            if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
-                st.error("Contraseña incorrecta.")
-                st.stop()
-            auth_set_session(row)
-            st.rerun()
+      <button class="sgv-btn" onclick="
+        var u = document.getElementById('sgv_user_disp').value;
+        var p = document.getElementById('sgv_pass_disp').value;
+        var fu = document.getElementById('sgv_u_st');
+        var fp = document.getElementById('sgv_p_st');
+        if(fu && fp){{fu.value=u; fp.value=p;}}
+        var btn = document.querySelector('[data-testid=\\'stFormSubmitButton\\'] button');
+        if(btn) btn.click();
+      ">Ingresar</button>
+
+      <div class="sgv-logo-block">
+        {logo_img}
+        <span class="sgv-brand-line">SEGAV ERP</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="sgv-right">{right_content}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Formulario Streamlit OCULTO — captura valores y autentica ───────────
+    with st.form("form_login", clear_on_submit=False):
+        username = st.text_input("u", key="sgv_u_st", label_visibility="collapsed")
+        password = st.text_input("p", key="sgv_p_st", type="password", label_visibility="collapsed")
+        ok = st.form_submit_button("Ingresar", use_container_width=False)
+
+    if ok:
+        u = (username or "").strip()
+        if not u or not password:
+            st.error("Usuario y contraseña son obligatorios.")
+            st.stop()
+        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+        if df is None or df.empty:
+            st.error("Usuario no existe o está desactivado.")
+            st.stop()
+        row = df.iloc[0].to_dict()
+        if not verify_password(password, row["salt_b64"], row["pass_hash_b64"]):
+            st.error("Contraseña incorrecta.")
+            st.stop()
+        auth_set_session(row)
+        try:
+            audit_log("LOGIN", "users", f"Login exitoso: {u}")
+        except Exception:
+            pass
+        st.rerun()
 # ----------------------------
 # Init
 # ----------------------------
