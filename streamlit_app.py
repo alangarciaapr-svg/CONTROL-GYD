@@ -3649,7 +3649,7 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Pantalla de acceso — panel derecho fixed, columna izquierda con scroll libre."""
+    """Pantalla de acceso — una sola página, sin scroll, panel derecho completo."""
 
     panel_bytes = get_login_panel_approved_bytes()
     panel_src = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
@@ -3658,141 +3658,168 @@ def auth_gate_ui():
 
     st.markdown("""
 <style>
-/* Ocultar chrome de Streamlit */
+/* ── Ocultar chrome de Streamlit ── */
 header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 section[data-testid="stSidebar"],
-[data-testid="stDecoration"] { display:none !important; }
+[data-testid="stDecoration"],
+footer { display:none !important; }
 
-/* Fondo general */
-html, body { background:#f1f5f9 !important; margin:0; padding:0; }
-.stApp, [data-testid="stAppViewContainer"] { background:#f1f5f9 !important; }
-
-/* Quitar padding del contenedor principal */
+/* ── Sin scroll en toda la app ── */
+html, body {
+    height: 100vh !important; width: 100vw !important;
+    overflow: hidden !important;
+    margin: 0 !important; padding: 0 !important;
+    background: #eef2f7 !important;
+}
+.stApp, [data-testid="stAppViewContainer"] {
+    height: 100vh !important; overflow: hidden !important;
+    background: #eef2f7 !important;
+}
+[data-testid="stMain"], .main {
+    height: 100vh !important; overflow: hidden !important;
+    padding: 0 !important;
+}
 .main .block-container,
 [data-testid="stMainBlockContainer"] {
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
+    padding: 0 !important; margin: 0 !important;
     max-width: none !important;
+    height: 100vh !important; overflow: hidden !important;
 }
 
-/* ── PANEL DERECHO FIXED ── */
+/* ── Panel derecho FIXED — 58% derecha, pantalla completa ── */
 #sgv-panel {
-    position: fixed;
-    top: 0; right: 0;
-    width: 57%;
-    height: 100vh;
-    padding: 16px 16px 16px 0;
-    box-sizing: border-box;
-    z-index: 100;
-    pointer-events: none;
+    position: fixed !important;
+    top: 0 !important; right: 0 !important;
+    width: 58% !important;
+    height: 100vh !important;
+    padding: 14px 14px 14px 0 !important;
+    box-sizing: border-box !important;
+    z-index: 9999 !important;
+    pointer-events: none !important;
 }
 #sgv-panel .inner {
-    width: 100%; height: 100%;
-    border-radius: 22px;
+    width: 100% !important; height: 100% !important;
+    border-radius: 20px;
     overflow: hidden;
     background: linear-gradient(140deg,#0a2240 0%,#1a4b7a 100%);
-    box-shadow: -6px 0 40px rgba(2,8,23,.18);
+    box-shadow: -4px 0 32px rgba(2,8,23,.20);
 }
 #sgv-panel .inner img {
-    width:100%; height:100%;
-    object-fit:cover; display:block;
+    width: 100% !important; height: 100% !important;
+    object-fit: cover !important;
+    object-position: center !important;
+    display: block !important;
 }
 
-/* ── COLUMNA IZQUIERDA ── */
-/* El bloque horizontal de Streamlit */
+/* ── Bloque de columnas Streamlit ── */
 [data-testid="stHorizontalBlock"] {
+    height: 100vh !important;
+    overflow: hidden !important;
     gap: 0 !important;
-    align-items: flex-start !important;
-    min-height: 100vh;
+    align-items: stretch !important;
+    margin: 0 !important; padding: 0 !important;
 }
-/* Primera columna: área de login */
+/* Columna izquierda: ocupa 42% y centra verticalmente */
 [data-testid="stHorizontalBlock"] > div:first-child {
-    min-height: 100vh;
+    width: 42% !important;
+    min-width: 42% !important;
+    max-width: 42% !important;
+    height: 100vh !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
     display: flex !important;
     flex-direction: column !important;
     align-items: center !important;
     justify-content: center !important;
-    padding: 32px 24px 32px 28px !important;
-    background: #f1f5f9 !important;
+    padding: 28px 28px !important;
+    background: #eef2f7 !important;
     box-sizing: border-box !important;
 }
-/* Segunda columna: invisible (el panel real es fixed) */
+/* Columna derecha: invisible (el panel real es fixed) */
 [data-testid="stHorizontalBlock"] > div:last-child {
     visibility: hidden !important;
     pointer-events: none !important;
 }
 
-/* ── CHIP ── */
+/* ── Contenedor del contenido izquierdo ── */
+[data-testid="stHorizontalBlock"] > div:first-child > div {
+    width: 100% !important;
+    max-width: 400px !important;
+}
+
+/* ── Chip ── */
 .sgv-chip {
     display: inline-flex; align-items: center;
-    padding: 5px 13px; border-radius: 999px;
-    background: #eff6ff; color: #1d4ed8;
-    font-size: 11px; font-weight: 800; letter-spacing: .04em;
-    margin-bottom: 2px;
+    padding: 5px 14px; border-radius: 999px;
+    background: #dbeafe; color: #1d4ed8;
+    font-size: 11px; font-weight: 800;
+    letter-spacing: .05em; text-transform: uppercase;
+    margin-bottom: 4px;
 }
 
-/* ── Centrar todo el contenido de la columna izquierda ── */
-[data-testid="stHorizontalBlock"] > div:first-child > div {
-    width: 100%;
-    max-width: 420px;
-}
-
-/* ── Inputs y botón dentro del form ── */
-[data-testid="stTextInputRootElement"] { border-radius: 12px !important; }
+/* ── Form inputs ── */
+[data-testid="stTextInputRootElement"] { border-radius: 10px !important; }
 div[data-testid="stFormSubmitButton"] > button {
     min-height: 46px !important;
+    font-size: 15px !important;
     font-weight: 700 !important;
-    border-radius: 12px !important;
+    border-radius: 10px !important;
     width: 100% !important;
+    letter-spacing: .01em;
 }
 [data-testid="stForm"] {
     border: none !important;
     background: transparent !important;
-    padding: 0 !important;
+    padding: 0 !important; margin: 0 !important;
 }
 [data-testid="stForm"] > div:first-child {
     border: none !important; padding: 0 !important;
 }
 
-/* ── Logo y hint centrados ── */
+/* ── Logo y hint ── */
 .sgv-logo-row {
     display: flex; flex-direction: column;
-    align-items: center; gap: 5px;
-    margin-top: 12px;
+    align-items: center; gap: 4px;
+    margin-top: 14px;
 }
-.sgv-logo-row img { width: 96px; height: auto; }
+.sgv-logo-row img { width: 88px; height: auto; }
 .sgv-logo-label {
     color: #1e3a5f; font-size: 13px;
     font-weight: 800; letter-spacing: .03em;
+    margin-top: 2px;
 }
 .sgv-hint {
     margin-top: 6px; color: #94a3b8;
-    font-size: 11px; text-align: center; line-height: 1.4;
+    font-size: 10.5px; text-align: center; line-height: 1.4;
 }
+
+/* ── Eliminar espacio en blanco que Streamlit inyecta ── */
+[data-testid="stHorizontalBlock"] > div:first-child > div > div {
+    gap: 0.4rem !important;
+}
+.stMarkdown { margin-bottom: 0 !important; padding-bottom: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-    # Panel derecho: un único markdown con todo dentro
+    # Panel derecho: único markdown con todo el HTML (no se fragmenta)
     rp_html = (
         f'<img src="{panel_src}" alt="SEGAV ERP">'
         if panel_src else
         '<div style="height:100%;display:flex;flex-direction:column;align-items:center;'
-        'justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;gap:12px;">'
-        '<span style="font-size:52px">🏗️</span>SEGAV ERP</div>'
+        'justify-content:center;color:#e2e8f0;font-size:20px;font-weight:700;gap:14px;">'
+        '<span style="font-size:56px">🏗️</span>SEGAV ERP</div>'
     )
     st.markdown(
         f'<div id="sgv-panel"><div class="inner">{rp_html}</div></div>',
         unsafe_allow_html=True,
     )
 
-    # Dos columnas: izquierda = login, derecha = placeholder invisible
-    left, _ = st.columns([0.43, 0.57], gap="small")
+    # Columna izquierda (form) + columna derecha (placeholder invisible)
+    left, _ = st.columns([0.42, 0.58], gap="small")
 
     with left:
-        # ── DB bootstrap silencioso ──────────────────────────────────────────
+        # ── DB init silencioso ────────────────────────────────────────────────
         ensure_users_table()
         ensure_superadmin_exists()
         if users_count() == 0:
@@ -3809,26 +3836,18 @@ div[data-testid="stFormSubmitButton"] > button {
             except Exception:
                 pass
 
-        # ── Chip + Título + Subtítulo ────────────────────────────────────────
-        st.markdown(
-            '<span class="sgv-chip">SEGAV ERP · Acceso seguro</span>',
-            unsafe_allow_html=True,
-        )
+        # ── Chip + título + subtítulo ─────────────────────────────────────────
+        st.markdown('<span class="sgv-chip">SEGAV ERP · Acceso seguro</span>', unsafe_allow_html=True)
         st.markdown("## Iniciar sesión")
-        st.caption(
-            "Accede para administrar empresas, faenas, documentación, "
-            "prevención de riesgos y paneles ejecutivos."
-        )
+        st.caption("Accede para administrar empresas, faenas, documentación, prevención de riesgos y paneles ejecutivos.")
 
-        # ── Formulario nativo Streamlit ──────────────────────────────────────
+        # ── Formulario ────────────────────────────────────────────────────────
         with st.form("form_login", clear_on_submit=False):
             username = st.text_input("Usuario", placeholder="ej: a.garcia")
             password = st.text_input("Contraseña", type="password")
-            ok = st.form_submit_button(
-                "Ingresar al ERP", type="primary", use_container_width=True
-            )
+            ok = st.form_submit_button("Ingresar al ERP", type="primary", use_container_width=True)
 
-        # ── Logo + nombre + hint ─────────────────────────────────────────────
+        # ── Logo + nombre ─────────────────────────────────────────────────────
         logo_tag = f'<img src="{logo_src}" alt="SEGAV">' if logo_src else ""
         st.markdown(
             f'<div class="sgv-logo-row">{logo_tag}'
@@ -3838,15 +3857,13 @@ div[data-testid="stFormSubmitButton"] > button {
             unsafe_allow_html=True,
         )
 
-        # ── Autenticación ────────────────────────────────────────────────────
+        # ── Autenticación ─────────────────────────────────────────────────────
         if ok:
             u = (username or "").strip()
             if not u or not password:
                 st.error("Usuario y contraseña son obligatorios.")
                 st.stop()
-            df = fetch_df(
-                "SELECT * FROM users WHERE username=? AND is_active=1", (u,)
-            )
+            df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
             if df is None or df.empty:
                 st.error("Usuario no existe o está desactivado.")
                 st.stop()
@@ -3885,6 +3902,7 @@ def _record_soft_error(context: str, exc: Exception | None = None):
 # ----------------------------
 if current_user() is None:
     auth_gate_ui()
+    st.stop()
 
 
 # ----------------------------
