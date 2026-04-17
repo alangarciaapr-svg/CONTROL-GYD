@@ -424,7 +424,7 @@ def page_faenas(
         """
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs(["➕ Crear faena", "📋 Listado (semáforo)", "📎 Anexos", "✏️ Editar / Eliminar"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Crear faena", "📋 Listado (semáforo)", "📎 Anexos", "✏️ Editar / Eliminar", "🔒 Faenas Cerradas"])
 
     with tab1:
         mandante_id = st.selectbox(
@@ -700,3 +700,148 @@ def page_faenas(
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo eliminar: {e}")
+
+    # ── TAB 5: FAENAS CERRADAS ─────────────────────────────────────────────
+    with tab5:
+        import re as _re
+        st.markdown("### 🔒 Faenas Cerradas — Historial y descarga de documentos")
+        st.caption("Aquí aparecen las faenas con estado TERMINADA. Puedes descargar el ZIP completo con todos sus documentos.")
+
+        closed = fetch_df("""
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.fecha_inicio, f.fecha_termino, f.ubicacion,
+                   (SELECT COUNT(*) FROM asignaciones a WHERE a.faena_id=f.id) AS trabajadores,
+                   (SELECT COUNT(*) FROM trabajador_documentos td
+                        JOIN asignaciones a2 ON a2.trabajador_id=td.trabajador_id
+                        WHERE a2.faena_id=f.id) AS docs_trab,
+                   (SELECT COUNT(*) FROM faena_empresa_documentos fed WHERE fed.faena_id=f.id) AS docs_emp,
+                   (SELECT COUNT(*) FROM faena_anexos fa WHERE fa.faena_id=f.id) AS anexos
+            FROM faenas f
+            JOIN mandantes m ON m.id=f.mandante_id
+            WHERE f.estado='TERMINADA'
+            ORDER BY f.fecha_termino DESC, f.id DESC
+        """)
+
+        if closed is None or closed.empty:
+            st.info("No hay faenas cerradas aún. Cuando una faena pase a estado TERMINADA aparecerá aquí.")
+        else:
+            q_c = st.text_input("🔍 Filtrar", key="closed_q", placeholder="Mandante o nombre de faena…")
+            view = closed.copy()
+            if q_c.strip():
+                qq = q_c.strip().lower()
+                mask = (view["mandante"].astype(str).str.lower().str.contains(qq, na=False) |
+                        view["nombre"].astype(str).str.lower().str.contains(qq, na=False))
+                view = view[mask]
+
+            display = view.rename(columns={
+                "mandante":"Mandante","nombre":"Faena",
+                "fecha_inicio":"Inicio","fecha_termino":"Término",
+                "trabajadores":"Trabajadores","docs_trab":"Docs Trab.",
+                "docs_emp":"Docs Empresa","anexos":"Anexos",
+            })[["id","Mandante","Faena","Inicio","Término","Trabajadores","Docs Trab.","Docs Empresa","Anexos"]]
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.markdown("#### 📦 Descargar ZIP de faena cerrada")
+
+            fid_opts = view["id"].tolist()
+            if fid_opts:
+                fid_sel = st.selectbox(
+                    "Selecciona faena",
+                    fid_opts,
+                    format_func=lambda x: (
+                        f"{int(x)} — {view[view['id']==x].iloc[0]['mandante']} / "
+                        f"{view[view['id']==x].iloc[0]['nombre']} "
+                        f"({view[view['id']==x].iloc[0].get('fecha_termino','') or 'sin fecha'})"
+                    ),
+                    key="closed_fid_sel",
+                )
+                row_c = view[view["id"] == fid_sel].iloc[0]
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Trabajadores", int(row_c["trabajadores"]))
+                c2.metric("Docs trabajadores", int(row_c["docs_trab"]))
+                c3.metric("Docs empresa", int(row_c["docs_emp"]))
+                c4.metric("Anexos", int(row_c["anexos"]))
+
+                if st.button("📦 Generar ZIP", type="primary", use_container_width=True, key="btn_zip_closed"):
+                    with st.spinner("Generando ZIP de la faena…"):
+                        try:
+                            nombre_faena = str(row_c["nombre"])
+                            zip_bytes, added = _build_faena_zip(int(fid_sel), nombre_faena, fetch_df)
+                            safe = _re.sub(r"[^a-zA-Z0-9_-]", "_", nombre_faena)[:30]
+                            zip_name = f"faena_cerrada_{int(fid_sel)}_{safe}.zip"
+                            if added == 0:
+                                st.warning("Esta faena no tiene documentos locales. Si usas Supabase Storage, los archivos están en la nube.")
+                            else:
+                                st.success(f"ZIP generado con {added} archivo(s).")
+                            st.download_button(
+                                f"⬇️ Descargar {zip_name}",
+                                data=zip_bytes, file_name=zip_name,
+                                mime="application/zip",
+                                use_container_width=True, key="dl_closed_zip",
+                            )
+                        except Exception as e:
+                            st.error(f"No se pudo generar el ZIP: {e}")
+
+
+def _build_faena_zip(faena_id: int, faena_nombre: str, fetch_df) -> bytes:
+    """Genera un ZIP con todos los documentos de una faena cerrada."""
+    import io, zipfile, os
+
+    mem = io.BytesIO()
+    added = 0
+
+    def _read(file_path, bucket, object_path):
+        if file_path and os.path.exists(str(file_path)):
+            with open(str(file_path), "rb") as f:
+                return f.read()
+        return None
+
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Contrato
+        cont = fetch_df("SELECT file_path, nombre FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)", (int(faena_id),))
+        if cont is not None and not cont.empty:
+            r = cont.iloc[0]
+            b = _read(r.get("file_path"), None, None)
+            if b:
+                zf.writestr(f"Contrato/{os.path.basename(str(r.get('file_path','contrato')))}",b)
+                added += 1
+
+        # Anexos
+        anx = fetch_df("SELECT nombre, file_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        if anx is not None and not anx.empty:
+            for _, r in anx.iterrows():
+                b = _read(r.get("file_path"), None, None)
+                if b:
+                    zf.writestr(f"Anexos/{os.path.basename(str(r.get('file_path','anexo')))}",b)
+                    added += 1
+
+        # Docs empresa faena
+        emp = fetch_df("SELECT doc_tipo, nombre_archivo, file_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo,id", (int(faena_id),))
+        if emp is not None and not emp.empty:
+            for _, r in emp.iterrows():
+                b = _read(r.get("file_path"), None, None)
+                if b:
+                    fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                    zf.writestr(f"Docs_Empresa/{os.path.basename(fname)}",b)
+                    added += 1
+
+        # Docs trabajadores
+        trab = fetch_df("""
+            SELECT t.rut, t.apellidos||' '||t.nombres AS nombre
+            FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
+            WHERE a.faena_id=? ORDER BY t.apellidos,t.nombres
+        """, (int(faena_id),))
+        if trab is not None and not trab.empty:
+            for _, tr in trab.iterrows():
+                docs = fetch_df("SELECT doc_tipo, nombre_archivo, file_path FROM trabajador_documentos WHERE trabajador_id=(SELECT id FROM trabajadores WHERE rut=?) ORDER BY doc_tipo,id", (str(tr["rut"]),))
+                if docs is None or docs.empty:
+                    continue
+                folder = str(tr["nombre"])[:35].replace("/","_")
+                for _, dr in docs.iterrows():
+                    b = _read(dr.get("file_path"), None, None)
+                    if b:
+                        fname = str(dr.get("nombre_archivo") or dr.get("file_path") or "doc")
+                        zf.writestr(f"Trabajadores/{folder}/{os.path.basename(fname)}",b)
+                        added += 1
+
+    return mem.getvalue(), added

@@ -191,12 +191,12 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     ensure_segav_erp_seed_data()
     try:
         backfill_multiempresa_cliente_key()
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("bootstrap.backfill_multiempresa", _exc)
     try:
         ensure_user_client_access_table()
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("bootstrap.ensure_user_client_access", _exc)
     return True
 
 def bootstrap_app_or_stop():
@@ -1003,7 +1003,33 @@ def ui_header(title: str, desc: str = ""):
 def ui_tip(text: str):
     st.info(text, icon="ℹ️")
 
+
+def ui_paginate(df, page_size: int = 50, key: str = "pg"):
+    """Muestra un DataFrame paginado con controles de navegación."""
+    total = len(df)
+    if total <= page_size:
+        return df
+    n_pages = (total - 1) // page_size + 1
+    page = st.number_input(
+        f"Página (1–{n_pages}) · {total} registros",
+        min_value=1, max_value=n_pages, value=1, step=1, key=f"_pg_{key}"
+    )
+    start = (page - 1) * page_size
+    return df.iloc[start: start + page_size]
+
+
+def ui_confirm_delete(label: str, key: str) -> bool:
+    """Checkbox de confirmación antes de eliminar con nombre del elemento."""
+    return st.checkbox(
+        f"Confirmo que deseo eliminar: **{label}**",
+        key=f"_del_confirm_{key}"
+    )
+
+
 def safe_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_") or "item"
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
@@ -1210,7 +1236,7 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
     formatted_value = format_rut_chileno(current_value)
     if st.session_state.get(key) != formatted_value:
         st.session_state[key] = formatted_value
-    return st.text_input(
+    result = st.text_input(
         label,
         key=key,
         placeholder=placeholder,
@@ -1218,6 +1244,12 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
         on_change=_format_rut_session_value,
         args=(key,),
     )
+    # Validación DV en tiempo real
+    _val = st.session_state.get(key, "")
+    if _val and len(_val) > 3:
+        if not validate_rut_dv(_val):
+            st.caption("⚠️ RUT inválido — verifica el dígito verificador")
+    return result
 
 
 @st.cache_data(show_spinner=False)
@@ -1718,6 +1750,15 @@ def ensure_core_tables_postgres():
         "CREATE INDEX IF NOT EXISTS idx_faena_empresa_documentos_faena_id ON faena_empresa_documentos(faena_id);",
         "CREATE INDEX IF NOT EXISTS idx_export_historial_faena_id ON export_historial(faena_id);",
         "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);",
+        # Nuevos índices para rendimiento
+        "CREATE INDEX IF NOT EXISTS idx_trabajadores_rut ON trabajadores(rut);",
+        "CREATE INDEX IF NOT EXISTS idx_trabajadores_apellidos ON trabajadores(apellidos, nombres);",
+        "CREATE INDEX IF NOT EXISTS idx_empresa_documentos_doc_tipo ON empresa_documentos(doc_tipo);",
+        "CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON segav_audit_log(created_at);",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_username ON segav_audit_log(username);",
+        "CREATE INDEX IF NOT EXISTS idx_faenas_estado ON faenas(estado);",
+        "CREATE INDEX IF NOT EXISTS idx_asignaciones_estado ON asignaciones(estado);",
     ]
     with conn() as c:
         for s in stmts + indexes:
@@ -2210,6 +2251,13 @@ def ensure_sgsst_tables_sqlite(c):
     c.execute("CREATE INDEX IF NOT EXISTS idx_sgsst_inspecciones_faena_id ON sgsst_inspecciones(faena_id);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sgsst_incidentes_faena_id ON sgsst_incidentes(faena_id);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sgsst_capacitaciones_faena_id ON sgsst_capacitaciones(faena_id);")
+    # Nuevos índices de rendimiento
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_rut ON trabajadores(rut);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_apellidos ON trabajadores(apellidos, nombres);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_empresa_documentos_doc_tipo ON empresa_documentos(doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_faenas_estado ON faenas(estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_asignaciones_estado ON asignaciones(estado);")
 
 
 def ensure_sgsst_seed_data():
@@ -4037,6 +4085,52 @@ def _record_soft_error(context: str, exc: Exception | None = None):
 if current_user() is None:
     auth_gate_ui()
     st.stop()
+
+
+# ----------------------------
+# Banner de vencimientos (post-login)
+# ----------------------------
+def _show_vencimientos_banner():
+    """Muestra una alerta si hay documentos próximos a vencer en los próximos 30 días."""
+    try:
+        today = date.today()
+        limite = (today + timedelta(days=30)).isoformat()
+        hoy_str = today.isoformat()
+        tenant_key = current_segav_client_key()
+        if not tenant_key:
+            return
+        # Documentos trabajador por vencer
+        df_tw = fetch_df(
+            "SELECT COUNT(*) AS n FROM trabajador_documentos WHERE vencimiento IS NOT NULL "
+            "AND vencimiento >= ? AND vencimiento <= ? AND COALESCE(cliente_key,'')=?",
+            (hoy_str, limite, tenant_key),
+        )
+        # Documentos empresa por vencer
+        df_emp = fetch_df(
+            "SELECT COUNT(*) AS n FROM empresa_documentos WHERE vencimiento IS NOT NULL "
+            "AND vencimiento >= ? AND vencimiento <= ? AND COALESCE(cliente_key,'')=?",
+            (hoy_str, limite, tenant_key),
+        )
+        n_tw  = int(df_tw["n"].iloc[0])  if df_tw  is not None and not df_tw.empty  else 0
+        n_emp = int(df_emp["n"].iloc[0]) if df_emp is not None and not df_emp.empty else 0
+        total = n_tw + n_emp
+        if total > 0:
+            msgs = []
+            if n_tw:  msgs.append(f"**{n_tw}** doc(s) de trabajadores")
+            if n_emp: msgs.append(f"**{n_emp}** doc(s) de empresa")
+            st.warning(
+                f"⏰ **Alerta de vencimientos (próximos 30 días):** {' y '.join(msgs)} próximos a vencer. "
+                "Revisa el módulo **Cumplimiento / Alertas**.",
+                icon="⚠️",
+            )
+    except Exception:
+        pass  # silencioso — no romper la app si la columna 'vencimiento' no existe aún
+
+
+# Mostrar banner solo una vez por sesión
+if not st.session_state.get("_banner_shown"):
+    _show_vencimientos_banner()
+    st.session_state["_banner_shown"] = True
 
 
 # ----------------------------
@@ -6027,12 +6121,19 @@ def page_admin_usuarios():
                     if not pw1 or pw1 != pw2:
                         st.error("Contraseñas no coinciden o están vacías.")
                         st.stop()
+                    if len(pw1) < 8:
+                        st.error("La contraseña debe tener al menos 8 caracteres.")
+                        st.stop()
                     salt_b64, h_b64 = hash_password(pw1)
                     execute(
                         "UPDATE users SET salt_b64=?, pass_hash_b64=?, updated_at=datetime('now') WHERE id=?",
                         (salt_b64, h_b64, int(uid)),
                     )
                 auto_backup_db("users_update")
+                try:
+                    audit_log("EDITAR_USUARIO", "users", f"Usuario modificado: {row.get('username','?')} → rol={new_role}")
+                except Exception:
+                    pass
                 st.success("Cambios guardados.")
                 st.rerun()
             except Exception as e:
@@ -6057,6 +6158,10 @@ def page_admin_usuarios():
             try:
                 execute("DELETE FROM users WHERE id=?", (int(uid),))
                 auto_backup_db("users_delete")
+                try:
+                    audit_log("ELIMINAR_USUARIO", "users", f"Usuario eliminado: {row.get('username','?')}")
+                except Exception:
+                    pass
                 st.success("Usuario eliminado.")
                 st.rerun()
             except Exception as e:
@@ -6092,6 +6197,9 @@ def page_admin_usuarios():
             if not pw1 or pw1 != pw2:
                 st.error("Contraseñas no coinciden o están vacías.")
                 st.stop()
+            if len(pw1) < 8:
+                st.error("La contraseña debe tener al menos 8 caracteres.")
+                st.stop()
             try:
                 salt_b64, h_b64 = hash_password(pw1)
                 execute(
@@ -6099,6 +6207,10 @@ def page_admin_usuarios():
                     (u, salt_b64, h_b64, role, json.dumps(perms)),
                 )
                 auto_backup_db("users_create")
+                try:
+                    audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role}")
+                except Exception:
+                    pass
                 st.success("Usuario creado.")
                 st.rerun()
             except Exception as e:

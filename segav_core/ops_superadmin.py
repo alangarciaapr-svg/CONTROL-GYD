@@ -57,7 +57,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
     m3.metric("Admins asignados", admins_asignados)
     m4.metric("Usuarios vinculados", usuarios_asignados)
 
-    tabs = st.tabs(["🌐 Dashboard", "🏢 Empresas", "👥 Administradores"])
+    tabs = st.tabs(["🌐 Dashboard", "🏢 Empresas", "👥 Administradores", "📋 Audit Log"])
 
     with tabs[0]:
         st.markdown("### Vista global de empresas")
@@ -251,3 +251,48 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 st.rerun()
 
             st.caption("Tip: usa la sección Admin Usuarios para crear cuentas nuevas y luego vuelve aquí para vincularlas a una empresa.")
+
+    with tabs[3]:
+        st.markdown("### 📋 Registro de Auditoría")
+        st.caption("Historial de acciones realizadas por usuarios en el sistema. Se conservan los últimos 2.000 registros.")
+
+        try:
+            audit_df = fetch_df(
+                "SELECT created_at, username, accion, entidad, detalle, cliente_key "
+                "FROM segav_audit_log ORDER BY id DESC LIMIT 500"
+            )
+        except Exception:
+            audit_df = None
+
+        if audit_df is None or audit_df.empty:
+            st.info("Aún no hay registros de auditoría. Las acciones de login y cambios importantes se registrarán automáticamente.")
+        else:
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                usuarios_uniq = ["(Todos)"] + sorted(audit_df["username"].dropna().unique().tolist())
+                filtro_user = st.selectbox("Filtrar por usuario", usuarios_uniq, key="audit_user_f")
+            with col_f2:
+                acciones_uniq = ["(Todas)"] + sorted(audit_df["accion"].dropna().unique().tolist())
+                filtro_acc = st.selectbox("Filtrar por acción", acciones_uniq, key="audit_acc_f")
+            with col_f3:
+                filtro_txt = st.text_input("Buscar en detalle", placeholder="Texto libre…", key="audit_txt_f")
+
+            view_a = audit_df.copy()
+            if filtro_user != "(Todos)":
+                view_a = view_a[view_a["username"] == filtro_user]
+            if filtro_acc != "(Todas)":
+                view_a = view_a[view_a["accion"] == filtro_acc]
+            if filtro_txt.strip():
+                qq = filtro_txt.strip().lower()
+                view_a = view_a[view_a["detalle"].astype(str).str.lower().str.contains(qq, na=False)]
+
+            st.metric("Registros mostrados", len(view_a))
+            st.dataframe(
+                view_a.rename(columns={
+                    "created_at": "Fecha/Hora", "username": "Usuario",
+                    "accion": "Acción", "entidad": "Entidad",
+                    "detalle": "Detalle", "cliente_key": "Empresa"
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
