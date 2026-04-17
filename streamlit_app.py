@@ -3722,21 +3722,21 @@ def visible_clientes_df():
 
 
 def auth_gate_ui():
-    """Login corporativo - columnas nativas Streamlit, sin trucos de overlay."""
+    """Login corporativo — diseño exacto al mockup de referencia."""
 
-    # Resources
+    # Recursos
     panel_bytes = get_login_panel_approved_bytes()
     panel_src   = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
     logo_bytes  = get_login_logo_bytes()
     logo_src    = f"data:image/png;base64,{_b64e(logo_bytes)}" if logo_bytes else ""
 
-    # DB init
+    # DB init silencioso
     ensure_users_table()
     ensure_superadmin_exists()
     if users_count() == 0:
         try:
-            _u  = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-            _p  = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
+            _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
             sb64, hb64 = hash_password(_p)
             execute(
                 "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active) VALUES(?,?,?,?,?,1)",
@@ -3747,171 +3747,188 @@ def auth_gate_ui():
 
     err_msg = st.session_state.get("_lg_err", "")
 
-    # ── CSS: solo lo necesario, no agresivo ──────────────────────────────────
+    # === CSS ===
     st.markdown("""
 <style>
 /* Ocultar chrome Streamlit */
-header[data-testid="stHeader"],
-div[data-testid="stToolbar"],
-section[data-testid="stSidebar"],
-[data-testid="stDecoration"],
-#MainMenu, footer { display:none !important; }
+header[data-testid="stHeader"],div[data-testid="stToolbar"],
+section[data-testid="stSidebar"],[data-testid="stDecoration"],
+#MainMenu,footer{display:none!important;}
 
-/* Fondo oscuro */
-html, body { background:#0d1b2e !important; margin:0; padding:0; }
-.stApp, [data-testid="stAppViewContainer"] { background:#0d1b2e !important; }
+/* Fondo gris claro */
+html,body{background:#dde5ef!important;margin:0;padding:0;}
+.stApp,[data-testid="stAppViewContainer"]{background:#dde5ef!important;}
 
-/* Quitar padding del main container */
-.main .block-container,
-[data-testid="stMainBlockContainer"] {
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    max-width: none !important;
+/* Quitar padding del contenedor main */
+.main .block-container,[data-testid="stMainBlockContainer"]{
+    padding:0!important;max-width:none!important;
 }
 
-/* Columnas sin gap */
-[data-testid="stHorizontalBlock"] {
-    gap: 0 !important;
-    align-items: stretch !important;
-    min-height: 100vh;
+/* Las dos columnas forman la tarjeta */
+[data-testid="stHorizontalBlock"]{
+    gap:0!important;align-items:stretch!important;
+    min-height:100vh;margin:0!important;
 }
 
-/* Columna izquierda - panel de login */
-[data-testid="stHorizontalBlock"] > div:first-child {
-    background: linear-gradient(168deg, #0f2645 0%, #091b32 100%) !important;
-    padding: 0 !important;
-    min-height: 100vh;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
+/* Columna izquierda — blanca */
+[data-testid="stHorizontalBlock"]>div:first-child{
+    background:#ffffff!important;
+    min-height:100vh;padding:0!important;
+    display:flex!important;flex-direction:column!important;
+    align-items:center!important;justify-content:center!important;
 }
 
-/* Columna derecha - imagen */
-[data-testid="stHorizontalBlock"] > div:last-child {
-    padding: 0 !important;
-    min-height: 100vh;
+/* Columna derecha — imagen */
+[data-testid="stHorizontalBlock"]>div:last-child{
+    padding:0!important;min-height:100vh;overflow:hidden;
+}
+[data-testid="stHorizontalBlock"]>div:last-child img{
+    width:100%!important;height:100%!important;
+    object-fit:cover!important;display:block!important;
+}
+[data-testid="stHorizontalBlock"]>div:last-child [data-testid="stImage"],
+[data-testid="stHorizontalBlock"]>div:last-child .stMarkdown{
+    height:100vh!important;margin:0!important;padding:0!important;
 }
 
-/* Ocultar labels del form de Streamlit (usamos los nuestros en HTML) */
-[data-testid="stHorizontalBlock"] > div:first-child [data-testid="stTextInput"] label,
-[data-testid="stHorizontalBlock"] > div:first-child [data-testid="stForm"] > div > div:first-child {
-    display: none !important;
+/* Contenedor interno de la columna izquierda */
+[data-testid="stHorizontalBlock"]>div:first-child>div{
+    width:100%;max-width:420px;padding:0 40px;box-sizing:border-box;
 }
 
-/* Estilizar inputs */
-[data-testid="stHorizontalBlock"] > div:first-child input {
-    background: rgba(255,255,255,0.07) !important;
-    border: 1.5px solid rgba(255,255,255,0.12) !important;
-    border-radius: 10px !important;
-    color: #f1f5f9 !important;
-    font-size: 14px !important;
-    padding: 11px 14px !important;
+/* Inputs */
+[data-testid="stHorizontalBlock"]>div:first-child input{
+    background:#fff!important;
+    border:1.5px solid #d1d5db!important;
+    border-radius:8px!important;
+    color:#1e293b!important;font-size:14px!important;
+    padding:11px 14px 11px 44px!important;
+    box-shadow:none!important;
 }
-[data-testid="stHorizontalBlock"] > div:first-child input:focus {
-    border-color: rgba(59,130,246,0.8) !important;
-    box-shadow: 0 0 0 3px rgba(59,130,246,0.18) !important;
+[data-testid="stHorizontalBlock"]>div:first-child input:focus{
+    border-color:#2563eb!important;
+    box-shadow:0 0 0 3px rgba(37,99,235,.12)!important;
 }
-[data-testid="stHorizontalBlock"] > div:first-child input::placeholder {
-    color: rgba(148,163,184,0.4) !important;
-}
-
-/* Boton de submit */
-[data-testid="stHorizontalBlock"] > div:first-child [data-testid="stFormSubmitButton"] button {
-    background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-size: 15px !important;
-    font-weight: 700 !important;
-    padding: 13px 24px !important;
-    box-shadow: 0 4px 22px rgba(59,130,246,0.42) !important;
-    transition: all 0.18s !important;
-    min-height: 48px !important;
-    width: 100% !important;
-}
-[data-testid="stHorizontalBlock"] > div:first-child [data-testid="stFormSubmitButton"] button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 6px 30px rgba(59,130,246,0.58) !important;
-    opacity: 0.93 !important;
+[data-testid="stHorizontalBlock"]>div:first-child input::placeholder{
+    color:#9ca3af!important;
 }
 
-/* Ocultar borde del form */
-[data-testid="stForm"] {
-    border: none !important;
-    padding: 0 !important;
-    background: transparent !important;
+/* Botón Ingresar */
+[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stFormSubmitButton"] button{
+    background:#1a56db!important;color:#fff!important;
+    border:none!important;border-radius:8px!important;
+    font-size:16px!important;font-weight:700!important;
+    padding:13px!important;width:100%!important;
+    box-shadow:0 2px 8px rgba(26,86,219,.35)!important;
+    transition:all .18s!important;
 }
-[data-testid="stForm"] > div:first-child { border: none !important; }
+[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stFormSubmitButton"] button:hover{
+    background:#1748c0!important;transform:translateY(-1px)!important;
+    box-shadow:0 4px 14px rgba(26,86,219,.45)!important;
+}
 
-/* Texto en la columna izquierda */
-[data-testid="stHorizontalBlock"] > div:first-child p,
-[data-testid="stHorizontalBlock"] > div:first-child label,
-[data-testid="stHorizontalBlock"] > div:first-child .stMarkdown {
-    color: #f1f5f9 !important;
+/* Quitar borde del form */
+[data-testid="stForm"]{border:none!important;padding:0!important;background:transparent!important;}
+[data-testid="stForm"]>div:first-child{border:none!important;}
+
+/* Ocultar labels nativos de Streamlit (los ponemos en HTML) */
+[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stTextInput"] label{
+    display:none!important;
 }
 
-/* Error de Streamlit visible */
-[data-testid="stAlert"] { margin: 0 0 8px 0 !important; }
+/* Icono usuario: fondo SVG en el input */
+[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stTextInput"]:first-of-type input{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 20c0-4 3.58-7 8-7s8 3 8 7'/%3E%3C/svg%3E")!important;
+    background-repeat:no-repeat!important;
+    background-position:13px center!important;
+    background-size:18px!important;
+}
+/* Icono candado: segundo input */
+[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stTextInput"]:last-of-type input{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Crect x='3' y='11' width='18' height='11' rx='2'/%3E%3Cpath d='M7 11V7a5 5 0 0110 0v4'/%3E%3C/svg%3E")!important;
+    background-repeat:no-repeat!important;
+    background-position:13px center!important;
+    background-size:18px!important;
+}
 
-/* Imagen derecha ocupa toda la columna */
-[data-testid="stHorizontalBlock"] > div:last-child img {
-    width: 100% !important;
-    height: 100vh !important;
-    object-fit: cover !important;
-    display: block !important;
-}
-[data-testid="stHorizontalBlock"] > div:last-child [data-testid="stImage"] {
-    height: 100vh !important;
-    overflow: hidden !important;
-    margin: 0 !important; padding: 0 !important;
-}
-[data-testid="stHorizontalBlock"] > div:last-child .stMarkdown {
-    height: 100vh !important;
-    margin: 0 !important; padding: 0 !important;
-}
+/* Error Streamlit */
+[data-testid="stAlert"]{margin:0 0 10px 0!important;border-radius:8px!important;}
+
+/* Texto en col izquierda */
+[data-testid="stHorizontalBlock"]>div:first-child .stMarkdown,
+[data-testid="stHorizontalBlock"]>div:first-child p{color:#1e293b!important;}
 </style>
 """, unsafe_allow_html=True)
 
-    # Layout: columna izquierda (login) + derecha (imagen)
-    left_col, right_col = st.columns([0.42, 0.58], gap="small")
+    col_left, col_right = st.columns([0.43, 0.57], gap="small")
 
-    with left_col:
-        # ── Brand ────────────────────────────────────────────────────────────
-        logo_tag = f'<img src="{logo_src}" style="width:82px;height:auto;filter:drop-shadow(0 4px 18px rgba(59,130,246,.5));" alt="SEGAV">' if logo_src else ""
-        st.markdown(f"""
-<div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-bottom:24px;">
-  {logo_tag}
-  <div style="font-size:21px;font-weight:800;color:#f1f5f9;letter-spacing:.07em;text-shadow:0 2px 14px rgba(59,130,246,.3);">SEGAV ERP</div>
-  <div style="font-size:10px;color:rgba(148,163,184,.7);letter-spacing:.16em;text-transform:uppercase;">Gestion &middot; Seguridad &middot; Cumplimiento</div>
-</div>
-<div style="font-size:19px;font-weight:700;color:#f1f5f9;text-align:center;margin-bottom:20px;">Iniciar sesion</div>
-""", unsafe_allow_html=True)
+    with col_left:
+        # Título
+        st.markdown(
+            '<h2 style="font-size:26px;font-weight:800;color:#0f172a;'
+            'text-align:center;margin:0 0 28px 0;">Acceso al Sistema</h2>',
+            unsafe_allow_html=True,
+        )
 
-        # ── Error ─────────────────────────────────────────────────────────────
+        # Error
         if err_msg:
             st.error(err_msg, icon="🔒")
 
-        # ── Labels HTML encima de los inputs ────────────────────────────────
-        st.markdown('<div style="font-size:10.5px;font-weight:600;color:rgba(148,163,184,.82);letter-spacing:.07em;text-transform:uppercase;margin-bottom:4px;">Usuario</div>', unsafe_allow_html=True)
+        # Label Usuario
+        st.markdown(
+            '<div style="font-size:14px;font-weight:700;color:#1e293b;margin-bottom:6px;">Usuario</div>',
+            unsafe_allow_html=True,
+        )
 
-        # ── Form Streamlit nativo ────────────────────────────────────────────
         with st.form("_login_form", clear_on_submit=False):
-            uname = st.text_input("Usuario", key="_lgu", placeholder="Ingresa tu usuario", label_visibility="collapsed")
-            st.markdown('<div style="font-size:10.5px;font-weight:600;color:rgba(148,163,184,.82);letter-spacing:.07em;text-transform:uppercase;margin-bottom:4px;margin-top:8px;">Contrasena</div>', unsafe_allow_html=True)
-            passw = st.text_input("Contrasena", key="_lgp", type="password", placeholder="Ingresa tu contrasena", label_visibility="collapsed")
-            submitted = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            uname = st.text_input(
+                "Usuario", key="_lgu",
+                placeholder="Ingrese su usuario",
+                label_visibility="collapsed",
+            )
+            # Label Contraseña
+            st.markdown(
+                '<div style="font-size:14px;font-weight:700;color:#1e293b;margin:10px 0 6px 0;">Contraseña</div>',
+                unsafe_allow_html=True,
+            )
+            passw = st.text_input(
+                "Contraseña", key="_lgp",
+                type="password",
+                placeholder="Ingrese su contraseña",
+                label_visibility="collapsed",
+            )
+            # Link olvidé
+            st.markdown(
+                '<div style="text-align:center;margin:8px 0 16px 0;">'
+                '<span style="color:#2563eb;font-size:13px;cursor:default;">¿Olvidó su contraseña?</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            submitted = st.form_submit_button(
+                "Ingresar", type="primary", use_container_width=True
+            )
 
-        # ── Hint ─────────────────────────────────────────────────────────────
-        st.markdown('<div style="text-align:center;font-size:10.5px;color:rgba(100,116,139,.65);margin-top:10px;line-height:1.5;">Si olvidaste tu contrasena, contacta al administrador.</div>', unsafe_allow_html=True)
+        # Logo + marca
+        logo_tag = (
+            f'<img src="{logo_src}" style="width:160px;height:auto;display:block;margin:0 auto 6px auto;" alt="SEGAV">'
+            if logo_src else ""
+        )
+        st.markdown(
+            f'<div style="text-align:center;margin-top:28px;">'
+            f'{logo_tag}'
+            f'<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:4px;">'
+            f'<div style="flex:1;height:1.5px;background:#1a56db;max-width:36px;"></div>'
+            f'<span style="font-size:13px;font-weight:800;color:#1a56db;letter-spacing:.08em;">SEGAV ERP</span>'
+            f'<div style="flex:1;height:1.5px;background:#1a56db;max-width:36px;"></div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
 
-        # ── Auth ──────────────────────────────────────────────────────────────
+        # Auth logic
         if submitted:
             u = (uname or "").strip()
             if not u or not passw:
-                st.session_state["_lg_err"] = "Usuario y contrasena son obligatorios."
+                st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
                 st.rerun()
             else:
                 df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
@@ -3921,7 +3938,7 @@ html, body { background:#0d1b2e !important; margin:0; padding:0; }
                 else:
                     row = df.iloc[0].to_dict()
                     if not verify_password(passw, row["salt_b64"], row["pass_hash_b64"]):
-                        st.session_state["_lg_err"] = "Contrasena incorrecta."
+                        st.session_state["_lg_err"] = "Contraseña incorrecta."
                         st.rerun()
                     else:
                         st.session_state.pop("_lg_err", None)
@@ -3932,11 +3949,12 @@ html, body { background:#0d1b2e !important; margin:0; padding:0; }
                             pass
                         st.rerun()
 
-    with right_col:
+    with col_right:
         if panel_src:
             st.markdown(
                 f'<div style="height:100vh;overflow:hidden;margin:0;padding:0;">'
-                f'<img src="{panel_src}" style="width:100%;height:100%;object-fit:cover;display:block;" alt="SEGAV ERP">'
+                f'<img src="{panel_src}" style="width:100%;height:100%;'
+                f'object-fit:cover;display:block;" alt="SEGAV ERP">'
                 f'</div>',
                 unsafe_allow_html=True,
             )
