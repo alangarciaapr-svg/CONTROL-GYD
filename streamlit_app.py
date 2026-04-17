@@ -3755,40 +3755,55 @@ header[data-testid="stHeader"],div[data-testid="stToolbar"],
 section[data-testid="stSidebar"],[data-testid="stDecoration"],
 #MainMenu,footer{display:none!important;}
 
-/* Fondo gris claro */
-html,body{background:#dde5ef!important;margin:0;padding:0;}
-.stApp,[data-testid="stAppViewContainer"]{background:#dde5ef!important;}
+/* Fondo gris claro — SIN SCROLL */
+html,body{
+    background:#dde5ef!important;margin:0;padding:0;
+    overflow:hidden!important;height:100vh!important;
+}
+.stApp,[data-testid="stAppViewContainer"]{
+    background:#dde5ef!important;
+    overflow:hidden!important;height:100vh!important;
+}
+[data-testid="stMain"],.main{
+    overflow:hidden!important;height:100vh!important;
+}
 
 /* Quitar padding del contenedor main */
 .main .block-container,[data-testid="stMainBlockContainer"]{
     padding:0!important;max-width:none!important;
+    overflow:hidden!important;height:100vh!important;
 }
 
 /* Las dos columnas forman la tarjeta */
 [data-testid="stHorizontalBlock"]{
     gap:0!important;align-items:stretch!important;
-    min-height:100vh;margin:0!important;
+    height:100vh!important;overflow:hidden!important;margin:0!important;
 }
 
 /* Columna izquierda — blanca */
 [data-testid="stHorizontalBlock"]>div:first-child{
     background:#ffffff!important;
-    min-height:100vh;padding:0!important;
+    height:100vh!important;overflow-y:auto!important;overflow-x:hidden!important;
+    padding:0!important;
     display:flex!important;flex-direction:column!important;
     align-items:center!important;justify-content:center!important;
 }
 
-/* Columna derecha — imagen */
+/* Columna derecha — imagen: OCUPA TODO EL ESPACIO HASTA EL BORDE */
 [data-testid="stHorizontalBlock"]>div:last-child{
-    padding:0!important;min-height:100vh;overflow:hidden;
+    padding:0!important;height:100vh!important;overflow:hidden!important;
+    /* Extender hasta el borde derecho de la pantalla */
+    margin-right:0!important;
 }
 [data-testid="stHorizontalBlock"]>div:last-child img{
-    width:100%!important;height:100%!important;
+    width:100%!important;height:100vh!important;
     object-fit:cover!important;display:block!important;
 }
 [data-testid="stHorizontalBlock"]>div:last-child [data-testid="stImage"],
-[data-testid="stHorizontalBlock"]>div:last-child .stMarkdown{
+[data-testid="stHorizontalBlock"]>div:last-child .stMarkdown,
+[data-testid="stHorizontalBlock"]>div:last-child [data-testid="element-container"]{
     height:100vh!important;margin:0!important;padding:0!important;
+    width:100%!important;
 }
 
 /* Contenedor interno de la columna izquierda */
@@ -3952,9 +3967,11 @@ html,body{background:#dde5ef!important;margin:0;padding:0;}
     with col_right:
         if panel_src:
             st.markdown(
-                f'<div style="height:100vh;overflow:hidden;margin:0;padding:0;">'
-                f'<img src="{panel_src}" style="width:100%;height:100%;'
-                f'object-fit:cover;display:block;" alt="SEGAV ERP">'
+                f'<div style="height:100vh;overflow:hidden;margin:0;padding:0;'
+                f'width:100%;position:relative;">'
+                f'<img src="{panel_src}" style="width:100%;height:100vh;'
+                f'object-fit:cover;object-position:center;display:block;'
+                f'position:absolute;top:0;left:0;" alt="SEGAV ERP">'
                 f'</div>',
                 unsafe_allow_html=True,
             )
