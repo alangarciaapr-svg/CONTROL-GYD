@@ -168,7 +168,7 @@ def clear_app_caches():
     except Exception as exc:
         _record_soft_error("clear_app_caches", exc)
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def _cached_fetch_df(db_backend: str, dsn_fingerprint: str, q: str, params_cache):
     params = tuple(params_cache) if isinstance(params_cache, tuple) else params_cache
     if db_backend == "postgres":
@@ -2793,7 +2793,7 @@ def ensure_segav_erp_seed_data():
                 )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_erp_config_map(_backend: str, _dsn: str):
     df = fetch_df("SELECT config_key, config_value FROM segav_erp_config ORDER BY config_key")
     if df is None or df.empty:
@@ -2813,7 +2813,7 @@ def erp_brand_name() -> str:
     return segav_erp_value('erp_name', APP_NAME)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_cargos_df(_backend: str, _dsn: str):
     df = fetch_df("SELECT cargo_key, cargo_label, sort_order, activo FROM segav_erp_cargos ORDER BY sort_order, cargo_label")
     return df if df is not None else pd.DataFrame()
@@ -2833,7 +2833,7 @@ def segav_cargo_labels(active_only: bool = True) -> list[str]:
     return labels or list(CARGO_DOCS_ORDER)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_cargo_rules(_backend: str, _dsn: str):
     df = fetch_df(
         """
@@ -2860,7 +2860,7 @@ def segav_cargo_rules():
     return rules or {k: list(dict.fromkeys(v)) for k, v in CARGO_DOCS_RULES.items()}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_empresa_docs_df(_backend: str, _dsn: str):
     df = fetch_df("SELECT doc_tipo, obligatorio, mensual, por_mandante, por_faena, sort_order FROM segav_erp_docs_empresa ORDER BY sort_order, doc_tipo")
     return df if df is not None else pd.DataFrame()
@@ -2870,7 +2870,7 @@ def segav_empresa_docs_df():
     return get_segav_empresa_docs_df(DB_BACKEND, PG_DSN_FINGERPRINT)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_templates_df(_backend: str, _dsn: str):
     df = fetch_df("SELECT template_key, template_label, vertical, description, payload_json, sort_order, activo FROM segav_erp_templates ORDER BY sort_order, template_label")
     return df if df is not None else pd.DataFrame()
@@ -2893,7 +2893,7 @@ def segav_template_payload(template_key: str) -> dict:
     return dict(ERP_TEMPLATE_PRESETS.get(str(template_key), {}))
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_clientes_df(_backend: str, _dsn: str):
     df = fetch_df("SELECT cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at FROM segav_erp_clientes ORDER BY COALESCE(activo,1) DESC, cliente_nombre")
     return df if df is not None else pd.DataFrame()
@@ -3171,7 +3171,7 @@ def tenant_fetch_file_refs(table_name: str, where_sql: str = "", params=()):
     return fetch_file_refs(table_name, where_sql, params)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_segav_cliente_params_df(_backend: str, _dsn: str, cliente_key: str):
     if not cliente_key:
         return pd.DataFrame(columns=['cliente_key','param_key','param_value'])
@@ -3274,6 +3274,22 @@ def get_login_panel_approved_bytes():
         except Exception:
             return None
     return None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_login_panel_b64() -> str:
+    """Base64 cacheado del panel de login — evita re-encode en cada rerun."""
+    b = get_login_panel_approved_bytes()
+    if not b:
+        return ""
+    return base64.b64encode(b).decode()
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_login_logo_b64() -> str:
+    """Base64 cacheado del logo — evita re-encode en cada rerun."""
+    b = get_login_logo_bytes()
+    if not b:
+        return ""
+    return base64.b64encode(b).decode()
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_login_hero_bytes():
@@ -3724,11 +3740,11 @@ def visible_clientes_df():
 def auth_gate_ui():
     """Login corporativo — diseño exacto al mockup de referencia."""
 
-    # Recursos
-    panel_bytes = get_login_panel_approved_bytes()
-    panel_src   = f"data:image/png;base64,{_b64e(panel_bytes)}" if panel_bytes else ""
-    logo_bytes  = get_login_logo_bytes()
-    logo_src    = f"data:image/png;base64,{_b64e(logo_bytes)}" if logo_bytes else ""
+    # Recursos — b64 cacheado (no re-encode en cada rerun)
+    panel_b64 = get_login_panel_b64()
+    panel_src = f"data:image/png;base64,{panel_b64}" if panel_b64 else ""
+    logo_b64  = get_login_logo_b64()
+    logo_src  = f"data:image/png;base64,{logo_b64}" if logo_b64 else ""
 
     # DB init silencioso
     ensure_users_table()
@@ -3755,23 +3771,30 @@ header[data-testid="stHeader"],div[data-testid="stToolbar"],
 section[data-testid="stSidebar"],[data-testid="stDecoration"],
 #MainMenu,footer{display:none!important;}
 
-/* Fondo gris claro — SIN SCROLL */
+/* Fondo blanco total — sin franja gris */
 html,body{
-    background:#dde5ef!important;margin:0;padding:0;
+    background:#ffffff!important;margin:0!important;padding:0!important;
     overflow:hidden!important;height:100vh!important;
 }
 .stApp,[data-testid="stAppViewContainer"]{
-    background:#dde5ef!important;
+    background:#ffffff!important;
     overflow:hidden!important;height:100vh!important;
+    margin:0!important;padding:0!important;
 }
 [data-testid="stMain"],.main{
     overflow:hidden!important;height:100vh!important;
+    margin:0!important;padding:0!important;background:transparent!important;
 }
 
-/* Quitar padding del contenedor main */
+/* Quitar TODOS los paddings/margins del contenedor main */
 .main .block-container,[data-testid="stMainBlockContainer"]{
-    padding:0!important;max-width:none!important;
+    padding:0!important;margin:0!important;max-width:none!important;
     overflow:hidden!important;height:100vh!important;
+    background:transparent!important;
+}
+/* El primer div hijo del block-container también */
+[data-testid="stMainBlockContainer"]>div{
+    padding:0!important;margin:0!important;
 }
 
 /* Las dos columnas forman la tarjeta */
@@ -6117,7 +6140,7 @@ def page_contratos_faena():
 
 
 def page_faenas():
-    return _ops_faenas.page_faenas(fetch_df=tenant_fetch_df, execute=tenant_execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=tenant_fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, ESTADOS_FAENA=ESTADOS_FAENA)
+    return _ops_faenas.page_faenas(fetch_df=tenant_fetch_df, execute=tenant_execute, auto_backup_db=auto_backup_db, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, save_file_online=save_file_online, sha256_bytes=sha256_bytes, parse_date_maybe=parse_date_maybe, validate_faena_dates=validate_faena_dates, fetch_file_refs=tenant_fetch_file_refs, cleanup_deleted_file_refs=cleanup_deleted_file_refs, faena_progress_table=faena_progress_table, ESTADOS_FAENA=ESTADOS_FAENA, pendientes_obligatorios=pendientes_obligatorios)
 
 
 def page_trabajadores():
