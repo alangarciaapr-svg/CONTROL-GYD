@@ -3476,8 +3476,12 @@ def ensure_storage_columns_postgres():
     stmts = [
         "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS vencimiento TEXT;",
+        "ALTER TABLE IF EXISTS trabajador_documentos ADD COLUMN IF NOT EXISTS cliente_key TEXT;",
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
+        "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS vencimiento TEXT;",
+        "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS cliente_key TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS mandante_id BIGINT;",
@@ -3595,10 +3599,11 @@ def ensure_storage_columns_sqlite(c):
         "contratos_faena": {"bucket": "TEXT", "object_path": "TEXT"},
         "faena_anexos": {"bucket": "TEXT", "object_path": "TEXT"},
         "trabajador_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
-        "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
+        "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "vencimiento": "TEXT", "cliente_key": "TEXT"},
         "faena_empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "mandante_id": "INTEGER", "periodo_anio": "INTEGER", "periodo_mes": "INTEGER"},
         "export_historial": {"bucket": "TEXT", "object_path": "TEXT"},
         "export_historial_mes": {"bucket": "TEXT", "object_path": "TEXT"},
+        "trabajador_documentos": {"bucket": "TEXT", "object_path": "TEXT", "vencimiento": "TEXT", "cliente_key": "TEXT"},
     }
     for table, cols in targets.items():
         try:
@@ -4127,7 +4132,7 @@ def _show_vencimientos_banner():
         pass  # silencioso — no romper la app si la columna 'vencimiento' no existe aún
 
 
-# Mostrar banner solo una vez por sesión
+        # Mostrar banner solo una vez por sesión
 if not st.session_state.get("_banner_shown"):
     _show_vencimientos_banner()
     st.session_state["_banner_shown"] = True
