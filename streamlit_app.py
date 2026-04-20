@@ -796,16 +796,32 @@ SGSST_TIPOS_EVENTO = ["INCIDENTE", "ACCIDENTE DEL TRABAJO", "ACCIDENTE DE TRAYEC
 SGSST_GRAVEDADES = ["BAJA", "MEDIA", "ALTA", "GRAVE/FATAL"]
 SGSST_TIPOS_CAP = ["ODI", "INDUCCIÓN", "CAPACITACIÓN", "CHARLA DE SEGURIDAD", "SIMULACRO"]
 SGSST_MATRIZ_BASE = [
-    {"norma": "DS 44", "articulo": "Sistema de gestión", "tema": "Implementación SGSST", "obligacion": "Mantener un sistema de gestión preventivo con instrumentos y seguimiento.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia / Prevención", "evidencia": "Manual SGSST, registros y seguimiento", "estado": "EN CURSO"},
-    {"norma": "DS 44", "articulo": "MIPER", "tema": "Matriz de riesgos", "obligacion": "Mantener identificación de peligros y evaluación de riesgos por faena, tarea y cargo.", "aplica_a": "Faenas / Cargos", "periodicidad": "Anual o por cambio", "responsable": "Prevención", "evidencia": "MIPER vigente", "estado": "PENDIENTE"},
-    {"norma": "DS 44", "articulo": "Programa preventivo", "tema": "Programa anual", "obligacion": "Planificar actividades preventivas con responsables, plazos y evidencias.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Prevención", "evidencia": "Programa anual y cierres", "estado": "PENDIENTE"},
-    {"norma": "DS 44", "articulo": "Información y capacitación", "tema": "ODI y formación", "obligacion": "Entregar información de riesgos y capacitación preventiva a trabajadores.", "aplica_a": "Trabajadores", "periodicidad": "Ingreso y periódica", "responsable": "Jefaturas / Prevención", "evidencia": "Registros ODI y capacitaciones", "estado": "EN CURSO"},
-    {"norma": "DS 44", "articulo": "Emergencias", "tema": "Plan de emergencia", "obligacion": "Disponer de plan de emergencias, simulacros y responsables.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Faenas", "evidencia": "Plan y registros de simulacro", "estado": "PENDIENTE"},
-    {"norma": "Ley 16.744", "articulo": "Seguro", "tema": "Organismo administrador", "obligacion": "Mantener afiliación y coordinación preventiva con organismo administrador.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia", "evidencia": "Certificado de adhesión", "estado": "EN CURSO"},
-    {"norma": "Ley 16.744", "articulo": "Accidentes y enfermedades", "tema": "Investigación", "obligacion": "Registrar, investigar y gestionar medidas correctivas de incidentes y accidentes.", "aplica_a": "Empresa / Faenas", "periodicidad": "Cada evento", "responsable": "Prevención / Jefatura", "evidencia": "Investigaciones y cierres", "estado": "PENDIENTE"},
-    {"norma": "Ley 16.744", "articulo": "Participación", "tema": "CPHS / Monitoreo dotación", "obligacion": "Monitorear obligación de CPHS según dotación y mantener registros si aplica.", "aplica_a": "Empresa", "periodicidad": "Mensual", "responsable": "Gerencia", "evidencia": "Actas / control de dotación", "estado": "EN CURSO"},
-    {"norma": "DS 594", "articulo": "Condiciones sanitarias", "tema": "Agua y servicios higiénicos", "obligacion": "Verificar agua potable, higiene, orden y aseo en lugares de trabajo.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Faena", "evidencia": "Checklist DS 594", "estado": "PENDIENTE"},
-    {"norma": "DS 594", "articulo": "Condiciones ambientales", "tema": "Señalización, extintores y ambiente", "obligacion": "Controlar señalización, extintores, vías de circulación y condiciones ambientales.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Mantención", "evidencia": "Inspecciones y acciones", "estado": "PENDIENTE"},
+    # ── DS 44 — Sistema de Gestión de Seguridad y Salud en el Trabajo ──────
+    {"norma": "DS 44", "articulo": "Art. 3-5", "tema": "Implementación SGSST", "obligacion": "Mantener un sistema de gestión preventivo con política, instrumentos y seguimiento documentado.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia / Prevención", "evidencia": "Manual SGSST, registros y seguimiento", "estado": "EN CURSO"},
+    {"norma": "DS 44", "articulo": "Art. 7", "tema": "Matriz de riesgos (MIPER)", "obligacion": "Identificar peligros y evaluar riesgos por faena, tarea y cargo. Actualizar ante cambios.", "aplica_a": "Faenas / Cargos", "periodicidad": "Anual o por cambio", "responsable": "Prevención", "evidencia": "MIPER vigente", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Art. 8", "tema": "Programa preventivo anual", "obligacion": "Planificar actividades preventivas con responsables, plazos, indicadores y evidencias.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Prevención", "evidencia": "Programa anual y cierres", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Art. 9-10", "tema": "ODI y capacitación", "obligacion": "Entregar Obligación de Informar (ODI) al ingreso y capacitación preventiva periódica.", "aplica_a": "Trabajadores", "periodicidad": "Ingreso y periódica", "responsable": "Jefaturas / Prevención", "evidencia": "Registros ODI firmados y certificados", "estado": "EN CURSO"},
+    {"norma": "DS 44", "articulo": "Art. 11", "tema": "Plan de emergencia", "obligacion": "Disponer de plan de emergencias, simulacros anuales y responsables designados.", "aplica_a": "Empresa / Faenas", "periodicidad": "Anual", "responsable": "Gerencia / Faenas", "evidencia": "Plan y registros de simulacro", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Art. 12", "tema": "Reglamento interno HSMAT", "obligacion": "Mantener Reglamento Interno de Higiene y Seguridad actualizado y entregado a trabajadores.", "aplica_a": "Empresa", "periodicidad": "Anual", "responsable": "Gerencia / RRHH", "evidencia": "RIOHS vigente con cargo de recepción", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Art. 13", "tema": "Investigación de accidentes", "obligacion": "Investigar todo accidente/incidente, identificar causas y definir medidas correctivas.", "aplica_a": "Empresa / Faenas", "periodicidad": "Cada evento", "responsable": "Prevención / Jefatura", "evidencia": "Informes de investigación", "estado": "PENDIENTE"},
+    {"norma": "DS 44", "articulo": "Art. 14", "tema": "Auditoría SGSST", "obligacion": "Realizar auditorías internas anuales del sistema de gestión.", "aplica_a": "Empresa", "periodicidad": "Anual", "responsable": "Prevención / Auditor", "evidencia": "Informe de auditoría", "estado": "PENDIENTE"},
+    # ── Ley 16.744 — Seguro Social contra Accidentes del Trabajo ───────────
+    {"norma": "Ley 16.744", "articulo": "Art. 1-5", "tema": "Seguro obligatorio", "obligacion": "Mantener afiliación vigente y cotización al día con organismo administrador (mutualidad/ISL).", "aplica_a": "Empresa", "periodicidad": "Mensual", "responsable": "Gerencia / Contabilidad", "evidencia": "Certificado de adhesión y cotizaciones", "estado": "EN CURSO"},
+    {"norma": "Ley 16.744", "articulo": "Art. 65-71", "tema": "Comité Paritario (CPHS)", "obligacion": "Constituir CPHS si la empresa tiene ≥25 trabajadores. Reuniones mensuales y actas.", "aplica_a": "Empresa", "periodicidad": "Mensual", "responsable": "Gerencia / CPHS", "evidencia": "Actas de reunión y acuerdos", "estado": "EN CURSO"},
+    {"norma": "Ley 16.744", "articulo": "Art. 66 bis", "tema": "Subcontratación (Ley 20.123)", "obligacion": "Coordinar sistema de gestión con empresas contratistas y subcontratistas en faenas.", "aplica_a": "Empresa / Contratistas", "periodicidad": "Permanente", "responsable": "Gerencia / Mandante", "evidencia": "Convenios de coordinación y registros", "estado": "PENDIENTE"},
+    {"norma": "Ley 16.744", "articulo": "Art. 68", "tema": "Obligación de informar riesgos", "obligacion": "Informar oportuna y convenientemente a trabajadores sobre riesgos, medidas preventivas y métodos correctos.", "aplica_a": "Trabajadores", "periodicidad": "Ingreso y cambios", "responsable": "Jefatura / Prevención", "evidencia": "ODI firmadas", "estado": "EN CURSO"},
+    {"norma": "Ley 16.744", "articulo": "Art. 76", "tema": "Denuncia de accidentes (DIAT/DIEP)", "obligacion": "Denunciar todo accidente del trabajo o enfermedad profesional dentro de 24 horas.", "aplica_a": "Empresa", "periodicidad": "Cada evento", "responsable": "Prevención / RRHH", "evidencia": "DIAT/DIEP presentado", "estado": "PENDIENTE"},
+    {"norma": "Ley 16.744", "articulo": "Art. 184 CT", "tema": "Deber de protección", "obligacion": "Tomar todas las medidas necesarias para proteger eficazmente la vida y salud de los trabajadores.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia", "evidencia": "Registros de gestión preventiva", "estado": "EN CURSO"},
+    {"norma": "Ley 16.744", "articulo": "Art. 21 DS 40", "tema": "Departamento de Prevención", "obligacion": "Constituir Depto. de Prevención si la empresa tiene ≥100 trabajadores.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia", "evidencia": "Existencia y funcionamiento del departamento", "estado": "PENDIENTE"},
+    # ── DS 594 — Condiciones Sanitarias y Ambientales Básicas ──────────────
+    {"norma": "DS 594", "articulo": "Art. 3-6", "tema": "Condiciones generales de construcción", "obligacion": "Pisos, paredes, cielos en buen estado. Pasillos despejados, buena iluminación y ventilación.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Mantención", "evidencia": "Checklist DS 594", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 12-15", "tema": "Agua potable y servicios higiénicos", "obligacion": "Proveer agua potable, servicios higiénicos según dotación, duchas si corresponde.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Faena", "evidencia": "Inspecciones y registros", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 22", "tema": "Comedores", "obligacion": "Disponer de comedores separados del área de trabajo cuando corresponda (≥10 trabajadores).", "aplica_a": "Faenas", "periodicidad": "Permanente", "responsable": "Gerencia / Faena", "evidencia": "Fotografías y checklist", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 32-36", "tema": "Ventilación", "obligacion": "Mantener ventilación natural o forzada suficiente. Control de contaminantes ambientales.", "aplica_a": "Faenas / Planta", "periodicidad": "Semestral", "responsable": "Prevención / Mantención", "evidencia": "Mediciones y registros", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 44-46", "tema": "Señalización y extintores", "obligacion": "Señalización de seguridad visible. Extintores vigentes, correctamente ubicados y señalizados.", "aplica_a": "Faenas / Planta", "periodicidad": "Mensual", "responsable": "Supervisor / Mantención", "evidencia": "Inspecciones y certificados de carga", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 53-55", "tema": "Elementos de protección personal (EPP)", "obligacion": "Proporcionar EPP adecuados y gratuitos según riesgos. Capacitar en su uso y mantención.", "aplica_a": "Trabajadores", "periodicidad": "Permanente", "responsable": "Jefatura / Prevención", "evidencia": "Cargo de entrega EPP firmado", "estado": "EN CURSO"},
+    {"norma": "DS 594", "articulo": "Art. 56-65", "tema": "Ruido ocupacional", "obligacion": "Evaluar exposición a ruido. Implementar programa de vigilancia si se exceden LPP.", "aplica_a": "Trabajadores expuestos", "periodicidad": "Anual", "responsable": "Prevención / Mutual", "evidencia": "Informes de medición y programa", "estado": "PENDIENTE"},
+    {"norma": "DS 594", "articulo": "Art. 109-110", "tema": "Condiciones ambientales (calor/frío)", "obligacion": "Evaluar y controlar exposición a temperaturas extremas. Pausas y medidas de control.", "aplica_a": "Faenas expuestas", "periodicidad": "Según temporada", "responsable": "Prevención / Supervisor", "evidencia": "Protocolo y mediciones", "estado": "PENDIENTE"},
 ]
 
 ASSIGNACION_INSERT_SQL = """
@@ -2447,6 +2463,79 @@ def pendientes_empresa_faena(faena_id: int) -> list:
         return [d for d in required if d not in present]
     except Exception:
         return []
+
+
+def validate_faena_dates(fi, ft, estado: str) -> list:
+    """Valida fechas y estado de una faena. Retorna lista de errores (string)."""
+    errors = []
+    try:
+        if fi is None:
+            errors.append("Fecha de inicio requerida")
+            return errors
+        if ft is not None:
+            if ft < fi:
+                errors.append("Fecha de término no puede ser anterior a la de inicio")
+        if str(estado or "").upper() == "TERMINADA" and ft is None:
+            errors.append("Faena TERMINADA requiere fecha de término")
+    except Exception:
+        errors.append("Fechas inválidas")
+    return errors
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _faena_progress_cached(_backend: str, _dsn: str, _tenant: str):
+    """Query cacheada para faena_progress_table."""
+    try:
+        df = fetch_df("""
+            SELECT
+                f.id AS faena_id,
+                m.nombre AS mandante,
+                f.nombre AS faena,
+                f.estado,
+                f.fecha_inicio,
+                f.fecha_termino,
+                (SELECT COUNT(*) FROM asignaciones a WHERE a.faena_id=f.id) AS trabajadores,
+                (SELECT COUNT(DISTINCT a2.trabajador_id)
+                   FROM asignaciones a2
+                   JOIN trabajador_documentos td ON td.trabajador_id=a2.trabajador_id
+                  WHERE a2.faena_id=f.id) AS trab_ok
+            FROM faenas f
+            JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+        """)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # Calculate coverage and missing
+        rows = []
+        for _, r in df.iterrows():
+            fid = int(r["faena_id"])
+            tr = int(r["trabajadores"] or 0)
+            trok = int(r["trab_ok"] or 0)
+            try:
+                pend = pendientes_obligatorios(fid)
+                falt = sum(len(v) for v in pend.values()) if pend else 0
+            except Exception:
+                falt = 0
+            pct = 0.0
+            if tr > 0:
+                pct = round((trok / tr) * 100.0, 1)
+            rows.append({
+                **r.to_dict(),
+                "cobertura_docs_pct": pct,
+                "faltantes_total": falt,
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+def faena_progress_table():
+    """Tabla de progreso de faenas con semáforo de cobertura documental."""
+    try:
+        tenant = current_segav_client_key() or ""
+        return _faena_progress_cached(DB_BACKEND, PG_DSN_FINGERPRINT, tenant)
+    except Exception:
+        return pd.DataFrame()
 
 
 def _export_collect_files(faena_id: int,
@@ -6285,7 +6374,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=lambda: None, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
 
 
 def page_superadmin_empresas():

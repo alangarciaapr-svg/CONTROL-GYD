@@ -344,6 +344,30 @@ def page_trabajadores(
         st.dataframe(show, use_container_width=True, hide_index=True)
         st.caption("Para editar/eliminar: ve a la pestaña **Gestión → Editar / Eliminar**.")
 
+        # ── Exportar a Excel ──────────────────────────────────────────────────
+        if not out.empty:
+            try:
+                import io
+                buf = io.BytesIO()
+                export_df = out.copy()
+                export_df = export_df.rename(columns={
+                    "rut": "RUT", "apellidos": "Apellidos", "nombres": "Nombres",
+                    "cargo": "Cargo", "faena_actual": "Faena actual", "email": "Email",
+                    "fecha_contrato": "Fecha de contrato", "vigencia_examen": "Vigencia examen",
+                })
+                cols_export = [c for c in ["RUT","Apellidos","Nombres","Cargo","Faena actual","Email","Fecha de contrato","Vigencia examen"] if c in export_df.columns]
+                export_df[cols_export].to_excel(buf, index=False, sheet_name="Trabajadores", engine="openpyxl")
+                st.download_button(
+                    "📥 Exportar trabajadores a Excel",
+                    data=buf.getvalue(),
+                    file_name="trabajadores_segav.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_export_trab_xlsx",
+                    use_container_width=True,
+                )
+            except Exception as _e:
+                st.caption(f"⚠️ No se pudo generar Excel: {_e}")
+
 def page_asignar_trabajadores(
     *,
     fetch_df,
