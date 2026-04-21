@@ -300,14 +300,14 @@ def _storage_set_last_error(resp=None, url: str | None = None, method: str | Non
         if exc is not None:
             payload["exception"] = str(exc)[:300]
         st.session_state["storage_last_error"] = payload
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("storage", _exc)
 
 def _storage_clear_last_error():
     try:
         st.session_state.pop("storage_last_error", None)
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("_storage_clear_last_error.storage", _exc)
 
 def _storage_error_summary(resp=None):
     if resp is None:
@@ -321,8 +321,8 @@ def _storage_error_summary(resp=None):
                 return f"{code}: {msg}"
             if msg:
                 return msg
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_324", _exc)
     return (getattr(resp, "text", "") or "").strip()[:300]
 
 def _storage_should_try_put(resp) -> bool:
@@ -587,8 +587,8 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
                     "Revisa tus Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET. "
                     "En Backup/Restore verás un diagnóstico, o revisa Manage app → Logs."
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_soft_error("storage.backup", _exc)
     else:
         # Storage administrativo no configurado: queda local
         bucket = None
@@ -599,8 +599,8 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
                     "Storage está configurado solo en modo lectura o con una key sin privilegios de escritura. "
                     "El documento quedó solo en almacenamiento local. Revisa SUPABASE_SERVICE_ROLE_KEY."
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_soft_error("storage", _exc)
 
     return local_path, bucket, object_path
 
@@ -795,6 +795,64 @@ SGSST_RESULTADOS = ["CUMPLE", "NO CUMPLE", "OBSERVACIÓN"]
 SGSST_TIPOS_EVENTO = ["INCIDENTE", "ACCIDENTE DEL TRABAJO", "ACCIDENTE DE TRAYECTO", "ENFERMEDAD PROFESIONAL", "HALLAZGO"]
 SGSST_GRAVEDADES = ["BAJA", "MEDIA", "ALTA", "GRAVE/FATAL"]
 SGSST_TIPOS_CAP = ["ODI", "INDUCCIÓN", "CAPACITACIÓN", "CHARLA DE SEGURIDAD", "SIMULACRO"]
+
+# ── DS 594 Checklist Items por categoría ──────────────────────────────────
+DS594_CHECKLIST_ITEMS = {
+    "Condiciones generales": [
+        "Pisos en buen estado, sin grietas ni desniveles peligrosos",
+        "Pasillos y vías de circulación despejados (mín. 1.2m ancho)",
+        "Iluminación general suficiente en áreas de trabajo",
+        "Techumbre sin filtraciones",
+        "Ventilación natural o forzada adecuada",
+    ],
+    "Agua potable y servicios higiénicos": [
+        "Agua potable disponible y accesible para todos los trabajadores",
+        "Servicios higiénicos limpios y en cantidad según dotación",
+        "Lavamanos con jabón y medio de secado",
+        "Duchas disponibles (si corresponde por actividad)",
+        "WC separados por sexo con privacidad",
+    ],
+    "Comedores y descanso": [
+        "Comedor separado del área de trabajo",
+        "Mesas y sillas en buen estado",
+        "Medios para calentar alimentos",
+        "Agua potable en comedor",
+        "Condiciones de higiene adecuadas en comedor",
+    ],
+    "Señalización y emergencia": [
+        "Señalización de seguridad visible y en buen estado",
+        "Extintores vigentes y correctamente ubicados",
+        "Vías de evacuación señalizadas y despejadas",
+        "Punto de encuentro señalizado",
+        "Botiquín de primeros auxilios equipado",
+    ],
+    "EPP y protección personal": [
+        "EPP proporcionados según riesgos del puesto",
+        "EPP en buen estado de conservación",
+        "Trabajadores capacitados en uso correcto de EPP",
+        "Registro de entrega de EPP actualizado",
+        "EPP específicos para riesgos especiales (químicos, altura, ruido)",
+    ],
+    "Condiciones ambientales": [
+        "Niveles de ruido controlados o protección auditiva",
+        "Exposición a polvo/partículas controlada",
+        "Temperatura ambiente tolerable o medidas de control",
+        "Almacenamiento de sustancias peligrosas según normativa",
+        "Hojas de seguridad (HDS) disponibles para químicos",
+    ],
+}
+
+# ── Tipos de EPP ─────────────────────────────────────────────────────────
+EPP_TIPOS = [
+    "Casco de seguridad", "Protección auditiva (tapones/orejeras)", "Lentes de seguridad",
+    "Guantes de seguridad", "Calzado de seguridad", "Chaleco reflectante",
+    "Arnés de seguridad", "Respirador/mascarilla", "Protector solar",
+    "Ropa de trabajo", "Protección facial (careta)", "Rodilleras",
+    "Botas de agua", "Traje Tyvek", "Otro",
+]
+
+# ── Roles por empresa ────────────────────────────────────────────────────
+ROLES_EMPRESA = ["ADMIN", "OPERADOR", "LECTOR", "SUPERVISOR"]
 SGSST_MATRIZ_BASE = [
     # ── DS 44 — Sistema de Gestión de Seguridad y Salud en el Trabajo ──────
     {"norma": "DS 44", "articulo": "Art. 3-5", "tema": "Implementación SGSST", "obligacion": "Mantener un sistema de gestión preventivo con política, instrumentos y seguimiento documentado.", "aplica_a": "Empresa", "periodicidad": "Permanente", "responsable": "Gerencia / Prevención", "evidencia": "Manual SGSST, registros y seguimiento", "estado": "EN CURSO"},
@@ -1235,8 +1293,8 @@ def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: st
             "DELETE FROM segav_audit_log WHERE id NOT IN"
             " (SELECT id FROM segav_audit_log ORDER BY id DESC LIMIT 2000)"
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("delete.select", _exc)
 
 
 def clean_rut(rut: str) -> str:
@@ -1439,8 +1497,8 @@ def _count_file_refs(file_path, bucket, object_path, *, exclude_table=None, excl
             df = fetch_df(f"SELECT COUNT(*) AS n FROM {tbl} WHERE " + " AND ".join(where), tuple(params))
             if df is not None and not df.empty:
                 total += int(df.iloc[0]["n"] or 0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("select", _exc)
     return total
 
 def cleanup_deleted_file_refs(file_refs):
@@ -1524,8 +1582,8 @@ def conn():
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         c.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("execute", _exc)
     return c
 
 def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
@@ -2310,8 +2368,8 @@ def ensure_sgsst_seed_data():
                 """,
                 (tenant_key, item.get('norma'), item.get('articulo'), item.get('tema'), item.get('obligacion'), item.get('aplica_a'), item.get('periodicidad'), item.get('responsable'), item.get('evidencia'), item.get('estado'), datetime.now().isoformat(timespec='seconds'), datetime.now().isoformat(timespec='seconds')),
             )
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_2313", _exc)
 
 
 
@@ -2379,13 +2437,13 @@ def auto_backup_db(tag: str = "auto"):
                     try:
                         if row.get("file_path") and os.path.exists(str(row["file_path"])):
                             os.remove(str(row["file_path"]))
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        _record_soft_error("line_2382", _exc)
                     execute("DELETE FROM auto_backup_historial WHERE id=?", (int(row["id"]),))
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as _exc:
+            _record_soft_error("delete", _exc)
+    except Exception as _exc:
+        _record_soft_error("delete", _exc)
 
 
 def restore_from_backup_zip(zip_bytes: bytes):
@@ -3061,8 +3119,8 @@ def current_tenant_key() -> str:
                 key = str(active_df.iloc[0].get('cliente_key') or '').strip()
                 if key:
                     return key
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_3064", _exc)
     return ''
 
 
@@ -3079,6 +3137,9 @@ MULTIEMPRESA_TABLES = [
     'trabajador_documentos', 'empresa_documentos', 'faena_empresa_documentos', 'export_historial',
     'export_historial_mes', 'sgsst_empresa', 'sgsst_matriz_legal', 'sgsst_programa_anual',
     'sgsst_miper', 'sgsst_inspecciones', 'sgsst_incidentes', 'sgsst_capacitaciones', 'sgsst_auditoria',
+    'sgsst_epp_entrega', 'sgsst_checklist_ds594',
+    'sgsst_cphs', 'sgsst_cphs_actas', 'sgsst_diat_diep',
+    'sgsst_vigilancia', 'sgsst_subcontratistas', 'sgsst_riohs',
 ]
 
 
@@ -3088,8 +3149,124 @@ def ensure_multiempresa_columns_postgres():
     for table in MULTIEMPRESA_TABLES:
         try:
             execute(f"ALTER TABLE IF EXISTS {table} ADD COLUMN IF NOT EXISTS cliente_key TEXT;")
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("execute", _exc)
+    # ── P2: New columns and tables ────────────────────────────────────────
+    p2_stmts = [
+        # Roles por empresa
+        "ALTER TABLE IF EXISTS user_client_access ADD COLUMN IF NOT EXISTS role_empresa TEXT DEFAULT 'OPERADOR';",
+        # Capacitaciones mejoradas
+        "ALTER TABLE IF EXISTS sgsst_capacitaciones ADD COLUMN IF NOT EXISTS asistentes TEXT;",
+        "ALTER TABLE IF EXISTS sgsst_capacitaciones ADD COLUMN IF NOT EXISTS evaluacion_pct NUMERIC;",
+        "ALTER TABLE IF EXISTS sgsst_capacitaciones ADD COLUMN IF NOT EXISTS certificado TEXT;",
+        # EPP entrega
+        """CREATE TABLE IF NOT EXISTS sgsst_epp_entrega (
+            id BIGSERIAL PRIMARY KEY,
+            trabajador_id BIGINT REFERENCES trabajadores(id) ON DELETE CASCADE,
+            faena_id BIGINT REFERENCES faenas(id) ON DELETE SET NULL,
+            epp_tipo TEXT NOT NULL,
+            fecha_entrega TEXT NOT NULL,
+            fecha_vencimiento TEXT,
+            cantidad INTEGER DEFAULT 1,
+            talla TEXT,
+            marca TEXT,
+            observacion TEXT,
+            cliente_key TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );""",
+        # Checklist DS 594
+        """CREATE TABLE IF NOT EXISTS sgsst_checklist_ds594 (
+            id BIGSERIAL PRIMARY KEY,
+            faena_id BIGINT REFERENCES faenas(id) ON DELETE CASCADE,
+            fecha_inspeccion TEXT NOT NULL,
+            inspector TEXT,
+            categoria TEXT NOT NULL,
+            item TEXT NOT NULL,
+            cumple BOOLEAN DEFAULT FALSE,
+            observacion TEXT,
+            accion_correctiva TEXT,
+            responsable TEXT,
+            plazo TEXT,
+            cliente_key TEXT,
+            created_at TEXT
+        );""",
+    ]
+    for s in p2_stmts:
+        try:
+            execute(s)
+        except Exception as _exc:
+            _record_soft_error("p2_migration_pg", _exc)
+    # ── P3: Legal compliance tables ───────────────────────────────────────
+    p3_stmts = [
+        """CREATE TABLE IF NOT EXISTS sgsst_cphs (
+            id BIGSERIAL PRIMARY KEY,
+            fecha_eleccion TEXT, vigencia_hasta TEXT,
+            representantes_empresa TEXT, representantes_trabajadores TEXT,
+            presidente TEXT, secretario TEXT,
+            dotacion_actual INTEGER DEFAULT 0,
+            estado TEXT DEFAULT 'VIGENTE',
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_cphs_actas (
+            id BIGSERIAL PRIMARY KEY,
+            cphs_id BIGINT REFERENCES sgsst_cphs(id) ON DELETE CASCADE,
+            fecha TEXT NOT NULL, numero_acta TEXT,
+            asistentes TEXT, temas TEXT, acuerdos TEXT,
+            seguimiento TEXT, estado TEXT DEFAULT 'ABIERTA',
+            cliente_key TEXT, created_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_diat_diep (
+            id BIGSERIAL PRIMARY KEY,
+            tipo TEXT NOT NULL DEFAULT 'DIAT',
+            trabajador_id BIGINT REFERENCES trabajadores(id) ON DELETE SET NULL,
+            faena_id BIGINT REFERENCES faenas(id) ON DELETE SET NULL,
+            fecha_accidente TEXT NOT NULL, hora_accidente TEXT,
+            fecha_denuncia TEXT, numero_denuncia TEXT,
+            lugar TEXT, descripcion TEXT,
+            tipo_lesion TEXT, parte_cuerpo TEXT,
+            dias_perdidos INTEGER DEFAULT 0,
+            testigos TEXT, medidas_correctivas TEXT,
+            estado TEXT DEFAULT 'ABIERTO',
+            organismo_admin TEXT,
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_vigilancia (
+            id BIGSERIAL PRIMARY KEY,
+            protocolo TEXT NOT NULL,
+            trabajador_id BIGINT REFERENCES trabajadores(id) ON DELETE SET NULL,
+            faena_id BIGINT REFERENCES faenas(id) ON DELETE SET NULL,
+            agente TEXT, nivel_exposicion TEXT,
+            fecha_evaluacion TEXT, fecha_proxima TEXT,
+            resultado TEXT, medidas TEXT,
+            estado TEXT DEFAULT 'VIGENTE',
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_subcontratistas (
+            id BIGSERIAL PRIMARY KEY,
+            rut_empresa TEXT NOT NULL, razon_social TEXT NOT NULL,
+            mandante_id BIGINT REFERENCES mandantes(id) ON DELETE SET NULL,
+            faena_id BIGINT REFERENCES faenas(id) ON DELETE SET NULL,
+            contacto TEXT, email TEXT, telefono TEXT,
+            fecha_inicio TEXT, fecha_termino TEXT,
+            estado TEXT DEFAULT 'ACTIVO',
+            docs_al_dia BOOLEAN DEFAULT FALSE,
+            observaciones TEXT,
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_riohs (
+            id BIGSERIAL PRIMARY KEY,
+            version TEXT NOT NULL, fecha_vigencia TEXT NOT NULL,
+            aprobado_por TEXT, observaciones TEXT,
+            file_path TEXT, sha256 TEXT,
+            cliente_key TEXT, created_at TEXT
+        );""",
+    ]
+    for s in p3_stmts:
+        try:
+            execute(s)
+        except Exception as _exc:
+            _record_soft_error("p3_migration_pg", _exc)
 
 
 def ensure_multiempresa_columns_sqlite(c):
@@ -3098,6 +3275,112 @@ def ensure_multiempresa_columns_sqlite(c):
     for table in MULTIEMPRESA_TABLES:
         try:
             migrate_add_columns_if_missing(c, table, {'cliente_key': 'TEXT'})
+        except Exception as _exc:
+            _record_soft_error("migrate", _exc)
+    # ── P2: New columns and tables ────────────────────────────────────────
+    try:
+        migrate_add_columns_if_missing(c, 'user_client_access', {'role_empresa': 'TEXT'})
+    except Exception:
+        pass
+    try:
+        migrate_add_columns_if_missing(c, 'sgsst_capacitaciones', {
+            'asistentes': 'TEXT', 'evaluacion_pct': 'NUMERIC', 'certificado': 'TEXT',
+        })
+    except Exception:
+        pass
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS sgsst_epp_entrega (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER REFERENCES trabajadores(id) ON DELETE CASCADE,
+            faena_id INTEGER REFERENCES faenas(id) ON DELETE SET NULL,
+            epp_tipo TEXT NOT NULL,
+            fecha_entrega TEXT NOT NULL,
+            fecha_vencimiento TEXT,
+            cantidad INTEGER DEFAULT 1,
+            talla TEXT, marca TEXT, observacion TEXT,
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""")
+    except Exception:
+        pass
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS sgsst_checklist_ds594 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faena_id INTEGER REFERENCES faenas(id) ON DELETE CASCADE,
+            fecha_inspeccion TEXT NOT NULL,
+            inspector TEXT,
+            categoria TEXT NOT NULL,
+            item TEXT NOT NULL,
+            cumple BOOLEAN DEFAULT 0,
+            observacion TEXT, accion_correctiva TEXT,
+            responsable TEXT, plazo TEXT,
+            cliente_key TEXT, created_at TEXT
+        );""")
+    except Exception:
+        pass
+    # ── P3: Legal compliance tables (SQLite) ──────────────────────────────
+    p3_sqlite = [
+        """CREATE TABLE IF NOT EXISTS sgsst_cphs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_eleccion TEXT, vigencia_hasta TEXT,
+            representantes_empresa TEXT, representantes_trabajadores TEXT,
+            presidente TEXT, secretario TEXT,
+            dotacion_actual INTEGER DEFAULT 0, estado TEXT DEFAULT 'VIGENTE',
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_cphs_actas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cphs_id INTEGER REFERENCES sgsst_cphs(id) ON DELETE CASCADE,
+            fecha TEXT NOT NULL, numero_acta TEXT,
+            asistentes TEXT, temas TEXT, acuerdos TEXT,
+            seguimiento TEXT, estado TEXT DEFAULT 'ABIERTA',
+            cliente_key TEXT, created_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_diat_diep (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL DEFAULT 'DIAT',
+            trabajador_id INTEGER REFERENCES trabajadores(id) ON DELETE SET NULL,
+            faena_id INTEGER REFERENCES faenas(id) ON DELETE SET NULL,
+            fecha_accidente TEXT NOT NULL, hora_accidente TEXT,
+            fecha_denuncia TEXT, numero_denuncia TEXT,
+            lugar TEXT, descripcion TEXT,
+            tipo_lesion TEXT, parte_cuerpo TEXT,
+            dias_perdidos INTEGER DEFAULT 0,
+            testigos TEXT, medidas_correctivas TEXT,
+            estado TEXT DEFAULT 'ABIERTO', organismo_admin TEXT,
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_vigilancia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            protocolo TEXT NOT NULL,
+            trabajador_id INTEGER REFERENCES trabajadores(id) ON DELETE SET NULL,
+            faena_id INTEGER REFERENCES faenas(id) ON DELETE SET NULL,
+            agente TEXT, nivel_exposicion TEXT,
+            fecha_evaluacion TEXT, fecha_proxima TEXT,
+            resultado TEXT, medidas TEXT, estado TEXT DEFAULT 'VIGENTE',
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_subcontratistas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rut_empresa TEXT NOT NULL, razon_social TEXT NOT NULL,
+            mandante_id INTEGER REFERENCES mandantes(id) ON DELETE SET NULL,
+            faena_id INTEGER REFERENCES faenas(id) ON DELETE SET NULL,
+            contacto TEXT, email TEXT, telefono TEXT,
+            fecha_inicio TEXT, fecha_termino TEXT,
+            estado TEXT DEFAULT 'ACTIVO', docs_al_dia BOOLEAN DEFAULT 0,
+            observaciones TEXT,
+            cliente_key TEXT, created_at TEXT, updated_at TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS sgsst_riohs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL, fecha_vigencia TEXT NOT NULL,
+            aprobado_por TEXT, observaciones TEXT,
+            file_path TEXT, sha256 TEXT,
+            cliente_key TEXT, created_at TEXT
+        );""",
+    ]
+    for s in p3_sqlite:
+        try:
+            c.execute(s)
         except Exception:
             pass
 
@@ -3158,8 +3441,8 @@ def backfill_multiempresa_cliente_key():
     try:
         if str(segav_erp_value('legacy_owner_client_key', '') or '').strip() != legacy_owner_key:
             set_segav_erp_config_value('legacy_owner_client_key', legacy_owner_key)
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_3161", _exc)
     already_done = str(segav_erp_value('legacy_backfill_v2_done', 'NO') or 'NO').strip().upper() == 'SI'
     if already_done:
         return
@@ -3167,24 +3450,24 @@ def backfill_multiempresa_cliente_key():
     for table in MULTIEMPRESA_TABLES:
         try:
             execute(f"UPDATE {table} SET cliente_key=? WHERE cliente_key IS NULL OR TRIM(cliente_key)=''", (legacy_owner_key,))
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("update", _exc)
         if segav_key and segav_key != legacy_owner_key:
             try:
                 segav_count = int(fetch_value(f"SELECT COUNT(*) FROM {table} WHERE COALESCE(cliente_key,'')=?", (segav_key,), default=0) or 0)
                 owner_count = int(fetch_value(f"SELECT COUNT(*) FROM {table} WHERE COALESCE(cliente_key,'')=?", (legacy_owner_key,), default=0) or 0)
                 if segav_count > 0 and owner_count == 0:
                     execute(f"UPDATE {table} SET cliente_key=? WHERE COALESCE(cliente_key,'')=?", (legacy_owner_key, segav_key))
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_soft_error("select.update", _exc)
     try:
         clear_app_caches()
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_3182", _exc)
     try:
         set_segav_erp_config_value('legacy_backfill_v2_done', 'SI')
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("backfill", _exc)
 
 
 def ensure_active_tenant_scaffold():
@@ -3409,13 +3692,18 @@ def get_empresa_required_doc_types() -> list[str]:
     return docs or list(DOC_EMPRESA_REQUERIDOS)
 
 
-def get_empresa_monthly_doc_types() -> list[str]:
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_empresa_monthly_doc_types(_backend: str, _dsn: str):
     df = segav_empresa_docs_df()
     if df is None or df.empty:
         return list(DOC_EMPRESA_MENSUALES)
     df = df[df['mensual'].fillna(1).astype(int) == 1]
     docs = [str(v).strip() for v in df['doc_tipo'].tolist() if str(v).strip()]
     return docs or list(DOC_EMPRESA_MENSUALES)
+
+
+def get_empresa_monthly_doc_types() -> list[str]:
+    return _cached_empresa_monthly_doc_types(DB_BACKEND, PG_DSN_FINGERPRINT)
 
 
 def sgsst_log(modulo: str, accion: str, detalle: str = ""):
@@ -3428,8 +3716,8 @@ def sgsst_log(modulo: str, accion: str, detalle: str = ""):
             "INSERT INTO sgsst_auditoria(cliente_key, modulo, accion, detalle, usuario, created_at) VALUES(?,?,?,?,?,?)",
             (current_tenant_key(), modulo, accion, detalle, user, datetime.now().isoformat(timespec='seconds')),
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("execute.insert", _exc)
 
 # ----------------------------
 # Auth (usuarios/roles/permisos)
@@ -3444,8 +3732,8 @@ def get_login_logo_bytes():
         try:
             with open(LOCAL_BRAND_LOGO_PATH, "rb") as fp:
                 return fp.read()
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("line_3452", _exc)
     return get_brand_logo_bytes(LOGIN_LOGO_URL)
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -3564,8 +3852,8 @@ def perms_from_row(role: str, perms_json: str | None):
                 for k, v in extra.items():
                     if k in perms:
                         perms[k] = bool(v)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("line_3572", _exc)
     return perms
 
 def ensure_users_table():
@@ -3634,8 +3922,8 @@ def ensure_storage_columns_postgres():
     for s in stmts:
         try:
             execute(s)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("execute", _exc)
 
 
 def sync_postgres_identity_sequence(table: str, pk: str = "id"):
@@ -3743,8 +4031,8 @@ def ensure_storage_columns_sqlite(c):
     for table, cols in targets.items():
         try:
             migrate_add_columns_if_missing(c, table, cols)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("migrate", _exc)
 
 def users_count() -> int:
     try:
@@ -3786,8 +4074,8 @@ def ensure_superadmin_exists():
             "UPDATE users SET role=?, perms_json=?, updated_at=datetime('now') WHERE id=?",
             ("SUPERADMIN", json.dumps(SUPERADMIN_PERMS), uid),
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("execute.update", _exc)
 
 
 def auth_set_session(user_row: dict):
@@ -3900,8 +4188,8 @@ def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant
 def visible_clientes_df():
     try:
         ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("visible_clientes_df.ensure", _exc)
     df = segav_clientes_df()
     if df is None or df.empty:
         return df
@@ -3946,8 +4234,8 @@ def auth_gate_ui():
                 "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active) VALUES(?,?,?,?,?,1)",
                 (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            _record_soft_error("execute.insert", _exc)
 
     err_msg = st.session_state.get("_lg_err", "")
 
@@ -4171,8 +4459,8 @@ html,body{
                         auth_set_session(row)
                         try:
                             audit_log("LOGIN", "users", f"Login exitoso: {u}")
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            _record_soft_error("audit", _exc)
                         st.rerun()
 
     with col_right:
@@ -4215,8 +4503,8 @@ def _record_soft_error(context: str, exc: Exception | None = None):
         # evita crecimiento infinito
         if len(logs) > 30:
             del logs[:-30]
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("line_4223", _exc)
 
 
 # ----------------------------
@@ -4357,8 +4645,8 @@ with st.sidebar:
                 _current_row = _cli_row_map.get(str(_cli_selected), _cli_df.iloc[0])
                 _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
                 st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
-    except Exception:
-        pass
+    except Exception as _exc:
+        _record_soft_error("select", _exc)
 
     # Navegación (simple)
     PAGE_LABELS = {
@@ -4953,8 +5241,8 @@ def _page_asignar_trabajadores_impl():
                                     )
                                     try:
                                         assigned += int(cur_asg.rowcount or 0)
-                                    except Exception:
-                                        pass
+                                    except Exception as _exc:
+                                        _record_soft_error("line_4961", _exc)
 
                             c.commit()
 
@@ -6199,8 +6487,8 @@ def page_admin_usuarios():
                 auto_backup_db("users_update")
                 try:
                     audit_log("EDITAR_USUARIO", "users", f"Usuario modificado: {row.get('username','?')} → rol={new_role}")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    _record_soft_error("update.audit", _exc)
                 st.success("Cambios guardados.")
                 st.rerun()
             except Exception as e:
@@ -6227,8 +6515,8 @@ def page_admin_usuarios():
                 auto_backup_db("users_delete")
                 try:
                     audit_log("ELIMINAR_USUARIO", "users", f"Usuario eliminado: {row.get('username','?')}")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    _record_soft_error("delete.audit", _exc)
                 st.success("Usuario eliminado.")
                 st.rerun()
             except Exception as e:
@@ -6276,8 +6564,8 @@ def page_admin_usuarios():
                 auto_backup_db("users_create")
                 try:
                     audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role}")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    _record_soft_error("backup.audit", _exc)
                 st.success("Usuario creado.")
                 st.rerun()
             except Exception as e:
@@ -6347,7 +6635,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user, segav_template_payload=segav_template_payload)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user, segav_template_payload=segav_template_payload, DS594_CHECKLIST_ITEMS=DS594_CHECKLIST_ITEMS, EPP_TIPOS=EPP_TIPOS, ROLES_EMPRESA=ROLES_EMPRESA)
 
 
 def page_superadmin_empresas():

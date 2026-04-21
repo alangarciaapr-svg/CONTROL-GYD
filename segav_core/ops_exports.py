@@ -42,7 +42,7 @@ def page_export_zip(
     )
     st.session_state["selected_faena_id"] = int(faena_id)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Export por mes"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Export por mes", "📄 Reporte Cumplimiento"])
 
     with tab1:
         pend = pendientes_obligatorios(int(faena_id))
@@ -363,6 +363,85 @@ def page_export_zip(
                 )
             except Exception as e:
                 st.warning(f"No se pudo abrir el ZIP mensual guardado: {e}")
+
+    with tab5:
+        st.markdown("### 📄 Reporte de Cumplimiento por Faena")
+        st.caption("Genera un reporte HTML descargable e imprimible con el estado documental completo de la faena seleccionada.")
+
+        if faena_id and int(faena_id) > 0:
+            from datetime import date as _date
+            try:
+                faena_info = fetch_df("SELECT f.nombre, m.nombre AS mandante, f.estado, f.fecha_inicio, f.fecha_termino FROM faenas f JOIN mandantes m ON m.id=f.mandante_id WHERE f.id=?", (int(faena_id),))
+                fi = faena_info.iloc[0] if faena_info is not None and not faena_info.empty else {}
+            except Exception:
+                fi = {}
+
+            pend = pendientes_obligatorios(int(faena_id))
+            asig = fetch_df("SELECT t.rut, t.apellidos, t.nombres, t.cargo FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id WHERE a.faena_id=? ORDER BY t.apellidos", (int(faena_id),))
+
+            if st.button("📄 Generar reporte HTML", type="primary", use_container_width=True, key="btn_compliance_report"):
+                rows_html = ""
+                total_ok = total_falt = 0
+                if asig is not None and not asig.empty:
+                    for _, tr in asig.iterrows():
+                        rut = str(tr.get("rut",""))
+                        nombre = f"{tr.get('apellidos','')} {tr.get('nombres','')}"
+                        cargo = str(tr.get("cargo",""))
+                        faltantes = pend.get(rut, [])
+                        estado = "✅ Completo" if not faltantes else f"❌ Faltan {len(faltantes)}"
+                        falt_txt = ", ".join(faltantes) if faltantes else "-"
+                        color = "#dcfce7" if not faltantes else "#fee2e2"
+                        rows_html += f'<tr style="background:{color}"><td>{rut}</td><td>{nombre}</td><td>{cargo}</td><td>{estado}</td><td style="font-size:11px">{falt_txt}</td></tr>\n'
+                        if faltantes:
+                            total_falt += 1
+                        else:
+                            total_ok += 1
+
+                total_trab = total_ok + total_falt
+                pct = round((total_ok / total_trab) * 100, 1) if total_trab else 0
+
+                html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Reporte Cumplimiento - {fi.get('nombre','Faena')}</title>
+<style>
+body{{font-family:Arial,sans-serif;margin:30px;color:#1e293b}}
+h1{{color:#1e40af;border-bottom:3px solid #1e40af;padding-bottom:8px}}
+h2{{color:#334155;margin-top:24px}}
+table{{width:100%;border-collapse:collapse;margin:12px 0}}
+th{{background:#1e40af;color:#fff;padding:8px;text-align:left;font-size:12px}}
+td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:12px}}
+.summary{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:16px 0}}
+.metric{{display:inline-block;margin:0 24px 0 0}}
+.metric b{{font-size:22px;color:#1e40af}}
+@media print{{body{{margin:15px}} .no-print{{display:none}}}}
+</style></head><body>
+<h1>SEGAV ERP — Reporte de Cumplimiento Documental</h1>
+<div class="summary">
+<p><b>Faena:</b> {fi.get('nombre','N/A')} &nbsp;|&nbsp; <b>Mandante:</b> {fi.get('mandante','N/A')} &nbsp;|&nbsp; <b>Estado:</b> {fi.get('estado','N/A')}</p>
+<p><b>Período:</b> {fi.get('fecha_inicio','?')} a {fi.get('fecha_termino','vigente')} &nbsp;|&nbsp; <b>Fecha reporte:</b> {_date.today().isoformat()}</p>
+<div class="metric">Trabajadores: <b>{total_trab}</b></div>
+<div class="metric">Completos: <b style="color:#16a34a">{total_ok}</b></div>
+<div class="metric">Con faltantes: <b style="color:#dc2626">{total_falt}</b></div>
+<div class="metric">Cobertura: <b>{pct}%</b></div>
+</div>
+<h2>Detalle por trabajador</h2>
+<table>
+<tr><th>RUT</th><th>Nombre</th><th>Cargo</th><th>Estado</th><th>Documentos faltantes</th></tr>
+{rows_html}
+</table>
+<p style="margin-top:24px;font-size:10px;color:#94a3b8">Generado por SEGAV ERP · {_date.today().isoformat()} · Este reporte es imprimible (Ctrl+P)</p>
+</body></html>"""
+
+                st.download_button(
+                    "⬇️ Descargar reporte HTML (imprimible como PDF)",
+                    data=html.encode("utf-8"),
+                    file_name=f"reporte_cumplimiento_faena_{int(faena_id)}.html",
+                    mime="text/html",
+                    use_container_width=True,
+                    key="dl_compliance_html",
+                )
+                st.success(f"Reporte generado: {total_trab} trabajadores, cobertura {pct}%")
+        else:
+            st.info("Selecciona una faena en las pestañas anteriores para generar el reporte.")
 
 
 def page_backup_restore(

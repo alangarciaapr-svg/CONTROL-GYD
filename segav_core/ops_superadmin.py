@@ -39,6 +39,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
     access_df = fetch_df(
         """
         SELECT a.user_id, a.cliente_key, COALESCE(a.is_company_admin,0) AS is_company_admin,
+               COALESCE(a.role_empresa,'OPERADOR') AS role_empresa,
                u.username, u.role, u.is_active
           FROM user_client_access a
           LEFT JOIN users u ON u.id=a.user_id
@@ -237,13 +238,36 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 key="sa_company_admins",
                 format_func=lambda uid: f"{active_users[active_users['id'].astype(int)==int(uid)].iloc[0]['username']} · {active_users[active_users['id'].astype(int)==int(uid)].iloc[0]['role']}",
             )
+
+            # ── Roles por empresa ─────────────────────────────────────────
+            st.markdown("##### Roles por empresa")
+            st.caption("Asigna un rol específico a cada usuario para esta empresa. El rol de empresa tiene prioridad sobre el rol global.")
+            ROLES_EMP = ["ADMIN", "OPERADOR", "LECTOR", "SUPERVISOR"]
+            user_roles = {}
+            for uid in selected_users:
+                uname = active_users[active_users['id'].astype(int)==int(uid)].iloc[0]['username']
+                # Get current role_empresa if exists
+                current_role = "OPERADOR"
+                if access_df is not None and not access_df.empty:
+                    match = access_df[(access_df["cliente_key"].astype(str)==admin_cli_key) & (access_df["user_id"].astype(int)==int(uid))]
+                    if not match.empty and "role_empresa" in match.columns:
+                        current_role = str(match.iloc[0].get("role_empresa") or "OPERADOR")
+                default_idx = ROLES_EMP.index(current_role) if current_role in ROLES_EMP else 1
+                user_roles[uid] = st.selectbox(
+                    f"Rol de {uname}",
+                    ROLES_EMP, index=default_idx,
+                    key=f"sa_role_{uid}_{admin_cli_key}",
+                )
+
             if st.button("Guardar asignaciones de empresa", key="sa_save_company_access", type="primary"):
                 now = datetime.now().isoformat(timespec='seconds')
                 execute("DELETE FROM user_client_access WHERE cliente_key=?", (admin_cli_key,))
                 for uid in selected_users:
+                    role_emp = user_roles.get(uid, "OPERADOR")
+                    is_admin = 1 if int(uid) in {int(x) for x in selected_admins} else 0
                     execute(
-                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, created_at, updated_at) VALUES(?,?,?,?,?)",
-                        (int(uid), admin_cli_key, 1 if int(uid) in {int(x) for x in selected_admins} else 0, now, now),
+                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                        (int(uid), admin_cli_key, is_admin, role_emp, now, now),
                     )
                 clear_app_caches()
                 sgsst_log("SuperAdmin / Empresas", "Asignar administradores", admin_cli_key)

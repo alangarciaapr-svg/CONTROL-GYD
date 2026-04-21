@@ -48,6 +48,9 @@ def page_sgsst(
     doc_tipo_join,
     current_user,
     segav_template_payload,
+    DS594_CHECKLIST_ITEMS=None,
+    EPP_TIPOS=None,
+    ROLES_EMPRESA=None,
 ):
     ui_header("Mi Empresa / SGSST", "Núcleo comercializable de SEGAV ERP: configurable para cualquier empresa, sin reemplazar lo ya existente.")
     ensure_sgsst_seed_data()
@@ -88,9 +91,16 @@ def page_sgsst(
         "📅 Programa anual",
         "⚠️ MIPER",
         "🧯 Inspecciones DS 594",
+        "📋 Checklist DS 594",
         "🩹 Accidentes e Incidentes",
         "🎓 Capacitaciones y ODI",
+        "🦺 EPP por Trabajador",
         "🧾 Auditoría",
+        "👷 CPHS",
+        "📝 DIAT / DIEP",
+        "🔬 Vigilancia Ocupacional",
+        "🏗️ Subcontratistas",
+        "📕 RIOHS",
     ])
 
     with tabs[0]:
@@ -523,7 +533,68 @@ def page_sgsst(
                 st.success("Inspección registrada.")
                 st.rerun()
 
+    # ── TAB 8: CHECKLIST DS 594 ───────────────────────────────────────────
     with tabs[8]:
+        st.markdown("### 📋 Checklist DS 594 — Inspección digital")
+        st.caption("Checklist estandarizado para verificar cumplimiento de condiciones sanitarias y ambientales según DS 594.")
+        _checklist_items = DS594_CHECKLIST_ITEMS or {}
+        faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
+        faena_opts_ck = faenas_df["id"].tolist() if not faenas_df.empty else []
+        if not faena_opts_ck:
+            st.info("Crea una faena primero para realizar inspecciones.")
+        else:
+            ck_faena = st.selectbox("Faena a inspeccionar", faena_opts_ck, key="ck594_faena",
+                format_func=lambda x: str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            ck_inspector = st.text_input("Inspector", key="ck594_inspector", placeholder="Nombre del inspector")
+            ck_fecha = st.date_input("Fecha inspección", value=date.today(), key="ck594_fecha")
+
+            st.divider()
+            results = {}
+            obs_dict = {}
+            for cat, items in _checklist_items.items():
+                st.markdown(f"**{cat}**")
+                for idx_item, item in enumerate(items):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.caption(item)
+                    with c2:
+                        key_ck = f"ck594_{cat[:8]}_{idx_item}"
+                        results[(cat, item)] = st.checkbox("Cumple", value=True, key=key_ck)
+
+            if st.button("💾 Guardar checklist completo", type="primary", use_container_width=True, key="ck594_save"):
+                now = datetime.now().isoformat(timespec='seconds')
+                saved = 0
+                for (cat, item), cumple in results.items():
+                    try:
+                        execute(
+                            "INSERT INTO sgsst_checklist_ds594(faena_id, fecha_inspeccion, inspector, categoria, item, cumple, created_at) VALUES(?,?,?,?,?,?,?)",
+                            (int(ck_faena), ck_fecha.isoformat(), ck_inspector.strip(), cat, item, 1 if cumple else 0, now),
+                        )
+                        saved += 1
+                    except Exception:
+                        pass
+                sgsst_log("Checklist DS 594", "Guardar", f"Faena {ck_faena} · {saved} ítems")
+                st.success(f"Checklist guardado: {saved} ítems registrados.")
+                st.rerun()
+
+            st.divider()
+            st.markdown("#### Historial de inspecciones")
+            hist = fetch_df("""
+                SELECT c.fecha_inspeccion, COALESCE(f.nombre,'?') AS faena, c.inspector,
+                       c.categoria, c.item, CASE WHEN c.cumple THEN '✅' ELSE '❌' END AS resultado
+                FROM sgsst_checklist_ds594 c
+                LEFT JOIN faenas f ON f.id=c.faena_id
+                ORDER BY c.id DESC LIMIT 100
+            """)
+            if hist is not None and not hist.empty:
+                st.dataframe(hist.rename(columns={
+                    "fecha_inspeccion":"Fecha","faena":"Faena","inspector":"Inspector",
+                    "categoria":"Categoría","item":"Ítem","resultado":"Cumple"
+                }), use_container_width=True, hide_index=True)
+            else:
+                st.info("Aún no hay inspecciones registradas.")
+
+    with tabs[9]:
         st.markdown("### Accidentes e incidentes")
         trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos, nombres")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
@@ -567,7 +638,7 @@ def page_sgsst(
                 st.success("Evento registrado.")
                 st.rerun()
 
-    with tabs[9]:
+    with tabs[10]:
         st.markdown("### Capacitaciones y ODI")
         trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos, nombres")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
@@ -611,8 +682,346 @@ def page_sgsst(
                 st.success("Registro guardado.")
                 st.rerun()
 
-    with tabs[10]:
+    # ── TAB 11: EPP POR TRABAJADOR ────────────────────────────────────────
+    with tabs[11]:
+        st.markdown("### 🦺 Entrega de EPP por Trabajador")
+        st.caption("Registro de entrega de Elementos de Protección Personal según DS 594 Art. 53-55. Trazabilidad completa por trabajador.")
+
+        _epp_tipos = EPP_TIPOS or ["Casco","Guantes","Lentes","Calzado","Otro"]
+        trab_df = fetch_df("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
+
+        if trab_df is None or trab_df.empty:
+            st.info("No hay trabajadores registrados.")
+        else:
+            # ── Historial ─────────────────────────────────────────────────
+            epp_hist = fetch_df("""
+                SELECT e.id, t.rut, t.apellidos||' '||t.nombres AS trabajador, t.cargo,
+                       COALESCE(f.nombre,'PLANTA') AS faena,
+                       e.epp_tipo, e.fecha_entrega, e.fecha_vencimiento, e.cantidad, e.talla, e.marca, e.observacion
+                FROM sgsst_epp_entrega e
+                JOIN trabajadores t ON t.id=e.trabajador_id
+                LEFT JOIN faenas f ON f.id=e.faena_id
+                ORDER BY e.fecha_entrega DESC, e.id DESC
+            """)
+            if epp_hist is not None and not epp_hist.empty:
+                epp_q = st.text_input("🔍 Filtrar entregas", key="epp_q", placeholder="RUT, nombre, EPP…")
+                epp_view = epp_hist.copy()
+                if epp_q.strip():
+                    qq = epp_q.strip().lower()
+                    mask = epp_view.apply(lambda r: any(qq in str(v).lower() for v in r), axis=1)
+                    epp_view = epp_view[mask]
+                st.dataframe(epp_view.rename(columns={
+                    "rut":"RUT","trabajador":"Trabajador","cargo":"Cargo","faena":"Faena",
+                    "epp_tipo":"EPP","fecha_entrega":"Entrega","fecha_vencimiento":"Vencimiento",
+                    "cantidad":"Cant.","talla":"Talla","marca":"Marca","observacion":"Obs."
+                }), use_container_width=True, hide_index=True)
+                st.caption(f"{len(epp_view)} registros de entrega")
+            else:
+                st.info("Aún no hay entregas de EPP registradas.")
+
+            st.divider()
+            st.markdown("#### ➕ Registrar entrega de EPP")
+            e1, e2 = st.columns(2)
+            with e1:
+                epp_trab = st.selectbox("Trabajador", trab_df["id"].tolist(), key="epp_trab",
+                    format_func=lambda x: f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
+                epp_tipo = st.selectbox("Tipo de EPP", _epp_tipos, key="epp_tipo")
+                epp_fecha = st.date_input("Fecha entrega", value=date.today(), key="epp_fecha")
+                epp_venc = st.date_input("Fecha vencimiento (opcional)", value=None, key="epp_venc")
+            with e2:
+                faena_opts_epp = [None] + (faenas_df["id"].tolist() if not faenas_df.empty else [])
+                epp_faena = st.selectbox("Faena", faena_opts_epp, key="epp_faena",
+                    format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+                epp_cant = st.number_input("Cantidad", min_value=1, value=1, key="epp_cant")
+                epp_talla = st.text_input("Talla", key="epp_talla")
+                epp_marca = st.text_input("Marca", key="epp_marca")
+            epp_obs = st.text_input("Observación", key="epp_obs")
+
+            if st.button("💾 Registrar entrega EPP", type="primary", use_container_width=True, key="epp_save"):
+                now = datetime.now().isoformat(timespec='seconds')
+                execute(
+                    "INSERT INTO sgsst_epp_entrega(trabajador_id, faena_id, epp_tipo, fecha_entrega, fecha_vencimiento, cantidad, talla, marca, observacion, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (int(epp_trab), int(epp_faena) if epp_faena else None, epp_tipo,
+                     epp_fecha.isoformat(), epp_venc.isoformat() if epp_venc else None,
+                     int(epp_cant), epp_talla.strip(), epp_marca.strip(), epp_obs.strip(), now, now),
+                )
+                sgsst_log("EPP", "Entrega", f"{epp_tipo} a trabajador {epp_trab}")
+                st.success("Entrega de EPP registrada.")
+                st.rerun()
+
+    with tabs[12]:
         st.markdown("### Bitácora de auditoría")
         aud_df = fetch_df("SELECT id, created_at, modulo, accion, detalle, usuario FROM sgsst_auditoria ORDER BY id DESC LIMIT 200")
         st.dataframe(aud_df, use_container_width=True, hide_index=True)
         st.caption("Esta bitácora registra acciones realizadas dentro del nuevo módulo ERP / SGSST.")
+
+    # ── TAB 13: CPHS ─────────────────────────────────────────────────────
+    with tabs[13]:
+        st.markdown("### 👷 Comité Paritario de Higiene y Seguridad (CPHS)")
+        st.caption("Ley 16.744 Art. 65-71: obligatorio para empresas con ≥25 trabajadores. Gestiona elecciones, miembros y actas de reunión.")
+
+        # Comité vigente
+        cphs_df = fetch_df("SELECT * FROM sgsst_cphs ORDER BY id DESC LIMIT 1")
+        if cphs_df is not None and not cphs_df.empty:
+            cphs = cphs_df.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Estado", str(cphs.get("estado","VIGENTE")))
+            c2.metric("Dotación actual", int(cphs.get("dotacion_actual",0) or 0))
+            c3.metric("Vigente hasta", str(cphs.get("vigencia_hasta","Sin definir") or "Sin definir"))
+            st.markdown(f"**Presidente:** {cphs.get('presidente','-')} · **Secretario:** {cphs.get('secretario','-')}")
+            st.markdown(f"**Rep. Empresa:** {cphs.get('representantes_empresa','-')}")
+            st.markdown(f"**Rep. Trabajadores:** {cphs.get('representantes_trabajadores','-')}")
+        else:
+            st.info("No hay CPHS constituido. Registra uno abajo.")
+
+        st.divider()
+        with st.expander("➕ Constituir / Actualizar CPHS", expanded=cphs_df is None or cphs_df.empty):
+            cp1, cp2 = st.columns(2)
+            with cp1:
+                cp_pres = st.text_input("Presidente", key="cphs_pres")
+                cp_sec = st.text_input("Secretario", key="cphs_sec")
+                cp_re = st.text_area("Representantes empresa (uno por línea)", key="cphs_re", height=80)
+                cp_dot = st.number_input("Dotación actual", min_value=0, value=0, key="cphs_dot")
+            with cp2:
+                cp_rt = st.text_area("Representantes trabajadores (uno por línea)", key="cphs_rt", height=80)
+                cp_elec = st.date_input("Fecha elección", value=date.today(), key="cphs_elec")
+                cp_vig = st.date_input("Vigencia hasta", value=date.today() + timedelta(days=730), key="cphs_vig")
+            if st.button("💾 Guardar CPHS", type="primary", key="cphs_save"):
+                now = datetime.now().isoformat(timespec='seconds')
+                execute(
+                    "INSERT INTO sgsst_cphs(fecha_eleccion, vigencia_hasta, representantes_empresa, representantes_trabajadores, presidente, secretario, dotacion_actual, estado, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (cp_elec.isoformat(), cp_vig.isoformat(), cp_re.strip(), cp_rt.strip(), cp_pres.strip(), cp_sec.strip(), int(cp_dot), "VIGENTE", now, now),
+                )
+                sgsst_log("CPHS", "Constituir", f"Presidente: {cp_pres}")
+                st.success("CPHS registrado.")
+                st.rerun()
+
+        st.divider()
+        st.markdown("#### Actas de reunión")
+        actas = fetch_df("SELECT a.id, a.fecha, a.numero_acta, a.temas, a.acuerdos, a.estado FROM sgsst_cphs_actas a ORDER BY a.fecha DESC LIMIT 50")
+        if actas is not None and not actas.empty:
+            st.dataframe(actas.rename(columns={"fecha":"Fecha","numero_acta":"N° Acta","temas":"Temas","acuerdos":"Acuerdos","estado":"Estado"}), use_container_width=True, hide_index=True)
+
+        with st.expander("➕ Registrar acta de reunión"):
+            ac_fecha = st.date_input("Fecha reunión", value=date.today(), key="acta_fecha")
+            ac_num = st.text_input("N° de acta", key="acta_num")
+            ac_asist = st.text_area("Asistentes", key="acta_asist", height=60)
+            ac_temas = st.text_area("Temas tratados", key="acta_temas", height=80)
+            ac_acuerdos = st.text_area("Acuerdos", key="acta_acuerdos", height=80)
+            if st.button("💾 Guardar acta", key="acta_save"):
+                cphs_id = int(cphs_df.iloc[0]["id"]) if cphs_df is not None and not cphs_df.empty else None
+                now = datetime.now().isoformat(timespec='seconds')
+                execute(
+                    "INSERT INTO sgsst_cphs_actas(cphs_id, fecha, numero_acta, asistentes, temas, acuerdos, estado, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cphs_id, ac_fecha.isoformat(), ac_num.strip(), ac_asist.strip(), ac_temas.strip(), ac_acuerdos.strip(), "ABIERTA", now),
+                )
+                sgsst_log("CPHS", "Acta", f"Acta {ac_num}")
+                st.success("Acta registrada.")
+                st.rerun()
+
+    # ── TAB 14: DIAT / DIEP ──────────────────────────────────────────────
+    with tabs[14]:
+        st.markdown("### 📝 Denuncia Individual de Accidente del Trabajo (DIAT) / Enfermedad Profesional (DIEP)")
+        st.caption("Ley 16.744 Art. 76: toda empresa debe denunciar accidentes dentro de 24 horas al organismo administrador.")
+
+        diat_df = fetch_df("""
+            SELECT d.id, d.tipo, d.fecha_accidente, d.fecha_denuncia, d.numero_denuncia,
+                   COALESCE(t.rut,'') AS rut, COALESCE(t.apellidos||' '||t.nombres,'Sin asignar') AS trabajador,
+                   COALESCE(f.nombre,'PLANTA') AS faena,
+                   d.tipo_lesion, d.parte_cuerpo, d.dias_perdidos, d.estado
+            FROM sgsst_diat_diep d
+            LEFT JOIN trabajadores t ON t.id=d.trabajador_id
+            LEFT JOIN faenas f ON f.id=d.faena_id
+            ORDER BY d.fecha_accidente DESC, d.id DESC
+        """)
+        if diat_df is not None and not diat_df.empty:
+            st.dataframe(diat_df.rename(columns={
+                "tipo":"Tipo","fecha_accidente":"Fecha Acc.","fecha_denuncia":"Fecha Denuncia",
+                "numero_denuncia":"N° Denuncia","rut":"RUT","trabajador":"Trabajador",
+                "faena":"Faena","tipo_lesion":"Lesión","parte_cuerpo":"Parte cuerpo",
+                "dias_perdidos":"Días perdidos","estado":"Estado"
+            }), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("#### ➕ Registrar DIAT / DIEP")
+        trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos")
+        faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
+        d1, d2 = st.columns(2)
+        with d1:
+            di_tipo = st.selectbox("Tipo de denuncia", ["DIAT", "DIEP"], key="diat_tipo")
+            di_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key="diat_trab",
+                format_func=lambda x: "(Sin asignar)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}")
+            di_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="diat_faena",
+                format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            di_fecha_acc = st.date_input("Fecha del accidente", value=date.today(), key="diat_fecha_acc")
+            di_hora = st.text_input("Hora del accidente", key="diat_hora", placeholder="HH:MM")
+            di_fecha_den = st.date_input("Fecha de denuncia", value=date.today(), key="diat_fecha_den")
+            di_num = st.text_input("N° de denuncia", key="diat_num")
+        with d2:
+            di_lugar = st.text_input("Lugar del accidente", key="diat_lugar")
+            di_desc = st.text_area("Descripción del accidente", key="diat_desc", height=80)
+            di_lesion = st.text_input("Tipo de lesión", key="diat_lesion", placeholder="Fractura, contusión, etc.")
+            di_parte = st.text_input("Parte del cuerpo afectada", key="diat_parte")
+            di_dias = st.number_input("Días perdidos", min_value=0, value=0, key="diat_dias")
+            di_testigos = st.text_input("Testigos", key="diat_testigos")
+            di_org = st.text_input("Organismo administrador", key="diat_org", placeholder="ACHS, IST, Mutual…")
+
+        if st.button("💾 Registrar denuncia", type="primary", use_container_width=True, key="diat_save"):
+            if not di_desc.strip():
+                st.error("La descripción del accidente es obligatoria.")
+            else:
+                now = datetime.now().isoformat(timespec='seconds')
+                execute(
+                    "INSERT INTO sgsst_diat_diep(tipo, trabajador_id, faena_id, fecha_accidente, hora_accidente, fecha_denuncia, numero_denuncia, lugar, descripcion, tipo_lesion, parte_cuerpo, dias_perdidos, testigos, organismo_admin, estado, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (di_tipo, di_trab, di_faena, di_fecha_acc.isoformat(), di_hora.strip(), di_fecha_den.isoformat(), di_num.strip(), di_lugar.strip(), di_desc.strip(), di_lesion.strip(), di_parte.strip(), int(di_dias), di_testigos.strip(), di_org.strip(), "ABIERTO", now, now),
+                )
+                sgsst_log("DIAT/DIEP", "Registrar", f"{di_tipo} · {di_desc[:40]}")
+                st.success("Denuncia registrada.")
+                st.rerun()
+
+    # ── TAB 15: VIGILANCIA OCUPACIONAL ────────────────────────────────────
+    with tabs[15]:
+        st.markdown("### 🔬 Protocolos de Vigilancia Ocupacional")
+        st.caption("PREXOR (ruido), PLANESI (sílice), TMERT (trastornos musculoesqueléticos), y otros protocolos según DS 594.")
+
+        PROTOCOLOS = ["PREXOR (Ruido)", "PLANESI (Sílice)", "TMERT (Musculoesquelético)", "Hipobaria intermitente", "Plaguicidas", "Radiación UV", "Psicosocial ISTAS-21", "Otro"]
+        vig_df = fetch_df("""
+            SELECT v.id, v.protocolo, COALESCE(t.rut,'') AS rut,
+                   COALESCE(t.apellidos||' '||t.nombres,'General') AS trabajador,
+                   COALESCE(f.nombre,'PLANTA') AS faena,
+                   v.agente, v.nivel_exposicion, v.fecha_evaluacion, v.fecha_proxima, v.resultado, v.estado
+            FROM sgsst_vigilancia v
+            LEFT JOIN trabajadores t ON t.id=v.trabajador_id
+            LEFT JOIN faenas f ON f.id=v.faena_id
+            ORDER BY v.fecha_evaluacion DESC, v.id DESC
+        """)
+        if vig_df is not None and not vig_df.empty:
+            st.dataframe(vig_df.rename(columns={
+                "protocolo":"Protocolo","rut":"RUT","trabajador":"Trabajador","faena":"Faena",
+                "agente":"Agente","nivel_exposicion":"Nivel","fecha_evaluacion":"Evaluación",
+                "fecha_proxima":"Próxima","resultado":"Resultado","estado":"Estado"
+            }), use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay evaluaciones registradas.")
+
+        st.divider()
+        with st.expander("➕ Registrar evaluación de vigilancia"):
+            trab_df = fetch_df("SELECT id, rut, apellidos, nombres FROM trabajadores ORDER BY apellidos")
+            faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
+            v1, v2 = st.columns(2)
+            with v1:
+                vi_prot = st.selectbox("Protocolo", PROTOCOLOS, key="vig_prot")
+                vi_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key="vig_trab",
+                    format_func=lambda x: "(General)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}")
+                vi_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="vig_faena",
+                    format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+                vi_agente = st.text_input("Agente de riesgo", key="vig_agente", placeholder="Ruido, sílice, etc.")
+            with v2:
+                vi_nivel = st.selectbox("Nivel de exposición", ["BAJO", "MEDIO", "ALTO", "CRÍTICO"], key="vig_nivel")
+                vi_fecha = st.date_input("Fecha evaluación", value=date.today(), key="vig_fecha")
+                vi_prox = st.date_input("Próxima evaluación", value=date.today() + timedelta(days=365), key="vig_prox")
+                vi_result = st.text_input("Resultado", key="vig_result")
+                vi_medidas = st.text_area("Medidas de control", key="vig_medidas", height=60)
+            if st.button("💾 Registrar evaluación", key="vig_save"):
+                now = datetime.now().isoformat(timespec='seconds')
+                execute(
+                    "INSERT INTO sgsst_vigilancia(protocolo, trabajador_id, faena_id, agente, nivel_exposicion, fecha_evaluacion, fecha_proxima, resultado, medidas, estado, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (vi_prot, vi_trab, vi_faena, vi_agente.strip(), vi_nivel, vi_fecha.isoformat(), vi_prox.isoformat(), vi_result.strip(), vi_medidas.strip(), "VIGENTE", now, now),
+                )
+                sgsst_log("Vigilancia", "Evaluación", f"{vi_prot} · {vi_agente}")
+                st.success("Evaluación registrada.")
+                st.rerun()
+
+    # ── TAB 16: SUBCONTRATISTAS ───────────────────────────────────────────
+    with tabs[16]:
+        st.markdown("### 🏗️ Coordinación de Subcontratistas")
+        st.caption("Ley 20.123 / Art. 66 bis Ley 16.744: coordinación obligatoria con empresas contratistas y subcontratistas.")
+
+        sub_df = fetch_df("""
+            SELECT s.id, s.rut_empresa, s.razon_social,
+                   COALESCE(m.nombre,'Sin mandante') AS mandante,
+                   COALESCE(f.nombre,'Sin faena') AS faena,
+                   s.contacto, s.estado, s.docs_al_dia, s.fecha_inicio, s.fecha_termino
+            FROM sgsst_subcontratistas s
+            LEFT JOIN mandantes m ON m.id=s.mandante_id
+            LEFT JOIN faenas f ON f.id=s.faena_id
+            ORDER BY s.id DESC
+        """)
+        if sub_df is not None and not sub_df.empty:
+            view_sub = sub_df.copy()
+            view_sub["docs_al_dia"] = view_sub["docs_al_dia"].apply(lambda x: "✅" if x else "❌")
+            st.dataframe(view_sub.rename(columns={
+                "rut_empresa":"RUT","razon_social":"Empresa","mandante":"Mandante","faena":"Faena",
+                "contacto":"Contacto","estado":"Estado","docs_al_dia":"Docs OK",
+                "fecha_inicio":"Inicio","fecha_termino":"Término"
+            }), use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay subcontratistas registrados.")
+
+        st.divider()
+        with st.expander("➕ Registrar subcontratista"):
+            mand_df = fetch_df("SELECT id, nombre FROM mandantes ORDER BY nombre")
+            faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
+            s1, s2 = st.columns(2)
+            with s1:
+                su_rut = st.text_input("RUT empresa subcontratista", key="sub_rut")
+                su_razon = st.text_input("Razón social", key="sub_razon")
+                su_mand = st.selectbox("Mandante", [None] + (mand_df["id"].tolist() if mand_df is not None and not mand_df.empty else []), key="sub_mand",
+                    format_func=lambda x: "(Sin mandante)" if x is None else str(mand_df[mand_df['id']==x].iloc[0]['nombre']))
+                su_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="sub_faena",
+                    format_func=lambda x: "(Sin faena)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            with s2:
+                su_contacto = st.text_input("Contacto", key="sub_contacto")
+                su_email = st.text_input("Email", key="sub_email")
+                su_tel = st.text_input("Teléfono", key="sub_tel")
+                su_fi = st.date_input("Fecha inicio contrato", value=date.today(), key="sub_fi")
+                su_ft = st.date_input("Fecha término (opcional)", value=None, key="sub_ft")
+            if st.button("💾 Registrar subcontratista", key="sub_save"):
+                if not su_razon.strip():
+                    st.error("Razón social es obligatoria.")
+                else:
+                    now = datetime.now().isoformat(timespec='seconds')
+                    execute(
+                        "INSERT INTO sgsst_subcontratistas(rut_empresa, razon_social, mandante_id, faena_id, contacto, email, telefono, fecha_inicio, fecha_termino, estado, docs_al_dia, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (su_rut.strip(), su_razon.strip(), su_mand, su_faena, su_contacto.strip(), su_email.strip(), su_tel.strip(), su_fi.isoformat(), su_ft.isoformat() if su_ft else None, "ACTIVO", 0, now, now),
+                    )
+                    sgsst_log("Subcontratistas", "Registrar", su_razon.strip())
+                    st.success("Subcontratista registrado.")
+                    st.rerun()
+
+    # ── TAB 17: RIOHS ────────────────────────────────────────────────────
+    with tabs[17]:
+        st.markdown("### 📕 Reglamento Interno de Orden, Higiene y Seguridad (RIOHS)")
+        st.caption("DS 44 Art. 12: toda empresa debe mantener un RIOHS actualizado y entregado a cada trabajador con cargo de recepción.")
+
+        riohs_df = fetch_df("SELECT id, version, fecha_vigencia, aprobado_por, observaciones, created_at FROM sgsst_riohs ORDER BY id DESC")
+        if riohs_df is not None and not riohs_df.empty:
+            st.dataframe(riohs_df.rename(columns={
+                "version":"Versión","fecha_vigencia":"Vigencia desde",
+                "aprobado_por":"Aprobado por","observaciones":"Observaciones",
+                "created_at":"Fecha registro"
+            }), use_container_width=True, hide_index=True)
+            latest = riohs_df.iloc[0]
+            st.success(f"Versión vigente: **{latest.get('version','?')}** desde {latest.get('fecha_vigencia','?')}")
+        else:
+            st.info("No hay versiones del RIOHS registradas.")
+
+        st.divider()
+        with st.expander("➕ Registrar nueva versión del RIOHS"):
+            ri_ver = st.text_input("Versión", key="riohs_ver", placeholder="v2.0 - 2025")
+            ri_fecha = st.date_input("Vigente desde", value=date.today(), key="riohs_fecha")
+            ri_aprob = st.text_input("Aprobado por", key="riohs_aprob")
+            ri_obs = st.text_area("Observaciones / cambios principales", key="riohs_obs", height=80)
+            if st.button("💾 Registrar versión RIOHS", key="riohs_save"):
+                if not ri_ver.strip():
+                    st.error("La versión es obligatoria.")
+                else:
+                    now = datetime.now().isoformat(timespec='seconds')
+                    execute(
+                        "INSERT INTO sgsst_riohs(version, fecha_vigencia, aprobado_por, observaciones, created_at) VALUES(?,?,?,?,?)",
+                        (ri_ver.strip(), ri_fecha.isoformat(), ri_aprob.strip(), ri_obs.strip(), now),
+                    )
+                    sgsst_log("RIOHS", "Nueva versión", ri_ver.strip())
+                    st.success("Versión RIOHS registrada.")
+                    st.rerun()

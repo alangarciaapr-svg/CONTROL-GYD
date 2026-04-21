@@ -312,10 +312,22 @@ def page_dashboard(
                 {"Indicador": "Capacitaciones vigentes", "Valor": f"{float(cap['vigentes_pct']):.1f}%"},
             ])
             st.dataframe(resumen_rows, use_container_width=True, hide_index=True)
-            if faena_risk is not None and not faena_risk.empty:
-                sem = faena_risk.groupby("semaforo")["faena_id"].count().rename("Faenas")
-                st.markdown("#### Distribución de semáforo")
-                st.bar_chart(sem)
+
+            # ── Gráficos KPI ─────────────────────────────────────────────
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                if trabajadores_activos > 0:
+                    hab_df = pd.DataFrame({
+                        "Estado": ["Habilitados", "No habilitados"],
+                        "Cantidad": [trabajadores_ok, trabajadores_activos - trabajadores_ok],
+                    })
+                    st.markdown("#### Habilitación trabajadores")
+                    st.bar_chart(hab_df.set_index("Estado"))
+            with chart_col2:
+                if faena_risk is not None and not faena_risk.empty:
+                    sem = faena_risk.groupby("semaforo")["faena_id"].count().rename("Faenas")
+                    st.markdown("#### Semáforo faenas")
+                    st.bar_chart(sem)
         with right:
             st.markdown("### Prioridades ejecutivas")
             if auto_alerts is None or auto_alerts.empty:
