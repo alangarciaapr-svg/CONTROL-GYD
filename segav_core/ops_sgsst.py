@@ -47,6 +47,7 @@ def page_sgsst(
     SGSST_TIPOS_CAP,
     doc_tipo_join,
     current_user,
+    segav_template_payload,
 ):
     ui_header("Mi Empresa / SGSST", "Núcleo comercializable de SEGAV ERP: configurable para cualquier empresa, sin reemplazar lo ya existente.")
     ensure_sgsst_seed_data()

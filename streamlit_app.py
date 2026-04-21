@@ -3201,6 +3201,17 @@ TENANT_SCOPE_FILE_TABLES = (
 
 def _tenant_scope_target_table(sql: str) -> str | None:
     q = str(sql or '')
+    # Strip subqueries (parenthesized content) to find the MAIN table only
+    depth = 0
+    outer = []
+    for ch in q:
+        if ch == '(':
+            depth += 1; outer.append(' ')
+        elif ch == ')':
+            depth = max(0, depth - 1); outer.append(' ')
+        elif depth == 0:
+            outer.append(ch)
+    main_sql = ''.join(outer)
     patterns = [
         r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
         r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
@@ -3208,7 +3219,7 @@ def _tenant_scope_target_table(sql: str) -> str | None:
         r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
     ]
     for patt in patterns:
-        m = re.search(patt, q, flags=re.I)
+        m = re.search(patt, main_sql, flags=re.I)
         if m:
             table = str(m.group(1) or '').strip()
             if table in TENANT_SCOPE_TABLES:
@@ -3218,13 +3229,35 @@ def _tenant_scope_target_table(sql: str) -> str | None:
 
 def _inject_tenant_condition_sql(sql: str, alias_or_table: str) -> str:
     tenant_cond = f"COALESCE({alias_or_table}.cliente_key,'')=?"
-    lower_sql = sql.lower()
-    clause_positions = [p for p in [lower_sql.find(' order by '), lower_sql.find(' group by '), lower_sql.find(' limit '), lower_sql.find(' union ')] if p != -1]
+    # Build outer-only view (replace parenthesized content with spaces)
+    depth = 0
+    outer_mask = []
+    for i, ch in enumerate(sql):
+        if ch == '(':
+            depth += 1; outer_mask.append(' ')
+        elif ch == ')':
+            depth = max(0, depth - 1); outer_mask.append(' ')
+        elif depth == 0:
+            outer_mask.append(ch)
+        else:
+            outer_mask.append(' ')
+    outer = ''.join(outer_mask)
+    lower_outer = outer.lower()
+    # Find clause positions in the OUTER query only
+    clause_positions = [p for p in [lower_outer.find(' order by '), lower_outer.find(' group by '), lower_outer.find(' limit '), lower_outer.find(' union ')] if p != -1]
     cut = min(clause_positions) if clause_positions else len(sql)
     head = sql[:cut]
     tail = sql[cut:]
-    if re.search(r"\bwhere\b", head, flags=re.I):
-        return head + f" AND {tenant_cond}" + tail
+    # Check for WHERE at the outer level only
+    outer_head = outer[:cut].lower()
+    if re.search(r"\bwhere\b", outer_head, flags=re.I):
+        # Find the LAST outer-level WHERE position in the head
+        where_pos = -1
+        for m in re.finditer(r"\bwhere\b", outer_head, flags=re.I):
+            where_pos = m.start()
+        if where_pos >= 0:
+            # Find end of existing WHERE clause conditions at outer level
+            return head + f" AND {tenant_cond}" + tail
     return head + f" WHERE {tenant_cond}" + tail
 
 
@@ -3255,7 +3288,20 @@ def _scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None):
         return q, params_t
 
     # UPDATE / DELETE / SELECT root table scoping
-    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", q, flags=re.I)
+    # Build outer-only SQL to find the correct alias
+    depth = 0
+    outer_chars = []
+    for ch in q:
+        if ch == '(':
+            depth += 1; outer_chars.append(' ')
+        elif ch == ')':
+            depth = max(0, depth - 1); outer_chars.append(' ')
+        elif depth == 0:
+            outer_chars.append(ch)
+        else:
+            outer_chars.append(' ')
+    outer_q = ''.join(outer_chars)
+    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", outer_q, flags=re.I)
     alias = table
     if m_root:
         alias_candidate = str(m_root.group(2) or '').strip()
@@ -4340,79 +4386,6 @@ with st.sidebar:
         format_func=lambda x: PAGE_LABELS.get(x, x),
         label_visibility="collapsed",
     )
-
-    # Contexto (colapsable)
-    with st.expander("🔎 Contexto (Faena)", expanded=False):
-        try:
-            _fa = get_sidebar_faena_context_df(DB_BACKEND, PG_DSN_FINGERPRINT, current_segav_client_key())
-        except Exception:
-            _fa = pd.DataFrame()
-
-        if not _fa.empty:
-            default_id = st.session_state.get("selected_faena_id", int(_fa["id"].iloc[0]))
-            opts = _fa["id"].tolist()
-            if default_id not in opts:
-                default_id = int(opts[0])
-            idx = opts.index(default_id)
-            faena_id = st.selectbox(
-                "Faena",
-                opts,
-                index=idx,
-                format_func=lambda x: f"{int(x)} · {_fa[_fa['id']==x].iloc[0]['mandante']} / {_fa[_fa['id']==x].iloc[0]['nombre']} ({_fa[_fa['id']==x].iloc[0]['estado']})",
-            )
-            st.session_state["selected_faena_id"] = int(faena_id)
-
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("📎 Docs", use_container_width=True):
-                    st.session_state["nav_page"] = "Documentos Trabajador"
-                    st.rerun()
-            with b2:
-                if st.button("📦 Export", use_container_width=True):
-                    st.session_state["nav_page"] = "Export (ZIP)"
-                    st.rerun()
-        else:
-            st.caption("(Aún no hay faenas)")
-
-    # Acciones rápidas (colapsable)
-    with st.expander("⚡ Acciones", expanded=False):
-        a1, a2 = st.columns(2)
-        with a1:
-            if st.button("Mandante", use_container_width=True):
-                st.session_state["nav_page"] = "Mandantes"
-                st.rerun()
-            if st.button("Faena", use_container_width=True):
-                st.session_state["nav_page"] = "Faenas"
-                st.rerun()
-        with a2:
-            if st.button("Trabajador", use_container_width=True):
-                st.session_state["nav_page"] = "Trabajadores"
-                st.rerun()
-            if st.button("Asignar", use_container_width=True):
-                st.session_state["nav_page"] = "Asignar Trabajadores"
-                st.rerun()
-
-    # Respaldo (colapsable)
-    with st.expander("💾 Respaldo", expanded=False):
-        if "auto_backup_enabled" not in st.session_state:
-            st.session_state["auto_backup_enabled"] = True
-        st.checkbox("Auto-backup al guardar (app.db)", key="auto_backup_enabled")
-
-        last = st.session_state.get("last_auto_backup")
-        if last and last.get("bytes"):
-            st.success("Auto-backup listo")
-            st.download_button(
-                "Descargar último auto-backup",
-                data=last["bytes"],
-                file_name=last["name"],
-                mime="application/octet-stream",
-                use_container_width=True,
-            )
-            if st.button("Limpiar aviso", use_container_width=True):
-                st.session_state.pop("last_auto_backup", None)
-                st.rerun()
-
-        st.caption("En Streamlit Community Cloud, el disco puede perderse en reboots. Usa Backup/Restore para respaldos completos.")
 
     # Cerrar sesión al final (limpio)
     if u and st.button("Cerrar sesión", use_container_width=True):
@@ -6374,7 +6347,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user, segav_template_payload=segav_template_payload)
 
 
 def page_superadmin_empresas():
