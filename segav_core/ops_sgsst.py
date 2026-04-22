@@ -56,6 +56,11 @@ def page_sgsst(
     ensure_sgsst_seed_data()
     _u = current_user() or {}
     _is_superadmin = str(_u.get("role") or "").upper() == "SUPERADMIN"
+    _sgsst_render_nonce = int(st.session_state.get("_sgsst_render_nonce", 0)) + 1
+    st.session_state["_sgsst_render_nonce"] = _sgsst_render_nonce
+    def K(name: str) -> str:
+        return f"sgsst_{_sgsst_render_nonce}_{name}"
+
 
     company_df = fetch_df("SELECT * FROM sgsst_empresa ORDER BY id LIMIT 1")
     company = company_df.iloc[0].to_dict() if not company_df.empty else {}
@@ -159,13 +164,13 @@ def page_sgsst(
             st.dataframe(estado_rows, use_container_width=True, hide_index=True)
             b1, b2, b3 = st.columns(3)
             with b1:
-                if st.button("Ir a Docs Empresa", use_container_width=True, key="sgsst_go_docs_emp"):
+                if st.button("Ir a Docs Empresa", use_container_width=True, key=K("sgsst_go_docs_emp")):
                     go("Documentos Empresa")
             with b2:
-                if st.button("Ir a Docs Faena", use_container_width=True, key="sgsst_go_docs_faena"):
+                if st.button("Ir a Docs Faena", use_container_width=True, key=K("sgsst_go_docs_faena")):
                     go("Documentos Empresa (Faena)")
             with b3:
-                if st.button("Ir a Trabajadores", use_container_width=True, key="sgsst_go_trab"):
+                if st.button("Ir a Trabajadores", use_container_width=True, key=K("sgsst_go_trab")):
                     go("Trabajadores")
 
         st.markdown("### Dashboard comercial / ERP")
@@ -184,15 +189,15 @@ def page_sgsst(
         cfg = segav_erp_config_map()
         z1, z2 = st.columns(2)
         with z1:
-            erp_name = st.text_input("Nombre comercial", value=cfg.get("erp_name", "SEGAV ERP"), key="segav_cfg_name")
-            erp_slogan = st.text_area("Propuesta de valor", value=cfg.get("erp_slogan", "ERP comercializable de cumplimiento, prevención y operación documental"), height=90, key="segav_cfg_slogan")
-            erp_vertical = st.text_input("Vertical / rubro base", value=cfg.get("erp_vertical", "General"), key="segav_cfg_vertical")
+            erp_name = st.text_input("Nombre comercial", value=cfg.get("erp_name", "SEGAV ERP"), key=K("segav_cfg_name"))
+            erp_slogan = st.text_area("Propuesta de valor", value=cfg.get("erp_slogan", "ERP comercializable de cumplimiento, prevención y operación documental"), height=90, key=K("segav_cfg_slogan"))
+            erp_vertical = st.text_input("Vertical / rubro base", value=cfg.get("erp_vertical", "General"), key=K("segav_cfg_vertical"))
         with z2:
-            multiempresa = st.selectbox("Modo comercial", ["SI", "NO"], index=0 if cfg.get("multiempresa", "SI") == "SI" else 1, key="segav_cfg_multi")
-            cliente_actual = st.text_input("Cliente / empresa actual", value=cfg.get("cliente_actual", company.get("razon_social") or "Empresa actual"), key="segav_cfg_cliente")
+            multiempresa = st.selectbox("Modo comercial", ["SI", "NO"], index=0 if cfg.get("multiempresa", "SI") == "SI" else 1, key=K("segav_cfg_multi"))
+            cliente_actual = st.text_input("Cliente / empresa actual", value=cfg.get("cliente_actual", company.get("razon_social") or "Empresa actual"), key=K("segav_cfg_cliente"))
             impl_opts = ["CONFIGURABLE", "VERTICAL FORESTAL", "CORPORATIVO"]
-            modo_impl = st.selectbox("Implementación", impl_opts, index=impl_opts.index(cfg.get("modo_implementacion", "CONFIGURABLE")) if cfg.get("modo_implementacion", "CONFIGURABLE") in impl_opts else 0, key="segav_cfg_impl")
-        if st.button("Guardar configuración ERP", key="segav_cfg_save", type="primary"):
+            modo_impl = st.selectbox("Implementación", impl_opts, index=impl_opts.index(cfg.get("modo_implementacion", "CONFIGURABLE")) if cfg.get("modo_implementacion", "CONFIGURABLE") in impl_opts else 0, key=K("segav_cfg_impl"))
+        if st.button("Guardar configuración ERP", key=K("segav_cfg_save"), type="primary"):
             now = datetime.now().isoformat(timespec='seconds')
             payload = {
                 "erp_name": erp_name.strip() or "SEGAV ERP",
@@ -218,7 +223,7 @@ def page_sgsst(
         current_tpl = cfg.get("template_actual", tpl_options[0] if tpl_options else "GENERAL")
         if current_tpl not in tpl_options and tpl_options:
             current_tpl = tpl_options[0]
-        tpl_sel = st.selectbox("Plantilla a visualizar/aplicar", tpl_options, index=tpl_options.index(current_tpl) if tpl_options else 0, key="segav_tpl_sel") if tpl_options else None
+        tpl_sel = st.selectbox("Plantilla a visualizar/aplicar", tpl_options, index=tpl_options.index(current_tpl) if tpl_options else 0, key=K("segav_tpl_sel")) if tpl_options else None
         if tpl_sel:
             payload = segav_template_payload(tpl_sel)
             p1, p2 = st.columns([1.1, 1])
@@ -232,7 +237,7 @@ def page_sgsst(
                     preview_rows.append({"Cargo": cargo_name, "Documentos": doc_tipo_join(docs)})
                 if preview_rows:
                     st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
-            if st.button("Aplicar plantilla al catálogo ERP", key="segav_apply_tpl"):
+            if st.button("Aplicar plantilla al catálogo ERP", key=K("segav_apply_tpl")):
                 ok, msg = apply_segav_template(tpl_sel)
                 if ok:
                     sgsst_log("Configuración ERP", "Aplicar plantilla", tpl_sel)
@@ -254,10 +259,10 @@ def page_sgsst(
         if cargos_df is not None and not cargos_df.empty:
             st.dataframe(cargos_df.rename(columns={"cargo_key":"Código", "cargo_label":"Cargo", "sort_order":"Orden", "activo":"Activo"}), use_container_width=True, hide_index=True)
         cadd1, cadd2, cadd3 = st.columns([1.4, 0.8, 0.8])
-        cargo_new_label = cadd1.text_input("Nuevo cargo", key="segav_new_cargo_label")
-        cargo_new_order = cadd2.number_input("Orden", min_value=1, value=int((len(cargos_df) if cargos_df is not None else 0) + 1), step=1, key="segav_new_cargo_order")
-        cargo_new_active = cadd3.selectbox("Activo", ["SI", "NO"], key="segav_new_cargo_active")
-        if st.button("Agregar cargo al catálogo", key="segav_add_cargo"):
+        cargo_new_label = cadd1.text_input("Nuevo cargo", key=K("segav_new_cargo_label"))
+        cargo_new_order = cadd2.number_input("Orden", min_value=1, value=int((len(cargos_df) if cargos_df is not None else 0) + 1), step=1, key=K("segav_new_cargo_order"))
+        cargo_new_active = cadd3.selectbox("Activo", ["SI", "NO"], key=K("segav_new_cargo_active"))
+        if st.button("Agregar cargo al catálogo", key=K("segav_add_cargo")):
             if not cargo_new_label.strip():
                 st.error("Debes indicar el nombre del cargo.")
             else:
@@ -271,10 +276,10 @@ def page_sgsst(
                 st.rerun()
 
         cargo_labels = segav_cargo_labels(active_only=False)
-        cargo_sel = st.selectbox("Cargo a parametrizar", cargo_labels, key="segav_docs_cargo_sel")
+        cargo_sel = st.selectbox("Cargo a parametrizar", cargo_labels, key=K("segav_docs_cargo_sel"))
         current_docs = segav_cargo_rules().get(cargo_sel, DOC_OBLIGATORIOS)
-        docs_selected = st.multiselect("Documentos obligatorios por cargo", list(DOC_TIPO_LABELS.keys()), default=current_docs, key="segav_docs_cargo_multi", format_func=doc_tipo_label)
-        if st.button("Guardar documentos por cargo", key="segav_docs_cargo_save"):
+        docs_selected = st.multiselect("Documentos obligatorios por cargo", list(DOC_TIPO_LABELS.keys()), default=current_docs, key=K("segav_docs_cargo_multi"), format_func=doc_tipo_label)
+        if st.button("Guardar documentos por cargo", key=K("segav_docs_cargo_save")):
             now = datetime.now().isoformat(timespec='seconds')
             execute("DELETE FROM segav_erp_docs_cargo WHERE cargo_key=?", (cargo_sel,))
             for idx, doc_tipo in enumerate(docs_selected, start=1):
@@ -288,8 +293,8 @@ def page_sgsst(
         emp_df = segav_empresa_docs_df()
         if emp_df is not None and not emp_df.empty:
             st.dataframe(emp_df.rename(columns={"doc_tipo":"Tipo", "obligatorio":"Obligatorio", "mensual":"Mensual", "por_mandante":"Por mandante", "por_faena":"Por faena", "sort_order":"Orden"}), use_container_width=True, hide_index=True)
-        emp_docs_selected = st.multiselect("Documentos requeridos empresa/faena", list(DOC_TIPO_LABELS.keys()), default=get_empresa_monthly_doc_types(), key="segav_docs_empresa_multi", format_func=doc_tipo_label)
-        if st.button("Guardar documentos empresa/faena", key="segav_docs_empresa_save"):
+        emp_docs_selected = st.multiselect("Documentos requeridos empresa/faena", list(DOC_TIPO_LABELS.keys()), default=get_empresa_monthly_doc_types(), key=K("segav_docs_empresa_multi"), format_func=doc_tipo_label)
+        if st.button("Guardar documentos empresa/faena", key=K("segav_docs_empresa_save")):
             now = datetime.now().isoformat(timespec='seconds')
             execute("DELETE FROM segav_erp_docs_empresa", ())
             for idx, doc_tipo in enumerate(emp_docs_selected, start=1):
@@ -303,20 +308,20 @@ def page_sgsst(
         st.markdown("### Ficha empresa")
         e1, e2 = st.columns(2)
         with e1:
-            razon_social = st.text_input("Razón social", value=str(company.get("razon_social") or ""), key="sgsst_empresa_razon")
-            rut = st.text_input("RUT empresa", value=clean_rut(company.get("rut") or ""), key="sgsst_empresa_rut")
-            direccion = st.text_input("Dirección", value=str(company.get("direccion") or ""), key="sgsst_empresa_direccion")
-            actividad = st.text_input("Actividad / rubro", value=str(company.get("actividad") or ""), key="sgsst_empresa_actividad")
-            organismo_admin = st.text_input("Organismo administrador", value=str(company.get("organismo_admin") or ""), key="sgsst_empresa_oa")
-            dotacion_total = st.number_input("Dotación total", min_value=0, value=int(company.get("dotacion_total") or 0), step=1, key="sgsst_empresa_dotacion")
+            razon_social = st.text_input("Razón social", value=str(company.get("razon_social") or ""), key=K("sgsst_empresa_razon"))
+            rut = st.text_input("RUT empresa", value=clean_rut(company.get("rut") or ""), key=K("sgsst_empresa_rut"))
+            direccion = st.text_input("Dirección", value=str(company.get("direccion") or ""), key=K("sgsst_empresa_direccion"))
+            actividad = st.text_input("Actividad / rubro", value=str(company.get("actividad") or ""), key=K("sgsst_empresa_actividad"))
+            organismo_admin = st.text_input("Organismo administrador", value=str(company.get("organismo_admin") or ""), key=K("sgsst_empresa_oa"))
+            dotacion_total = st.number_input("Dotación total", min_value=0, value=int(company.get("dotacion_total") or 0), step=1, key=K("sgsst_empresa_dotacion"))
         with e2:
-            representantes = st.text_area("Representantes legales", value=str(company.get("representantes") or ""), height=90, key="sgsst_empresa_repr")
-            prevencionista = st.text_input("Prevencionista de riesgos", value=str(company.get("prevencionista") or ""), key="sgsst_empresa_prev")
-            canal = st.text_input("Canal de denuncias", value=str(company.get("canal_denuncias") or ""), key="sgsst_empresa_canal")
-            politica_version = st.text_input("Versión política SST", value=str(company.get("politica_version") or "1.0"), key="sgsst_empresa_politica_v")
-            politica_fecha = st.date_input("Fecha política SST", value=parse_date_maybe(company.get("politica_fecha")) or date.today(), key="sgsst_empresa_politica_f")
-            observaciones = st.text_area("Observaciones", value=str(company.get("observaciones") or ""), height=120, key="sgsst_empresa_obs")
-        if st.button("Guardar ficha empresa", type="primary", key="sgsst_save_empresa"):
+            representantes = st.text_area("Representantes legales", value=str(company.get("representantes") or ""), height=90, key=K("sgsst_empresa_repr"))
+            prevencionista = st.text_input("Prevencionista de riesgos", value=str(company.get("prevencionista") or ""), key=K("sgsst_empresa_prev"))
+            canal = st.text_input("Canal de denuncias", value=str(company.get("canal_denuncias") or ""), key=K("sgsst_empresa_canal"))
+            politica_version = st.text_input("Versión política SST", value=str(company.get("politica_version") or "1.0"), key=K("sgsst_empresa_politica_v"))
+            politica_fecha = st.date_input("Fecha política SST", value=parse_date_maybe(company.get("politica_fecha")) or date.today(), key=K("sgsst_empresa_politica_f"))
+            observaciones = st.text_area("Observaciones", value=str(company.get("observaciones") or ""), height=120, key=K("sgsst_empresa_obs"))
+        if st.button("Guardar ficha empresa", type="primary", key=K("sgsst_save_empresa")):
             now = datetime.now().isoformat(timespec='seconds')
             if company:
                 execute(
@@ -343,8 +348,8 @@ def page_sgsst(
     with tabs[4]:
         st.markdown("### Matriz legal")
         f1, f2 = st.columns([1, 1])
-        norma_sel = f1.selectbox("Norma", ["(Todas)"] + SGSST_NORMAS, key="sgsst_matriz_norma")
-        estado_sel = f2.selectbox("Estado", ["(Todos)"] + SGSST_ESTADOS, key="sgsst_matriz_estado")
+        norma_sel = f1.selectbox("Norma", ["(Todas)"] + SGSST_NORMAS, key=K("sgsst_matriz_norma"))
+        estado_sel = f2.selectbox("Estado", ["(Todos)"] + SGSST_ESTADOS, key=K("sgsst_matriz_estado"))
         q = "SELECT id, norma, articulo, tema, obligacion, aplica_a, periodicidad, responsable, evidencia, estado, updated_at FROM sgsst_matriz_legal WHERE 1=1"
         params = []
         if norma_sel != "(Todas)":
@@ -360,16 +365,16 @@ def page_sgsst(
         a1, a2 = st.columns(2)
         with a1:
             st.markdown("#### Agregar obligación")
-            m_norma = st.selectbox("Norma nueva", SGSST_NORMAS, key="sgsst_add_norma")
-            m_art = st.text_input("Artículo / capítulo", key="sgsst_add_art")
-            m_tema = st.text_input("Tema", key="sgsst_add_tema")
-            m_ob = st.text_area("Obligación", key="sgsst_add_ob", height=90)
-            m_ap = st.text_input("Aplica a", key="sgsst_add_ap")
-            m_per = st.text_input("Periodicidad", key="sgsst_add_per")
-            m_resp = st.text_input("Responsable", key="sgsst_add_resp")
-            m_evi = st.text_input("Evidencia", key="sgsst_add_evi")
-            m_estado = st.selectbox("Estado inicial", SGSST_ESTADOS, key="sgsst_add_estado")
-            if st.button("Agregar a matriz legal", key="sgsst_add_matriz"):
+            m_norma = st.selectbox("Norma nueva", SGSST_NORMAS, key=K("sgsst_add_norma"))
+            m_art = st.text_input("Artículo / capítulo", key=K("sgsst_add_art"))
+            m_tema = st.text_input("Tema", key=K("sgsst_add_tema"))
+            m_ob = st.text_area("Obligación", key=K("sgsst_add_ob"), height=90)
+            m_ap = st.text_input("Aplica a", key=K("sgsst_add_ap"))
+            m_per = st.text_input("Periodicidad", key=K("sgsst_add_per"))
+            m_resp = st.text_input("Responsable", key=K("sgsst_add_resp"))
+            m_evi = st.text_input("Evidencia", key=K("sgsst_add_evi"))
+            m_estado = st.selectbox("Estado inicial", SGSST_ESTADOS, key=K("sgsst_add_estado"))
+            if st.button("Agregar a matriz legal", key=K("sgsst_add_matriz")):
                 if not m_tema.strip() or not m_ob.strip():
                     st.error("Tema y obligación son obligatorios.")
                 else:
@@ -387,13 +392,13 @@ def page_sgsst(
                 st.caption("Sin filas para actualizar.")
             else:
                 matriz_ids = df_matriz["id"].tolist()
-                mid = st.selectbox("Fila", matriz_ids, format_func=lambda x: f"#{int(x)} · {df_matriz[df_matriz['id']==x].iloc[0]['norma']} / {df_matriz[df_matriz['id']==x].iloc[0]['tema']}", key="sgsst_edit_matriz_id")
+                mid = st.selectbox("Fila", matriz_ids, format_func=lambda x: f"#{int(x)} · {df_matriz[df_matriz['id']==x].iloc[0]['norma']} / {df_matriz[df_matriz['id']==x].iloc[0]['tema']}", key=K("sgsst_edit_matriz_id"))
                 row = df_matriz[df_matriz["id"] == mid].iloc[0]
                 estado_actual = str(row["estado"]) if str(row["estado"]) in SGSST_ESTADOS else SGSST_ESTADOS[0]
-                u_estado = st.selectbox("Nuevo estado", SGSST_ESTADOS, index=SGSST_ESTADOS.index(estado_actual), key="sgsst_edit_matriz_estado")
-                u_resp = st.text_input("Responsable", value=str(row.get("responsable") or ""), key="sgsst_edit_matriz_resp")
-                u_evi = st.text_input("Evidencia", value=str(row.get("evidencia") or ""), key="sgsst_edit_matriz_evi")
-                if st.button("Guardar estado", key="sgsst_upd_matriz"):
+                u_estado = st.selectbox("Nuevo estado", SGSST_ESTADOS, index=SGSST_ESTADOS.index(estado_actual), key=K("sgsst_edit_matriz_estado"))
+                u_resp = st.text_input("Responsable", value=str(row.get("responsable") or ""), key=K("sgsst_edit_matriz_resp"))
+                u_evi = st.text_input("Evidencia", value=str(row.get("evidencia") or ""), key=K("sgsst_edit_matriz_evi"))
+                if st.button("Guardar estado", key=K("sgsst_upd_matriz")):
                     execute(
                         "UPDATE sgsst_matriz_legal SET estado=?, responsable=?, evidencia=?, updated_at=? WHERE id=?",
                         (u_estado, u_resp.strip(), u_evi.strip(), datetime.now().isoformat(timespec='seconds'), int(mid)),
@@ -401,14 +406,14 @@ def page_sgsst(
                     sgsst_log("Matriz legal", "Actualizar", f"Fila #{int(mid)} → {u_estado}")
                     st.success("Matriz actualizada.")
                     st.rerun()
-                if st.button("Recargar base legal", key="sgsst_seed_matriz"):
+                if st.button("Recargar base legal", key=K("sgsst_seed_matriz")):
                     ensure_sgsst_seed_data()
                     st.success("Base legal verificada/cargada.")
                     st.rerun()
 
     with tabs[5]:
         st.markdown("### Programa anual preventivo")
-        anio_view = st.number_input("Año", min_value=2024, max_value=2100, value=date.today().year, step=1, key="sgsst_prog_anio_view")
+        anio_view = st.number_input("Año", min_value=2024, max_value=2100, value=date.today().year, step=1, key=K("sgsst_prog_anio_view"))
         df_prog = fetch_df(
             """
             SELECT p.id, p.anio, COALESCE(f.nombre,'(Empresa)') AS faena, p.objetivo, p.actividad, p.responsable, p.fecha_compromiso, p.estado, p.avance, p.evidencia
@@ -424,16 +429,16 @@ def page_sgsst(
         faena_opts = [None] + faenas_df["id"].tolist() if not faenas_df.empty else [None]
         p1, p2 = st.columns(2)
         with p1:
-            objetivo = st.text_input("Objetivo", key="sgsst_prog_obj")
-            actividad = st.text_area("Actividad", key="sgsst_prog_act", height=90)
-            responsable = st.text_input("Responsable", key="sgsst_prog_resp")
-            fecha_comp = st.date_input("Fecha compromiso", value=date.today(), key="sgsst_prog_fecha")
+            objetivo = st.text_input("Objetivo", key=K("sgsst_prog_obj"))
+            actividad = st.text_area("Actividad", key=K("sgsst_prog_act"), height=90)
+            responsable = st.text_input("Responsable", key=K("sgsst_prog_resp"))
+            fecha_comp = st.date_input("Fecha compromiso", value=date.today(), key=K("sgsst_prog_fecha"))
         with p2:
-            faena_id = st.selectbox("Faena vinculada", faena_opts, key="sgsst_prog_faena", format_func=lambda x: "(Empresa)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            estado = st.selectbox("Estado", SGSST_ESTADOS, key="sgsst_prog_estado")
-            avance = st.slider("Avance %", min_value=0, max_value=100, value=0, step=5, key="sgsst_prog_avance")
-            evidencia = st.text_input("Evidencia / entregable", key="sgsst_prog_evidencia")
-        if st.button("Agregar actividad al programa", key="sgsst_add_prog"):
+            faena_id = st.selectbox("Faena vinculada", faena_opts, key=K("sgsst_prog_faena"), format_func=lambda x: "(Empresa)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            estado = st.selectbox("Estado", SGSST_ESTADOS, key=K("sgsst_prog_estado"))
+            avance = st.slider("Avance %", min_value=0, max_value=100, value=0, step=5, key=K("sgsst_prog_avance"))
+            evidencia = st.text_input("Evidencia / entregable", key=K("sgsst_prog_evidencia"))
+        if st.button("Agregar actividad al programa", key=K("sgsst_add_prog")):
             if not objetivo.strip() or not actividad.strip():
                 st.error("Objetivo y actividad son obligatorios.")
             else:
@@ -450,7 +455,7 @@ def page_sgsst(
         st.markdown("### MIPER por faena, proceso y cargo")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
         faena_opts = [None] + faenas_df["id"].tolist() if not faenas_df.empty else [None]
-        faena_filter = st.selectbox("Filtrar por faena", faena_opts, key="sgsst_miper_filter", format_func=lambda x: "(Todas)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+        faena_filter = st.selectbox("Filtrar por faena", faena_opts, key=K("sgsst_miper_filter"), format_func=lambda x: "(Todas)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
         q = """
             SELECT m.id, COALESCE(f.nombre,'(Empresa)') AS faena, m.proceso, m.tarea, m.cargo, m.peligro, m.riesgo, m.consecuencia,
                    m.probabilidad, m.severidad, m.nivel_riesgo, m.responsable, m.plazo, m.estado
@@ -466,25 +471,25 @@ def page_sgsst(
         st.dataframe(df_miper, use_container_width=True, hide_index=True)
         m1, m2, m3 = st.columns(3)
         with m1:
-            m_faena = st.selectbox("Faena", faena_opts, key="sgsst_miper_faena", format_func=lambda x: "(Empresa)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            proceso = st.text_input("Proceso", key="sgsst_miper_proceso")
-            tarea = st.text_input("Tarea", key="sgsst_miper_tarea")
-            cargo = st.selectbox("Cargo", segav_cargo_labels(active_only=True), key="sgsst_miper_cargo")
+            m_faena = st.selectbox("Faena", faena_opts, key=K("sgsst_miper_faena"), format_func=lambda x: "(Empresa)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            proceso = st.text_input("Proceso", key=K("sgsst_miper_proceso"))
+            tarea = st.text_input("Tarea", key=K("sgsst_miper_tarea"))
+            cargo = st.selectbox("Cargo", segav_cargo_labels(active_only=True), key=K("sgsst_miper_cargo"))
         with m2:
-            peligro = st.text_area("Peligro", key="sgsst_miper_peligro", height=80)
-            riesgo = st.text_area("Riesgo", key="sgsst_miper_riesgo", height=80)
-            consecuencia = st.text_area("Consecuencia", key="sgsst_miper_consecuencia", height=80)
-            controles = st.text_area("Controles existentes", key="sgsst_miper_controles", height=80)
+            peligro = st.text_area("Peligro", key=K("sgsst_miper_peligro"), height=80)
+            riesgo = st.text_area("Riesgo", key=K("sgsst_miper_riesgo"), height=80)
+            consecuencia = st.text_area("Consecuencia", key=K("sgsst_miper_consecuencia"), height=80)
+            controles = st.text_area("Controles existentes", key=K("sgsst_miper_controles"), height=80)
         with m3:
-            prob = st.slider("Probabilidad", 1, 5, 3, key="sgsst_miper_prob")
-            sev = st.slider("Severidad", 1, 5, 3, key="sgsst_miper_sev")
+            prob = st.slider("Probabilidad", 1, 5, 3, key=K("sgsst_miper_prob"))
+            sev = st.slider("Severidad", 1, 5, 3, key=K("sgsst_miper_sev"))
             nivel = int(prob) * int(sev)
             st.metric("Nivel de riesgo", nivel)
-            medidas = st.text_area("Medidas / acciones", key="sgsst_miper_medidas", height=80)
-            responsable = st.text_input("Responsable", key="sgsst_miper_resp")
-            plazo = st.date_input("Plazo", value=date.today(), key="sgsst_miper_plazo")
-            estado = st.selectbox("Estado", SGSST_ESTADOS, key="sgsst_miper_estado")
-        if st.button("Agregar riesgo a la MIPER", key="sgsst_add_miper"):
+            medidas = st.text_area("Medidas / acciones", key=K("sgsst_miper_medidas"), height=80)
+            responsable = st.text_input("Responsable", key=K("sgsst_miper_resp"))
+            plazo = st.date_input("Plazo", value=date.today(), key=K("sgsst_miper_plazo"))
+            estado = st.selectbox("Estado", SGSST_ESTADOS, key=K("sgsst_miper_estado"))
+        if st.button("Agregar riesgo a la MIPER", key=K("sgsst_add_miper")):
             if not peligro.strip() or not riesgo.strip():
                 st.error("Peligro y riesgo son obligatorios.")
             else:
@@ -510,17 +515,17 @@ def page_sgsst(
         st.dataframe(fetch_df(ins_q), use_container_width=True, hide_index=True)
         i1, i2 = st.columns(2)
         with i1:
-            ins_faena = st.selectbox("Faena / planta", faena_opts, key="sgsst_ins_faena", format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            ins_tipo = st.selectbox("Tipo inspección", ["DS 594", "Orden y aseo", "Extintores", "Campamento", "Otro"], key="sgsst_ins_tipo")
-            ins_area = st.text_input("Área", key="sgsst_ins_area")
-            ins_item = st.text_input("Ítem", key="sgsst_ins_item")
-            ins_result = st.selectbox("Resultado", SGSST_RESULTADOS, key="sgsst_ins_result")
+            ins_faena = st.selectbox("Faena / planta", faena_opts, key=K("sgsst_ins_faena"), format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            ins_tipo = st.selectbox("Tipo inspección", ["DS 594", "Orden y aseo", "Extintores", "Campamento", "Otro"], key=K("sgsst_ins_tipo"))
+            ins_area = st.text_input("Área", key=K("sgsst_ins_area"))
+            ins_item = st.text_input("Ítem", key=K("sgsst_ins_item"))
+            ins_result = st.selectbox("Resultado", SGSST_RESULTADOS, key=K("sgsst_ins_result"))
         with i2:
-            ins_obs = st.text_area("Observación", key="sgsst_ins_obs", height=100)
-            ins_accion = st.text_area("Acción correctiva", key="sgsst_ins_accion", height=100)
-            ins_resp = st.text_input("Responsable", key="sgsst_ins_resp")
-            ins_plazo = st.date_input("Plazo", value=date.today(), key="sgsst_ins_plazo")
-        if st.button("Registrar inspección", key="sgsst_add_ins"):
+            ins_obs = st.text_area("Observación", key=K("sgsst_ins_obs"), height=100)
+            ins_accion = st.text_area("Acción correctiva", key=K("sgsst_ins_accion"), height=100)
+            ins_resp = st.text_input("Responsable", key=K("sgsst_ins_resp"))
+            ins_plazo = st.date_input("Plazo", value=date.today(), key=K("sgsst_ins_plazo"))
+        if st.button("Registrar inspección", key=K("sgsst_add_ins")):
             if not ins_item.strip():
                 st.error("El ítem inspeccionado es obligatorio.")
             else:
@@ -543,10 +548,10 @@ def page_sgsst(
         if not faena_opts_ck:
             st.info("Crea una faena primero para realizar inspecciones.")
         else:
-            ck_faena = st.selectbox("Faena a inspeccionar", faena_opts_ck, key="ck594_faena",
+            ck_faena = st.selectbox("Faena a inspeccionar", faena_opts_ck, key=K("ck594_faena"),
                 format_func=lambda x: str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            ck_inspector = st.text_input("Inspector", key="ck594_inspector", placeholder="Nombre del inspector")
-            ck_fecha = st.date_input("Fecha inspección", value=date.today(), key="ck594_fecha")
+            ck_inspector = st.text_input("Inspector", key=K("ck594_inspector"), placeholder="Nombre del inspector")
+            ck_fecha = st.date_input("Fecha inspección", value=date.today(), key=K("ck594_fecha"))
 
             st.divider()
             results = {}
@@ -561,7 +566,7 @@ def page_sgsst(
                         key_ck = f"ck594_{cat[:8]}_{idx_item}"
                         results[(cat, item)] = st.checkbox("Cumple", value=True, key=key_ck)
 
-            if st.button("💾 Guardar checklist completo", type="primary", use_container_width=True, key="ck594_save"):
+            if st.button("💾 Guardar checklist completo", type="primary", use_container_width=True, key=K("ck594_save")):
                 now = datetime.now().isoformat(timespec='seconds')
                 saved = 0
                 for (cat, item), cumple in results.items():
@@ -614,18 +619,18 @@ def page_sgsst(
         st.dataframe(df_inc, use_container_width=True, hide_index=True)
         x1, x2 = st.columns(2)
         with x1:
-            inc_fecha = st.date_input("Fecha", value=date.today(), key="sgsst_inc_fecha")
-            inc_tipo = st.selectbox("Tipo", SGSST_TIPOS_EVENTO, key="sgsst_inc_tipo")
-            inc_grav = st.selectbox("Gravedad", SGSST_GRAVEDADES, key="sgsst_inc_grav")
-            inc_trab = st.selectbox("Trabajador", trab_opts, key="sgsst_inc_trab", format_func=lambda x: "(Sin trabajador)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
-            inc_faena = st.selectbox("Faena", faena_opts, key="sgsst_inc_faena", format_func=lambda x: "(Sin faena)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            inc_fecha = st.date_input("Fecha", value=date.today(), key=K("sgsst_inc_fecha"))
+            inc_tipo = st.selectbox("Tipo", SGSST_TIPOS_EVENTO, key=K("sgsst_inc_tipo"))
+            inc_grav = st.selectbox("Gravedad", SGSST_GRAVEDADES, key=K("sgsst_inc_grav"))
+            inc_trab = st.selectbox("Trabajador", trab_opts, key=K("sgsst_inc_trab"), format_func=lambda x: "(Sin trabajador)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
+            inc_faena = st.selectbox("Faena", faena_opts, key=K("sgsst_inc_faena"), format_func=lambda x: "(Sin faena)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
         with x2:
-            inc_desc = st.text_area("Descripción", key="sgsst_inc_desc", height=110)
-            inc_oa = st.text_input("Organismo administrador", value=str(company.get("organismo_admin") or ""), key="sgsst_inc_oa")
-            inc_dias = st.number_input("Días perdidos", min_value=0, value=0, step=1, key="sgsst_inc_dias")
-            inc_med = st.text_area("Medidas correctivas", key="sgsst_inc_med", height=90)
-            inc_estado = st.selectbox("Estado", SGSST_ESTADOS, key="sgsst_inc_estado")
-        if st.button("Registrar evento", key="sgsst_add_inc"):
+            inc_desc = st.text_area("Descripción", key=K("sgsst_inc_desc"), height=110)
+            inc_oa = st.text_input("Organismo administrador", value=str(company.get("organismo_admin") or ""), key=K("sgsst_inc_oa"))
+            inc_dias = st.number_input("Días perdidos", min_value=0, value=0, step=1, key=K("sgsst_inc_dias"))
+            inc_med = st.text_area("Medidas correctivas", key=K("sgsst_inc_med"), height=90)
+            inc_estado = st.selectbox("Estado", SGSST_ESTADOS, key=K("sgsst_inc_estado"))
+        if st.button("Registrar evento", key=K("sgsst_add_inc")):
             if not inc_desc.strip():
                 st.error("La descripción del evento es obligatoria.")
             else:
@@ -658,18 +663,18 @@ def page_sgsst(
         st.dataframe(df_cap, use_container_width=True, hide_index=True)
         c1, c2 = st.columns(2)
         with c1:
-            cap_tipo = st.selectbox("Tipo", SGSST_TIPOS_CAP, key="sgsst_cap_tipo")
-            cap_tema = st.text_input("Tema", key="sgsst_cap_tema")
-            cap_fecha = st.date_input("Fecha ejecución", value=date.today(), key="sgsst_cap_fecha")
-            cap_vig = st.date_input("Vigencia / próxima revisión", value=date.today() + timedelta(days=365), key="sgsst_cap_vig")
-            cap_horas = st.number_input("Horas", min_value=0.0, value=1.0, step=0.5, key="sgsst_cap_horas")
+            cap_tipo = st.selectbox("Tipo", SGSST_TIPOS_CAP, key=K("sgsst_cap_tipo"))
+            cap_tema = st.text_input("Tema", key=K("sgsst_cap_tema"))
+            cap_fecha = st.date_input("Fecha ejecución", value=date.today(), key=K("sgsst_cap_fecha"))
+            cap_vig = st.date_input("Vigencia / próxima revisión", value=date.today() + timedelta(days=365), key=K("sgsst_cap_vig"))
+            cap_horas = st.number_input("Horas", min_value=0.0, value=1.0, step=0.5, key=K("sgsst_cap_horas"))
         with c2:
-            cap_relator = st.text_input("Relator / organismo", key="sgsst_cap_relator")
-            cap_trab = st.selectbox("Trabajador", trab_opts, key="sgsst_cap_trab", format_func=lambda x: "(General)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
-            cap_faena = st.selectbox("Faena", faena_opts, key="sgsst_cap_faena", format_func=lambda x: "(General)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            cap_estado = st.selectbox("Estado", ["VIGENTE", "POR VENCER", "VENCIDA"], key="sgsst_cap_estado")
-            cap_evid = st.text_input("Evidencia", key="sgsst_cap_evid")
-        if st.button("Registrar capacitación / ODI", key="sgsst_add_cap"):
+            cap_relator = st.text_input("Relator / organismo", key=K("sgsst_cap_relator"))
+            cap_trab = st.selectbox("Trabajador", trab_opts, key=K("sgsst_cap_trab"), format_func=lambda x: "(General)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
+            cap_faena = st.selectbox("Faena", faena_opts, key=K("sgsst_cap_faena"), format_func=lambda x: "(General)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
+            cap_estado = st.selectbox("Estado", ["VIGENTE", "POR VENCER", "VENCIDA"], key=K("sgsst_cap_estado"))
+            cap_evid = st.text_input("Evidencia", key=K("sgsst_cap_evid"))
+        if st.button("Registrar capacitación / ODI", key=K("sgsst_add_cap")):
             if not cap_tema.strip():
                 st.error("El tema es obligatorio.")
             else:
@@ -705,7 +710,7 @@ def page_sgsst(
                 ORDER BY e.fecha_entrega DESC, e.id DESC
             """)
             if epp_hist is not None and not epp_hist.empty:
-                epp_q = st.text_input("🔍 Filtrar entregas", key="epp_q", placeholder="RUT, nombre, EPP…")
+                epp_q = st.text_input("🔍 Filtrar entregas", key=K("epp_q"), placeholder="RUT, nombre, EPP…")
                 epp_view = epp_hist.copy()
                 if epp_q.strip():
                     qq = epp_q.strip().lower()
@@ -724,21 +729,21 @@ def page_sgsst(
             st.markdown("#### ➕ Registrar entrega de EPP")
             e1, e2 = st.columns(2)
             with e1:
-                epp_trab = st.selectbox("Trabajador", trab_df["id"].tolist(), key="epp_trab",
+                epp_trab = st.selectbox("Trabajador", trab_df["id"].tolist(), key=K("epp_trab"),
                     format_func=lambda x: f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}, {trab_df[trab_df['id']==x].iloc[0]['nombres']}")
-                epp_tipo = st.selectbox("Tipo de EPP", _epp_tipos, key="epp_tipo")
-                epp_fecha = st.date_input("Fecha entrega", value=date.today(), key="epp_fecha")
-                epp_venc = st.date_input("Fecha vencimiento (opcional)", value=None, key="epp_venc")
+                epp_tipo = st.selectbox("Tipo de EPP", _epp_tipos, key=K("epp_tipo"))
+                epp_fecha = st.date_input("Fecha entrega", value=date.today(), key=K("epp_fecha"))
+                epp_venc = st.date_input("Fecha vencimiento (opcional)", value=None, key=K("epp_venc"))
             with e2:
                 faena_opts_epp = [None] + (faenas_df["id"].tolist() if not faenas_df.empty else [])
-                epp_faena = st.selectbox("Faena", faena_opts_epp, key="epp_faena",
+                epp_faena = st.selectbox("Faena", faena_opts_epp, key=K("epp_faena"),
                     format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-                epp_cant = st.number_input("Cantidad", min_value=1, value=1, key="epp_cant")
-                epp_talla = st.text_input("Talla", key="epp_talla")
-                epp_marca = st.text_input("Marca", key="epp_marca")
-            epp_obs = st.text_input("Observación", key="epp_obs")
+                epp_cant = st.number_input("Cantidad", min_value=1, value=1, key=K("epp_cant"))
+                epp_talla = st.text_input("Talla", key=K("epp_talla"))
+                epp_marca = st.text_input("Marca", key=K("epp_marca"))
+            epp_obs = st.text_input("Observación", key=K("epp_obs"))
 
-            if st.button("💾 Registrar entrega EPP", type="primary", use_container_width=True, key="epp_save"):
+            if st.button("💾 Registrar entrega EPP", type="primary", use_container_width=True, key=K("epp_save")):
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
                     "INSERT INTO sgsst_epp_entrega(trabajador_id, faena_id, epp_tipo, fecha_entrega, fecha_vencimiento, cantidad, talla, marca, observacion, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -779,15 +784,15 @@ def page_sgsst(
         with st.expander("➕ Constituir / Actualizar CPHS", expanded=cphs_df is None or cphs_df.empty):
             cp1, cp2 = st.columns(2)
             with cp1:
-                cp_pres = st.text_input("Presidente", key="cphs_pres")
-                cp_sec = st.text_input("Secretario", key="cphs_sec")
-                cp_re = st.text_area("Representantes empresa (uno por línea)", key="cphs_re", height=80)
-                cp_dot = st.number_input("Dotación actual", min_value=0, value=0, key="cphs_dot")
+                cp_pres = st.text_input("Presidente", key=K("cphs_pres"))
+                cp_sec = st.text_input("Secretario", key=K("cphs_sec"))
+                cp_re = st.text_area("Representantes empresa (uno por línea)", key=K("cphs_re"), height=80)
+                cp_dot = st.number_input("Dotación actual", min_value=0, value=0, key=K("cphs_dot"))
             with cp2:
-                cp_rt = st.text_area("Representantes trabajadores (uno por línea)", key="cphs_rt", height=80)
-                cp_elec = st.date_input("Fecha elección", value=date.today(), key="cphs_elec")
-                cp_vig = st.date_input("Vigencia hasta", value=date.today() + timedelta(days=730), key="cphs_vig")
-            if st.button("💾 Guardar CPHS", type="primary", key="cphs_save"):
+                cp_rt = st.text_area("Representantes trabajadores (uno por línea)", key=K("cphs_rt"), height=80)
+                cp_elec = st.date_input("Fecha elección", value=date.today(), key=K("cphs_elec"))
+                cp_vig = st.date_input("Vigencia hasta", value=date.today() + timedelta(days=730), key=K("cphs_vig"))
+            if st.button("💾 Guardar CPHS", type="primary", key=K("cphs_save")):
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
                     "INSERT INTO sgsst_cphs(fecha_eleccion, vigencia_hasta, representantes_empresa, representantes_trabajadores, presidente, secretario, dotacion_actual, estado, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -804,12 +809,12 @@ def page_sgsst(
             st.dataframe(actas.rename(columns={"fecha":"Fecha","numero_acta":"N° Acta","temas":"Temas","acuerdos":"Acuerdos","estado":"Estado"}), use_container_width=True, hide_index=True)
 
         with st.expander("➕ Registrar acta de reunión"):
-            ac_fecha = st.date_input("Fecha reunión", value=date.today(), key="acta_fecha")
-            ac_num = st.text_input("N° de acta", key="acta_num")
-            ac_asist = st.text_area("Asistentes", key="acta_asist", height=60)
-            ac_temas = st.text_area("Temas tratados", key="acta_temas", height=80)
-            ac_acuerdos = st.text_area("Acuerdos", key="acta_acuerdos", height=80)
-            if st.button("💾 Guardar acta", key="acta_save"):
+            ac_fecha = st.date_input("Fecha reunión", value=date.today(), key=K("acta_fecha"))
+            ac_num = st.text_input("N° de acta", key=K("acta_num"))
+            ac_asist = st.text_area("Asistentes", key=K("acta_asist"), height=60)
+            ac_temas = st.text_area("Temas tratados", key=K("acta_temas"), height=80)
+            ac_acuerdos = st.text_area("Acuerdos", key=K("acta_acuerdos"), height=80)
+            if st.button("💾 Guardar acta", key=K("acta_save")):
                 cphs_id = int(cphs_df.iloc[0]["id"]) if cphs_df is not None and not cphs_df.empty else None
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
@@ -849,25 +854,25 @@ def page_sgsst(
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
         d1, d2 = st.columns(2)
         with d1:
-            di_tipo = st.selectbox("Tipo de denuncia", ["DIAT", "DIEP"], key="diat_tipo")
-            di_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key="diat_trab",
+            di_tipo = st.selectbox("Tipo de denuncia", ["DIAT", "DIEP"], key=K("diat_tipo"))
+            di_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key=K("diat_trab"),
                 format_func=lambda x: "(Sin asignar)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}")
-            di_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="diat_faena",
+            di_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key=K("diat_faena"),
                 format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-            di_fecha_acc = st.date_input("Fecha del accidente", value=date.today(), key="diat_fecha_acc")
-            di_hora = st.text_input("Hora del accidente", key="diat_hora", placeholder="HH:MM")
-            di_fecha_den = st.date_input("Fecha de denuncia", value=date.today(), key="diat_fecha_den")
-            di_num = st.text_input("N° de denuncia", key="diat_num")
+            di_fecha_acc = st.date_input("Fecha del accidente", value=date.today(), key=K("diat_fecha_acc"))
+            di_hora = st.text_input("Hora del accidente", key=K("diat_hora"), placeholder="HH:MM")
+            di_fecha_den = st.date_input("Fecha de denuncia", value=date.today(), key=K("diat_fecha_den"))
+            di_num = st.text_input("N° de denuncia", key=K("diat_num"))
         with d2:
-            di_lugar = st.text_input("Lugar del accidente", key="diat_lugar")
-            di_desc = st.text_area("Descripción del accidente", key="diat_desc", height=80)
-            di_lesion = st.text_input("Tipo de lesión", key="diat_lesion", placeholder="Fractura, contusión, etc.")
-            di_parte = st.text_input("Parte del cuerpo afectada", key="diat_parte")
-            di_dias = st.number_input("Días perdidos", min_value=0, value=0, key="diat_dias")
-            di_testigos = st.text_input("Testigos", key="diat_testigos")
-            di_org = st.text_input("Organismo administrador", key="diat_org", placeholder="ACHS, IST, Mutual…")
+            di_lugar = st.text_input("Lugar del accidente", key=K("diat_lugar"))
+            di_desc = st.text_area("Descripción del accidente", key=K("diat_desc"), height=80)
+            di_lesion = st.text_input("Tipo de lesión", key=K("diat_lesion"), placeholder="Fractura, contusión, etc.")
+            di_parte = st.text_input("Parte del cuerpo afectada", key=K("diat_parte"))
+            di_dias = st.number_input("Días perdidos", min_value=0, value=0, key=K("diat_dias"))
+            di_testigos = st.text_input("Testigos", key=K("diat_testigos"))
+            di_org = st.text_input("Organismo administrador", key=K("diat_org"), placeholder="ACHS, IST, Mutual…")
 
-        if st.button("💾 Registrar denuncia", type="primary", use_container_width=True, key="diat_save"):
+        if st.button("💾 Registrar denuncia", type="primary", use_container_width=True, key=K("diat_save")):
             if not di_desc.strip():
                 st.error("La descripción del accidente es obligatoria.")
             else:
@@ -911,19 +916,19 @@ def page_sgsst(
             faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
             v1, v2 = st.columns(2)
             with v1:
-                vi_prot = st.selectbox("Protocolo", PROTOCOLOS, key="vig_prot")
-                vi_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key="vig_trab",
+                vi_prot = st.selectbox("Protocolo", PROTOCOLOS, key=K("vig_prot"))
+                vi_trab = st.selectbox("Trabajador", [None] + (trab_df["id"].tolist() if trab_df is not None and not trab_df.empty else []), key=K("vig_trab"),
                     format_func=lambda x: "(General)" if x is None else f"{trab_df[trab_df['id']==x].iloc[0]['rut']} · {trab_df[trab_df['id']==x].iloc[0]['apellidos']}")
-                vi_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="vig_faena",
+                vi_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key=K("vig_faena"),
                     format_func=lambda x: "PLANTA" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
-                vi_agente = st.text_input("Agente de riesgo", key="vig_agente", placeholder="Ruido, sílice, etc.")
+                vi_agente = st.text_input("Agente de riesgo", key=K("vig_agente"), placeholder="Ruido, sílice, etc.")
             with v2:
-                vi_nivel = st.selectbox("Nivel de exposición", ["BAJO", "MEDIO", "ALTO", "CRÍTICO"], key="vig_nivel")
-                vi_fecha = st.date_input("Fecha evaluación", value=date.today(), key="vig_fecha")
-                vi_prox = st.date_input("Próxima evaluación", value=date.today() + timedelta(days=365), key="vig_prox")
-                vi_result = st.text_input("Resultado", key="vig_result")
-                vi_medidas = st.text_area("Medidas de control", key="vig_medidas", height=60)
-            if st.button("💾 Registrar evaluación", key="vig_save"):
+                vi_nivel = st.selectbox("Nivel de exposición", ["BAJO", "MEDIO", "ALTO", "CRÍTICO"], key=K("vig_nivel"))
+                vi_fecha = st.date_input("Fecha evaluación", value=date.today(), key=K("vig_fecha"))
+                vi_prox = st.date_input("Próxima evaluación", value=date.today() + timedelta(days=365), key=K("vig_prox"))
+                vi_result = st.text_input("Resultado", key=K("vig_result"))
+                vi_medidas = st.text_area("Medidas de control", key=K("vig_medidas"), height=60)
+            if st.button("💾 Registrar evaluación", key=K("vig_save")):
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
                     "INSERT INTO sgsst_vigilancia(protocolo, trabajador_id, faena_id, agente, nivel_exposicion, fecha_evaluacion, fecha_proxima, resultado, medidas, estado, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -965,19 +970,19 @@ def page_sgsst(
             faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
             s1, s2 = st.columns(2)
             with s1:
-                su_rut = st.text_input("RUT empresa subcontratista", key="sub_rut")
-                su_razon = st.text_input("Razón social", key="sub_razon")
-                su_mand = st.selectbox("Mandante", [None] + (mand_df["id"].tolist() if mand_df is not None and not mand_df.empty else []), key="sub_mand",
+                su_rut = st.text_input("RUT empresa subcontratista", key=K("sub_rut"))
+                su_razon = st.text_input("Razón social", key=K("sub_razon"))
+                su_mand = st.selectbox("Mandante", [None] + (mand_df["id"].tolist() if mand_df is not None and not mand_df.empty else []), key=K("sub_mand"),
                     format_func=lambda x: "(Sin mandante)" if x is None else str(mand_df[mand_df['id']==x].iloc[0]['nombre']))
-                su_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key="sub_faena",
+                su_faena = st.selectbox("Faena", [None] + (faenas_df["id"].tolist() if faenas_df is not None and not faenas_df.empty else []), key=K("sub_faena"),
                     format_func=lambda x: "(Sin faena)" if x is None else str(faenas_df[faenas_df['id']==x].iloc[0]['nombre']))
             with s2:
-                su_contacto = st.text_input("Contacto", key="sub_contacto")
-                su_email = st.text_input("Email", key="sub_email")
-                su_tel = st.text_input("Teléfono", key="sub_tel")
-                su_fi = st.date_input("Fecha inicio contrato", value=date.today(), key="sub_fi")
-                su_ft = st.date_input("Fecha término (opcional)", value=None, key="sub_ft")
-            if st.button("💾 Registrar subcontratista", key="sub_save"):
+                su_contacto = st.text_input("Contacto", key=K("sub_contacto"))
+                su_email = st.text_input("Email", key=K("sub_email"))
+                su_tel = st.text_input("Teléfono", key=K("sub_tel"))
+                su_fi = st.date_input("Fecha inicio contrato", value=date.today(), key=K("sub_fi"))
+                su_ft = st.date_input("Fecha término (opcional)", value=None, key=K("sub_ft"))
+            if st.button("💾 Registrar subcontratista", key=K("sub_save")):
                 if not su_razon.strip():
                     st.error("Razón social es obligatoria.")
                 else:
@@ -1009,11 +1014,11 @@ def page_sgsst(
 
         st.divider()
         with st.expander("➕ Registrar nueva versión del RIOHS"):
-            ri_ver = st.text_input("Versión", key="riohs_ver", placeholder="v2.0 - 2025")
-            ri_fecha = st.date_input("Vigente desde", value=date.today(), key="riohs_fecha")
-            ri_aprob = st.text_input("Aprobado por", key="riohs_aprob")
-            ri_obs = st.text_area("Observaciones / cambios principales", key="riohs_obs", height=80)
-            if st.button("💾 Registrar versión RIOHS", key="riohs_save"):
+            ri_ver = st.text_input("Versión", key=K("riohs_ver"), placeholder="v2.0 - 2025")
+            ri_fecha = st.date_input("Vigente desde", value=date.today(), key=K("riohs_fecha"))
+            ri_aprob = st.text_input("Aprobado por", key=K("riohs_aprob"))
+            ri_obs = st.text_area("Observaciones / cambios principales", key=K("riohs_obs"), height=80)
+            if st.button("💾 Registrar versión RIOHS", key=K("riohs_save")):
                 if not ri_ver.strip():
                     st.error("La versión es obligatoria.")
                 else:
