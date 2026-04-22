@@ -28,6 +28,15 @@ import json
 import secrets
 import unicodedata
 
+from segav_core.compliance_logic import pendientes_empresa_faena_logic, pendientes_obligatorios_logic
+from segav_core.error_handling import get_soft_errors as _get_soft_errors, record_soft_error as _record_soft_error
+from segav_core.export_utils import build_zip_from_entries
+from segav_core.rut_utils import clean_rut as clean_rut_core, format_rut_chileno as format_rut_chileno_core, rut_parts as rut_parts_core, validate_rut_dv as validate_rut_dv_core
+from segav_core.tenant_scope import inject_tenant_condition_sql as inject_tenant_condition_sql_core, scope_sql_to_tenant as scope_sql_to_tenant_core, tenant_scope_target_table as tenant_scope_target_table_core
+from segav_core.ui_tenant import allowed_client_keys_for_user as allowed_client_keys_for_user_core, filter_visible_clientes_df as filter_visible_clientes_df_core, resolve_active_client_key as resolve_active_client_key_core, client_key_is_visible as client_key_is_visible_core, active_company_admin_flag as active_company_admin_flag_core, company_role_for_user as company_role_for_user_core, company_caps_for_user as company_caps_for_user_core, tenant_object_path_allowed as tenant_object_path_allowed_core
+from segav_core.module_perms import ensure_user_client_module_perms_table, effective_company_perms
+from segav_core.db_migrations import apply_runtime_migrations
+
 # ----------------------------
 # Config
 # ----------------------------
@@ -106,7 +115,15 @@ def _build_pg_dsn_from_parts() -> str:
 raw_pg_dsn = _get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", ""))
 PG_DSN = _normalize_pg_dsn(raw_pg_dsn) or _build_pg_dsn_from_parts()
 PG_DSN_FINGERPRINT = _fingerprint(PG_DSN) if PG_DSN else "none"
-DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+DB_BACKEND_PREF = str(_get_cfg("SEGAV_DB_BACKEND", "postgres") or "postgres").strip().lower()
+if DB_BACKEND_PREF not in {"postgres", "sqlite"}:
+    DB_BACKEND_PREF = "postgres"
+if DB_BACKEND_PREF == "sqlite":
+    DB_BACKEND = "sqlite"
+elif PG_DSN and psycopg is not None:
+    DB_BACKEND = "postgres"
+else:
+    DB_BACKEND = "sqlite"
 
 @st.cache_resource(show_spinner=False)
 def get_http_session():
@@ -168,6 +185,36 @@ def clear_app_caches():
     except Exception as exc:
         _record_soft_error("clear_app_caches", exc)
 
+
+def _df_with_columns(df, defaults: dict[str, object]):
+    if df is None:
+        work = pd.DataFrame()
+    else:
+        try:
+            work = df.copy()
+        except Exception:
+            work = pd.DataFrame(df)
+    for col, default in (defaults or {}).items():
+        if col not in work.columns:
+            work[col] = default
+    return work
+
+
+def _safe_numeric_int(value, default: int = 0) -> int:
+    try:
+        if pd.isna(value):
+            return int(default)
+    except Exception:
+        pass
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return int(default)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_fetch_df(db_backend: str, dsn_fingerprint: str, q: str, params_cache):
     params = tuple(params_cache) if isinstance(params_cache, tuple) else params_cache
@@ -189,6 +236,10 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     init_db()
     ensure_segav_erp_tables()
     ensure_segav_erp_seed_data()
+    try:
+        apply_runtime_migrations(execute, fetch_value, DB_BACKEND)
+    except Exception as _exc:
+        _record_soft_error("bootstrap.runtime_migrations", _exc)
     try:
         backfill_multiempresa_cliente_key()
     except Exception as _exc:
@@ -563,6 +614,9 @@ def prepare_upload_payload(file_name: str, file_bytes: bytes, content_type: str 
 
 def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_type: str = "application/octet-stream"):
     # Guarda local (compatibilidad) + intenta subir a Storage (online).
+    tenant_key = current_tenant_key()
+    if not tenant_key:
+        raise PermissionError('No hay empresa activa para almacenar archivos.')
     scoped_folder_parts = tenantize_folder_parts(folder_parts)
     local_path = save_file(scoped_folder_parts, file_name, file_bytes)
     object_path = _storage_object_path(scoped_folder_parts, file_name)
@@ -605,6 +659,10 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
     return local_path, bucket, object_path
 
 def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
+    if object_path:
+        u = current_user() or {}
+        if not tenant_object_path_allowed_core(str(object_path), current_tenant_key(), is_superadmin=str(u.get('role') or '').upper() == 'SUPERADMIN'):
+            raise PermissionError('Archivo fuera del tenant activo.')
     if object_path and storage_enabled():
         try:
             return storage_download(object_path)
@@ -1058,79 +1116,6 @@ button[data-baseweb="tab"] {
     padding: 10px 12px;
 }
 
-/* ══════════════════════════════════════════════════════════════
-   MOBILE RESPONSIVE — optimizado para uso en terreno
-   ══════════════════════════════════════════════════════════════ */
-@media (max-width: 768px) {
-    /* Sidebar oculta por defecto en móvil — usar hamburguesa */
-    .block-container { padding: 0.5rem 0.8rem 2rem 0.8rem !important; }
-
-    /* Tabs más compactos */
-    button[data-baseweb="tab"] {
-        font-size: 12px !important;
-        padding: 6px 8px !important;
-        margin-right: 2px !important;
-    }
-
-    /* Metric cards apilados */
-    [data-testid="stHorizontalBlock"] {
-        flex-wrap: wrap !important;
-    }
-    [data-testid="stMetric"] {
-        padding: 8px 10px !important;
-        border-radius: 12px !important;
-    }
-    [data-testid="stMetric"] [data-testid="stMetricValue"] {
-        font-size: 18px !important;
-    }
-    [data-testid="stMetric"] [data-testid="stMetricLabel"] {
-        font-size: 11px !important;
-    }
-
-    /* Formularios full-width */
-    [data-testid="stTextInput"] input,
-    [data-testid="stSelectbox"],
-    [data-testid="stDateInput"],
-    [data-testid="stTextArea"] textarea {
-        font-size: 16px !important; /* Evita zoom en iOS */
-    }
-
-    /* Botones más grandes para dedos */
-    div.stButton > button,
-    div.stDownloadButton > button,
-    [data-testid="stFormSubmitButton"] button {
-        min-height: 48px !important;
-        font-size: 15px !important;
-        border-radius: 12px !important;
-    }
-
-    /* Dataframes scroll horizontal */
-    [data-testid="stDataFrame"] {
-        overflow-x: auto !important;
-        -webkit-overflow-scrolling: touch;
-    }
-
-    /* Expanders más touch-friendly */
-    details[data-testid="stExpander"] summary {
-        min-height: 44px !important;
-        font-size: 14px !important;
-    }
-
-    /* Header cards más compactos */
-    .segav-card {
-        padding: 10px 12px !important;
-        border-radius: 12px !important;
-    }
-}
-
-/* Performance: reducir repaints */
-[data-testid="stSidebar"],
-[data-testid="stMain"],
-.stApp {
-    will-change: auto;
-    -webkit-backface-visibility: hidden;
-}
-
         </style>
         """,
         unsafe_allow_html=True,
@@ -1174,9 +1159,6 @@ def ui_confirm_delete(label: str, key: str) -> bool:
 
 
 def safe_name(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_") or "item"
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
@@ -1249,9 +1231,9 @@ def fetch_assigned_workers(faena_id: int, fresh: bool = True):
     return reader(q, (int(faena_id), tenant_key, tenant_key))
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def _cached_global_counts(_backend: str, _dsn: str, _tenant: str):
-    """Conteos cacheados — 30s TTL."""
+def get_global_counts():
+    """Devuelve conteos básicos filtrados por empresa activa."""
+    tenant_key = current_tenant_key()
     try:
         row = fetch_df(
             """
@@ -1268,19 +1250,32 @@ def _cached_global_counts(_backend: str, _dsn: str, _tenant: str):
                 (SELECT COUNT(*) FROM export_historial WHERE COALESCE(cliente_key,'')=?) AS exports,
                 (SELECT COUNT(*) FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?) AS exports_mes
             """,
-            (_tenant, _tenant, _tenant, _tenant, _tenant, _tenant, _tenant, _tenant, _tenant, _tenant, _tenant),
+            (tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key, tenant_key),
         )
         if row.empty:
             return {}
         return {k: int(row.iloc[0].get(k, 0) or 0) for k in row.columns}
     except Exception:
-        return {}
-
-
-def get_global_counts():
-    """Devuelve conteos básicos filtrados por empresa activa (cacheado 30s)."""
-    tenant_key = current_tenant_key()
-    return _cached_global_counts(DB_BACKEND, PG_DSN_FINGERPRINT, tenant_key)
+        out = {}
+        pairs = [
+            ("mandantes", "SELECT COUNT(*) AS n FROM mandantes WHERE COALESCE(cliente_key,'')=?"),
+            ("contratos_faena", "SELECT COUNT(*) AS n FROM contratos_faena WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=?"),
+            ("faenas_activas", "SELECT COUNT(*) AS n FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA'"),
+            ("trabajadores", "SELECT COUNT(*) AS n FROM trabajadores WHERE COALESCE(cliente_key,'')=?"),
+            ("asignaciones", "SELECT COUNT(*) AS n FROM asignaciones WHERE COALESCE(cliente_key,'')=?"),
+            ("docs", "SELECT COUNT(*) AS n FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa", "SELECT COUNT(*) AS n FROM empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("docs_empresa_faena", "SELECT COUNT(*) AS n FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=?"),
+            ("exports", "SELECT COUNT(*) AS n FROM export_historial WHERE COALESCE(cliente_key,'')=?"),
+            ("exports_mes", "SELECT COUNT(*) AS n FROM export_historial_mes WHERE COALESCE(cliente_key,'')=?"),
+        ]
+        for key, sql in pairs:
+            try:
+                out[key] = int(fetch_df(sql, (tenant_key,))["n"].iloc[0])
+            except Exception:
+                out[key] = 0
+        return out
 
 
 def norm_col(s: str) -> str:
@@ -1290,75 +1285,43 @@ def norm_col(s: str) -> str:
     return s.strip("_")
 
 def _rut_parts(rut: str):
-    raw = str(rut or "").strip().upper()
-    raw = re.sub(r"[^0-9K]", "", raw)
-    if not raw:
-        return "", ""
-    if len(raw) == 1:
-        return "", raw
-    body = raw[:-1].lstrip("0") or "0"
-    dv = raw[-1]
-    return body, dv
+    return rut_parts_core(rut)
 
 
 def format_rut_chileno(rut: str) -> str:
-    body, dv = _rut_parts(rut)
-    if not body and not dv:
-        return ""
-    if not body:
-        return dv
-    rev = body[::-1]
-    grouped_rev = ".".join(rev[i:i+3] for i in range(0, len(rev), 3))
-    return f"{grouped_rev[::-1]}-{dv}"
+    return format_rut_chileno_core(rut)
 
 
 def validate_rut_dv(rut: str) -> bool:
     """Valida el dígito verificador de un RUT chileno. Retorna True si es válido."""
-    body, dv = _rut_parts(rut)
-    if not body or not dv:
-        return False
-    try:
-        n = int(body)
-    except ValueError:
-        return False
-    mult, total = 2, 0
-    while n:
-        total += (n % 10) * mult
-        n //= 10
-        mult = 2 if mult == 7 else mult + 1
-    expected = 11 - (total % 11)
-    if expected == 11:
-        expected_dv = "0"
-    elif expected == 10:
-        expected_dv = "k"
-    else:
-        expected_dv = str(expected)
-    return dv.lower() == expected_dv
+    return validate_rut_dv_core(rut)
 
 
 def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: str = ""):
     """Registra una acción en el log de auditoría."""
     try:
-        u = current_user()
-        username = u["username"] if u else "sistema"
-        ck = cliente_key or (current_segav_client_key() if u else "")
+        u = current_user() or {}
+        username = str(u.get("username") or "sistema")
+        user_id = int(u.get("id") or 0) if u else 0
+        role_global = str(u.get("role") or "SISTEMA").upper() if u else "SISTEMA"
+        ck = str(cliente_key or (current_segav_client_key() if u else "")).strip()
+        role_empresa = company_role_for_user_core(fetch_df, user_id, ck, role_global) if ck else role_global
         now = datetime.now().isoformat(timespec="seconds")
         execute(
-            "INSERT INTO segav_audit_log(cliente_key,username,accion,entidad,detalle,created_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (ck, username, str(accion)[:100], str(entidad)[:100], str(detalle)[:500], now),
+            "INSERT INTO segav_audit_log(cliente_key,username,user_id,role_global,role_empresa,accion,entidad,detalle,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (ck, username, user_id, role_global, role_empresa, str(accion)[:100], str(entidad)[:100], str(detalle)[:500], now),
         )
-        # Conserva solo los últimos 2000 registros
         execute(
             "DELETE FROM segav_audit_log WHERE id NOT IN"
             " (SELECT id FROM segav_audit_log ORDER BY id DESC LIMIT 2000)"
         )
     except Exception as _exc:
-        _record_soft_error("delete.select", _exc)
+        _record_soft_error("audit_log", _exc)
 
 
 def clean_rut(rut: str) -> str:
-    return format_rut_chileno(rut)
+    return clean_rut_core(rut)
 
 
 def _format_rut_session_value(key: str):
@@ -1642,6 +1605,10 @@ def conn():
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         c.execute("PRAGMA foreign_keys = ON;")
+        c.execute("PRAGMA journal_mode = WAL;")
+        c.execute("PRAGMA synchronous = NORMAL;")
+        c.execute("PRAGMA temp_store = MEMORY;")
+        c.execute("PRAGMA busy_timeout = 5000;")
     except Exception as _exc:
         _record_soft_error("execute", _exc)
     return c
@@ -1888,9 +1855,6 @@ def ensure_core_tables_postgres():
         "CREATE INDEX IF NOT EXISTS idx_trabajadores_rut ON trabajadores(rut);",
         "CREATE INDEX IF NOT EXISTS idx_trabajadores_apellidos ON trabajadores(apellidos, nombres);",
         "CREATE INDEX IF NOT EXISTS idx_empresa_documentos_doc_tipo ON empresa_documentos(doc_tipo);",
-        "CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);",
-        "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON segav_audit_log(created_at);",
-        "CREATE INDEX IF NOT EXISTS idx_audit_log_username ON segav_audit_log(username);",
         "CREATE INDEX IF NOT EXISTS idx_faenas_estado ON faenas(estado);",
         "CREATE INDEX IF NOT EXISTS idx_asignaciones_estado ON asignaciones(estado);",
     ]
@@ -1904,6 +1868,7 @@ def init_db():
     if DB_BACKEND == "postgres":
         ensure_core_tables_postgres()
         ensure_sgsst_tables_postgres()
+        ensure_segav_erp_tables()
         ensure_storage_columns_postgres()
         ensure_multiempresa_columns_postgres()
         sync_postgres_core_sequences()
@@ -2389,9 +2354,17 @@ def ensure_sgsst_tables_sqlite(c):
     c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_rut ON trabajadores(rut);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_apellidos ON trabajadores(apellidos, nombres);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_empresa_documentos_doc_tipo ON empresa_documentos(doc_tipo);")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_faenas_estado ON faenas(estado);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_asignaciones_estado ON asignaciones(estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_faenas_tenant_estado ON faenas(cliente_key, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_tenant_estado ON trabajadores(cliente_key, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_asignaciones_tenant_faena_estado ON asignaciones(cliente_key, faena_id, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_trabajador_tenant_trab_tipo ON trabajador_documentos(cliente_key, trabajador_id, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_empresa_tenant_tipo ON empresa_documentos(cliente_key, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_empresa_faena_tenant_faena_tipo ON faena_empresa_documentos(cliente_key, faena_id, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_export_hist_tenant_faena ON export_historial(cliente_key, faena_id, created_at);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_export_hist_mes_tenant_periodo ON export_historial_mes(cliente_key, year_month, created_at);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_legal_doc_latest ON legal_doc_approvals(cliente_key, entity_table, entity_id, version_no, id);")
 
 
 def ensure_sgsst_seed_data():
@@ -2528,59 +2501,13 @@ def restore_from_backup_zip(zip_bytes: bytes):
 
 
 def pendientes_obligatorios(faena_id: int) -> dict:
-    """
-    Retorna dict {nombre_trabajador: [doc_tipos_faltantes]} para todos los
-    trabajadores asignados a la faena.
-    """
-    try:
-        trab = fetch_df(
-            """
-            SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre, t.cargo
-            FROM asignaciones a
-            JOIN trabajadores t ON t.id = a.trabajador_id
-            WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
-            ORDER BY t.apellidos, t.nombres
-            """,
-            (int(faena_id),),
-        )
-        if trab is None or trab.empty:
-            return {}
-        result = {}
-        for _, row in trab.iterrows():
-            tid = int(row["id"])
-            cargo = str(row.get("cargo") or "")
-            required = worker_required_docs(cargo)
-            if not required:
-                result[str(row["nombre"])] = []
-                continue
-            docs = fetch_df(
-                "SELECT DISTINCT doc_tipo FROM trabajador_documentos WHERE trabajador_id=?",
-                (tid,),
-            )
-            present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
-            missing = [d for d in required if d not in present]
-            result[str(row["nombre"])] = missing
-        return result
-    except Exception:
-        return {}
+    """Retorna documentos faltantes por trabajador asignado a la faena."""
+    return pendientes_obligatorios_logic(fetch_df, worker_required_docs, faena_id)
 
 
 def pendientes_empresa_faena(faena_id: int) -> list:
-    """
-    Retorna lista de doc_tipos de empresa por faena que faltan (sin período).
-    """
-    try:
-        required = get_empresa_monthly_doc_types()
-        if not required:
-            return []
-        docs = fetch_df(
-            "SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=?",
-            (int(faena_id),),
-        )
-        present = set(docs["doc_tipo"].astype(str).tolist()) if docs is not None and not docs.empty else set()
-        return [d for d in required if d not in present]
-    except Exception:
-        return []
+    """Retorna documentos empresa/faena faltantes para una faena."""
+    return pendientes_empresa_faena_logic(fetch_df, get_empresa_monthly_doc_types, faena_id)
 
 
 def validate_faena_dates(fi, ft, estado: str) -> list:
@@ -2668,52 +2595,54 @@ def _export_collect_files(faena_id: int,
                           selected_empresa_faena_doc_ids=None,
                           selected_trabajador_ids=None,
                           selected_trabajador_doc_ids=None) -> list:
-    """Recopila todos los archivos para un ZIP de exportación de faena."""
+    """Recopila todos los archivos para un ZIP de exportación de faena dentro del tenant activo."""
     entries = []  # list of (arcpath, file_path, bucket, object_path)
 
     # Contrato de faena
     if include_contrato:
-        row = fetch_df("SELECT nombre, file_path FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)", (int(faena_id),))
+        row = tenant_fetch_df("SELECT nombre, file_path, bucket, object_path FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)", (int(faena_id),))
         if row is not None and not row.empty:
             r = row.iloc[0]
-            if r.get("file_path"):
-                entries.append((f"Contrato/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+            if r.get("file_path") or r.get("object_path"):
+                fname = str(r.get("file_path") or r.get("object_path") or 'contrato')
+                entries.append((f"Contrato/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
 
     # Anexos
     if include_anexos:
-        anexos = fetch_df("SELECT nombre, file_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        anexos = tenant_fetch_df("SELECT nombre, file_path, bucket, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
         if anexos is not None and not anexos.empty:
             for _, r in anexos.iterrows():
-                if r.get("file_path"):
-                    entries.append((f"Anexos/{os.path.basename(str(r['file_path']))}", str(r["file_path"]), None, None))
+                if r.get("file_path") or r.get("object_path"):
+                    fname = str(r.get("file_path") or r.get("object_path") or 'anexo')
+                    entries.append((f"Anexos/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
 
     # Documentos empresa global
     if include_global_empresa_docs:
         q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
-        emp_docs = fetch_df(q_emp)
+        emp_docs = tenant_fetch_df(q_emp)
         if emp_docs is not None and not emp_docs.empty:
             for _, r in emp_docs.iterrows():
                 if doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
                     continue
-                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or "doc")
                 entries.append((f"Empresa_Global/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
 
     # Documentos empresa por faena
     if include_empresa_faena:
         q_ef = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, id"
-        ef_docs = fetch_df(q_ef, (int(faena_id),))
+        ef_docs = tenant_fetch_df(q_ef, (int(faena_id),))
         if ef_docs is not None and not ef_docs.empty:
             for _, r in ef_docs.iterrows():
                 if selected_empresa_faena_doc_ids is not None and int(r["id"]) not in selected_empresa_faena_doc_ids:
                     continue
                 if doc_types_empresa_faena and r.get("doc_tipo") not in doc_types_empresa_faena:
                     continue
-                fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
+                fname = str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or "doc")
                 entries.append((f"Empresa_Faena/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
 
     # Documentos trabajadores
     if include_trabajadores:
-        trab = fetch_df("""
+        trab = tenant_fetch_df("""
             SELECT t.id, t.rut, t.apellidos || ' ' || t.nombres AS nombre
             FROM asignaciones a JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=? AND COALESCE(NULLIF(TRIM(a.estado),''),'ACTIVA')='ACTIVA'
@@ -2724,7 +2653,7 @@ def _export_collect_files(faena_id: int,
                 tid = int(tr["id"])
                 if selected_trabajador_ids is not None and tid not in selected_trabajador_ids:
                     continue
-                t_docs = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, id", (tid,))
+                t_docs = tenant_fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, id", (tid,))
                 if t_docs is None or t_docs.empty:
                     continue
                 folder_name = re.sub(r"[^a-zA-Z0-9 _.-]", "_", str(tr["nombre"]))[:40]
@@ -2735,51 +2664,34 @@ def _export_collect_files(faena_id: int,
                         continue
                     if doc_types_trabajador and dr.get("doc_tipo") not in doc_types_trabajador:
                         continue
-                    fname = str(dr.get("nombre_archivo") or dr.get("file_path") or f"doc_{did}")
+                    fname = str(dr.get("nombre_archivo") or dr.get("file_path") or dr.get("object_path") or f"doc_{did}")
                     entries.append((f"Trabajadores/{folder_name}/{os.path.basename(fname)}", dr.get("file_path"), dr.get("bucket"), dr.get("object_path")))
     return entries
 
 
 def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
-    """Genera un ZIP con todos los documentos de una faena. Retorna (bytes, nombre_archivo)."""
-    faena = fetch_df("SELECT nombre, fecha_inicio FROM faenas WHERE id=?", (int(faena_id),))
-    faena_nombre = "faena"
-    if faena is not None and not faena.empty:
-        faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
+    """Genera un ZIP con todos los documentos de una faena dentro del tenant activo."""
+    faena = tenant_fetch_df("SELECT nombre, fecha_inicio FROM faenas WHERE id=?", (int(faena_id),))
+    if faena is None or faena.empty:
+        raise ValueError("La faena no existe o no pertenece a la empresa activa.")
+    faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_name = f"export_{faena_nombre}_{ts}.zip"
-
     entries = _export_collect_files(faena_id, **kwargs)
-
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-        seen_paths = {}
-        for arcpath, file_path, bucket, object_path in entries:
-            try:
-                file_bytes = load_file_anywhere(file_path, bucket, object_path)
-            except Exception:
-                continue
-            # Evitar duplicados en el ZIP
-            base, ext = os.path.splitext(arcpath)
-            counter = seen_paths.get(arcpath, 0)
-            seen_paths[arcpath] = counter + 1
-            if counter > 0:
-                arcpath = f"{base}_{counter}{ext}"
-            zf.writestr(arcpath, file_bytes)
-    return mem.getvalue(), zip_name
+    return build_zip_from_entries(entries, load_file_anywhere), zip_name
 
 
 def persist_export(faena_id: int, zip_bytes: bytes, zip_name: str) -> str:
-    """Guarda un ZIP de export en disco y registra en export_historial."""
-    export_dir = os.path.join(UPLOAD_ROOT, "_exports", str(faena_id))
+    """Guarda un ZIP de export en disco y registra en export_historial para la empresa activa."""
+    tenant_key = str(current_tenant_key() or '').strip()
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports", storage_safe_segment(tenant_key or 'tenant'), str(faena_id))
     os.makedirs(export_dir, exist_ok=True)
     fpath = os.path.join(export_dir, zip_name)
     with open(fpath, "wb") as f:
         f.write(zip_bytes)
     sha = hashlib.sha256(zip_bytes).hexdigest()
     now = datetime.now().isoformat(timespec="seconds")
-    # La tabla export_historial no tiene columna "archivo"; guarda el path completo
-    execute(
+    tenant_execute(
         "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
         (int(faena_id), fpath, sha, len(zip_bytes), now),
     )
@@ -2787,15 +2699,15 @@ def persist_export(faena_id: int, zip_bytes: bytes, zip_name: str) -> str:
 
 
 def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool = True) -> tuple:
-    """Genera un ZIP mensual con todos los documentos empresa de todas las faenas del mes."""
+    """Genera un ZIP mensual acotado a la empresa activa."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ym = f"{int(year):04d}-{int(month):02d}"
-    zip_name = f"export_mes_{ym}_{ts}.zip"
+    tenant_key = str(current_tenant_key() or '').strip()
+    tenant_slug = storage_safe_segment(tenant_key or 'tenant')
 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Documentos empresa faena del período
-        ef_docs = fetch_df(
+        ef_docs = tenant_fetch_df(
             "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
             (int(year), int(month)),
         )
@@ -2803,21 +2715,20 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
             for _, r in ef_docs.iterrows():
                 try:
                     fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
-                    fname = str(r.get("nombre_archivo") or r.get("file_path") or f"doc_{r['id']}")
-                    arc = f"Faena_{r['faena_id']}/{os.path.basename(fname)}"
+                    fname = str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or f"doc_{r['id']}")
+                    arc = f"{tenant_slug}/Faena_{r['faena_id']}/{os.path.basename(fname)}"
                     zf.writestr(arc, fb)
                 except Exception:
                     continue
 
-        # Documentos empresa global (sin período)
         if include_global_empresa_docs:
-            emp_docs = fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
+            emp_docs = tenant_fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
             if emp_docs is not None and not emp_docs.empty:
                 for _, r in emp_docs.iterrows():
                     try:
                         fb = load_file_anywhere(r.get("file_path"), r.get("bucket"), r.get("object_path"))
-                        fname = str(r.get("nombre_archivo") or r.get("file_path") or "doc")
-                        arc = f"Empresa_Global/{os.path.basename(fname)}"
+                        fname = str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or "doc")
+                        arc = f"{tenant_slug}/Empresa_Global/{os.path.basename(fname)}"
                         zf.writestr(arc, fb)
                     except Exception:
                         continue
@@ -2826,8 +2737,9 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
 
 
 def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
-    """Guarda un ZIP de export mensual en disco y registra en export_historial_mes."""
-    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes")
+    """Guarda un ZIP de export mensual para la empresa activa y registra en export_historial_mes."""
+    tenant_key = str(current_tenant_key() or '').strip()
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes", storage_safe_segment(tenant_key or 'tenant'))
     os.makedirs(export_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"export_mes_{ym}_{ts}.zip"
@@ -2836,7 +2748,7 @@ def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
         f.write(zip_bytes)
     sha = hashlib.sha256(zip_bytes).hexdigest()
     now = datetime.now().isoformat(timespec="seconds")
-    execute(
+    tenant_execute(
         "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
         (ym, fpath, sha, len(zip_bytes), now),
     )
@@ -2933,6 +2845,9 @@ def ensure_segav_erp_tables():
                 id BIGSERIAL PRIMARY KEY,
                 cliente_key TEXT,
                 username TEXT NOT NULL,
+                user_id BIGINT,
+                role_global TEXT,
+                role_empresa TEXT,
                 accion TEXT NOT NULL,
                 entidad TEXT,
                 detalle TEXT,
@@ -2946,6 +2861,9 @@ def ensure_segav_erp_tables():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cliente_key TEXT,
                 username TEXT NOT NULL,
+                user_id INTEGER,
+                role_global TEXT,
+                role_empresa TEXT,
                 accion TEXT NOT NULL,
                 entidad TEXT,
                 detalle TEXT,
@@ -2953,6 +2871,10 @@ def ensure_segav_erp_tables():
                 created_at TEXT NOT NULL
             );
         """)
+
+    execute("CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);")
+    execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON segav_audit_log(created_at);")
+    execute("CREATE INDEX IF NOT EXISTS idx_audit_log_username ON segav_audit_log(username);")
 
 
 def set_segav_erp_config_value(key: str, value: str):
@@ -3160,9 +3082,16 @@ def segav_clientes_df():
 
 def current_segav_client_key() -> str:
     session_key = str(st.session_state.get('active_cliente_key') or '').strip()
-    if session_key:
-        return session_key
-    return segav_erp_value('current_client_key', '')
+    config_key = segav_erp_value('current_client_key', '')
+    try:
+        visible_df = visible_clientes_df()
+        resolved = resolve_active_client_key_core(visible_df, session_key, config_key)
+        if resolved and resolved != session_key:
+            st.session_state['active_cliente_key'] = resolved
+        return resolved
+    except Exception as _exc:
+        _record_soft_error("tenant.current_segav_client_key", _exc)
+    return session_key or str(config_key or '').strip()
 
 
 def current_tenant_key() -> str:
@@ -3170,17 +3099,10 @@ def current_tenant_key() -> str:
     if key:
         return key
     try:
-        cli_df = segav_clientes_df()
-        if cli_df is not None and not cli_df.empty:
-            active_df = cli_df
-            if 'activo' in active_df.columns:
-                active_df = active_df[active_df['activo'].fillna(1).astype(int) == 1]
-            if not active_df.empty:
-                key = str(active_df.iloc[0].get('cliente_key') or '').strip()
-                if key:
-                    return key
+        visible_df = visible_clientes_df()
+        return resolve_active_client_key_core(visible_df)
     except Exception as _exc:
-        _record_soft_error("line_3064", _exc)
+        _record_soft_error("tenant.current_tenant_key", _exc)
     return ''
 
 
@@ -3215,6 +3137,9 @@ def ensure_multiempresa_columns_postgres():
     p2_stmts = [
         # Roles por empresa
         "ALTER TABLE IF EXISTS user_client_access ADD COLUMN IF NOT EXISTS role_empresa TEXT DEFAULT 'OPERADOR';",
+        "ALTER TABLE IF EXISTS segav_audit_log ADD COLUMN IF NOT EXISTS user_id BIGINT;",
+        "ALTER TABLE IF EXISTS segav_audit_log ADD COLUMN IF NOT EXISTS role_global TEXT;",
+        "ALTER TABLE IF EXISTS segav_audit_log ADD COLUMN IF NOT EXISTS role_empresa TEXT;",
         # Capacitaciones mejoradas
         "ALTER TABLE IF EXISTS sgsst_capacitaciones ADD COLUMN IF NOT EXISTS asistentes TEXT;",
         "ALTER TABLE IF EXISTS sgsst_capacitaciones ADD COLUMN IF NOT EXISTS evaluacion_pct NUMERIC;",
@@ -3327,17 +3252,6 @@ def ensure_multiempresa_columns_postgres():
             execute(s)
         except Exception as _exc:
             _record_soft_error("p3_migration_pg", _exc)
-    # ── P4: GPS + Firma columns ───────────────────────────────────────────
-    p4_stmts = [
-        "ALTER TABLE IF EXISTS sgsst_inspecciones ADD COLUMN IF NOT EXISTS gps_coords TEXT;",
-        "ALTER TABLE IF EXISTS sgsst_epp_entrega ADD COLUMN IF NOT EXISTS firma_b64 TEXT;",
-        "ALTER TABLE IF EXISTS sgsst_checklist_ds594 ADD COLUMN IF NOT EXISTS gps_coords TEXT;",
-    ]
-    for s in p4_stmts:
-        try:
-            execute(s)
-        except Exception as _exc:
-            _record_soft_error("p4_migration_pg", _exc)
 
 
 def ensure_multiempresa_columns_sqlite(c):
@@ -3351,6 +3265,10 @@ def ensure_multiempresa_columns_sqlite(c):
     # ── P2: New columns and tables ────────────────────────────────────────
     try:
         migrate_add_columns_if_missing(c, 'user_client_access', {'role_empresa': 'TEXT'})
+    except Exception:
+        pass
+    try:
+        migrate_add_columns_if_missing(c, 'segav_audit_log', {'user_id': 'INTEGER', 'role_global': 'TEXT', 'role_empresa': 'TEXT'})
     except Exception:
         pass
     try:
@@ -3454,16 +3372,6 @@ def ensure_multiempresa_columns_sqlite(c):
             c.execute(s)
         except Exception:
             pass
-    # ── P4: GPS + Firma columns (SQLite) ──────────────────────────────────
-    for tbl, cols in [
-        ('sgsst_inspecciones', {'gps_coords': 'TEXT'}),
-        ('sgsst_epp_entrega', {'firma_b64': 'TEXT'}),
-        ('sgsst_checklist_ds594', {'gps_coords': 'TEXT'}),
-    ]:
-        try:
-            migrate_add_columns_if_missing(c, tbl, cols)
-        except Exception:
-            pass
 
 
 def _resolve_cliente_key_by_patterns(df, patterns):
@@ -3564,115 +3472,16 @@ TENANT_SCOPE_FILE_TABLES = (
 
 
 def _tenant_scope_target_table(sql: str) -> str | None:
-    q = str(sql or '')
-    # Strip subqueries (parenthesized content) to find the MAIN table only
-    depth = 0
-    outer = []
-    for ch in q:
-        if ch == '(':
-            depth += 1; outer.append(' ')
-        elif ch == ')':
-            depth = max(0, depth - 1); outer.append(' ')
-        elif depth == 0:
-            outer.append(ch)
-    main_sql = ''.join(outer)
-    patterns = [
-        r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
-    ]
-    for patt in patterns:
-        m = re.search(patt, main_sql, flags=re.I)
-        if m:
-            table = str(m.group(1) or '').strip()
-            if table in TENANT_SCOPE_TABLES:
-                return table
-    return None
+    return tenant_scope_target_table_core(sql, TENANT_SCOPE_TABLES)
 
 
 def _inject_tenant_condition_sql(sql: str, alias_or_table: str) -> str:
-    tenant_cond = f"COALESCE({alias_or_table}.cliente_key,'')=?"
-    # Build outer-only view (replace parenthesized content with spaces)
-    depth = 0
-    outer_mask = []
-    for i, ch in enumerate(sql):
-        if ch == '(':
-            depth += 1; outer_mask.append(' ')
-        elif ch == ')':
-            depth = max(0, depth - 1); outer_mask.append(' ')
-        elif depth == 0:
-            outer_mask.append(ch)
-        else:
-            outer_mask.append(' ')
-    outer = ''.join(outer_mask)
-    lower_outer = outer.lower()
-    # Find clause positions in the OUTER query only
-    clause_positions = [p for p in [lower_outer.find(' order by '), lower_outer.find(' group by '), lower_outer.find(' limit '), lower_outer.find(' union ')] if p != -1]
-    cut = min(clause_positions) if clause_positions else len(sql)
-    head = sql[:cut]
-    tail = sql[cut:]
-    # Check for WHERE at the outer level only
-    outer_head = outer[:cut].lower()
-    if re.search(r"\bwhere\b", outer_head, flags=re.I):
-        # Find the LAST outer-level WHERE position in the head
-        where_pos = -1
-        for m in re.finditer(r"\bwhere\b", outer_head, flags=re.I):
-            where_pos = m.start()
-        if where_pos >= 0:
-            # Find end of existing WHERE clause conditions at outer level
-            return head + f" AND {tenant_cond}" + tail
-    return head + f" WHERE {tenant_cond}" + tail
+    return inject_tenant_condition_sql_core(sql, alias_or_table)
 
 
 def _scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None):
     tenant_key = str(tenant_key or current_tenant_key() or '').strip()
-    q = str(sql or '')
-    if not tenant_key or not q.strip():
-        return q, tuple(params or ())
-    if 'cliente_key' in q.lower():
-        return q, tuple(params or ())
-    table = _tenant_scope_target_table(q)
-    if not table:
-        return q, tuple(params or ())
-
-    params_t = tuple(params or ())
-    # INSERT INTO table(cols) VALUES(...)
-    m_ins = re.search(r"(\bINSERT\s+INTO\s+" + re.escape(table) + r"\s*\()([^)]*)(\)\s*VALUES\s*\()", q, flags=re.I | re.S)
-    if m_ins:
-        cols_txt = m_ins.group(2)
-        cols = [c.strip() for c in cols_txt.split(',') if c.strip()]
-        if not any(c.lower() == 'cliente_key' for c in cols):
-            new_cols = 'cliente_key, ' + cols_txt.strip()
-            start, end = m_ins.span(2)
-            q2 = q[:start] + new_cols + q[end:]
-            val_start = m_ins.end(3)
-            q2 = q2[:val_start] + '?, ' + q2[val_start:]
-            return q2, (tenant_key, *params_t)
-        return q, params_t
-
-    # UPDATE / DELETE / SELECT root table scoping
-    # Build outer-only SQL to find the correct alias
-    depth = 0
-    outer_chars = []
-    for ch in q:
-        if ch == '(':
-            depth += 1; outer_chars.append(' ')
-        elif ch == ')':
-            depth = max(0, depth - 1); outer_chars.append(' ')
-        elif depth == 0:
-            outer_chars.append(ch)
-        else:
-            outer_chars.append(' ')
-    outer_q = ''.join(outer_chars)
-    m_root = re.search(r"\b(FROM|UPDATE|DELETE\s+FROM)\s+" + re.escape(table) + r"(?:\s+([A-Za-z_][A-Za-z0-9_]*))?", outer_q, flags=re.I)
-    alias = table
-    if m_root:
-        alias_candidate = str(m_root.group(2) or '').strip()
-        if alias_candidate and alias_candidate.upper() not in {'SET', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'ON'}:
-            alias = alias_candidate
-    q2 = _inject_tenant_condition_sql(q, alias)
-    return q2, (*params_t, tenant_key)
+    return scope_sql_to_tenant_core(sql, params, tenant_key=tenant_key, tenant_scope_tables=TENANT_SCOPE_TABLES)
 
 
 def tenant_fetch_df(q: str, params=()):
@@ -3874,6 +3683,8 @@ DEFAULT_PERMS = {
     "view_export": True,
     "view_backup": True,
     "manage_users": False,
+    "approve_legal_docs": False,
+    "view_legal_audit": False,
 }
 
 ALL_PERM_KEYS = list(DEFAULT_PERMS.keys())
@@ -4174,13 +3985,30 @@ def auth_logout():
 def current_user():
     return st.session_state.get("auth_user")
 
+def current_company_caps_for_active_tenant() -> dict:
+    u = current_user() or {}
+    ck = current_tenant_key()
+    return company_caps_for_user_core(fetch_df, int(u.get("id") or 0), ck, str(u.get("role") or "OPERADOR"))
+
 def has_perm(perm: str) -> bool:
     u = current_user()
     if not u:
         return False
     if str(u.get("role") or "").upper() == "SUPERADMIN":
         return True
-    return bool(u.get("perms", {}).get(perm, False))
+    base = dict(u.get("perms", {}) or {})
+    if perm not in base:
+        return False
+    ck = current_tenant_key()
+    if not ck:
+        return bool(base.get(perm, False))
+    try:
+        ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+        role_emp = company_role_for_user_core(fetch_df, int(u.get("id") or 0), ck, str(u.get("role") or "OPERADOR"))
+        eff = effective_company_perms(fetch_df, int(u.get("id") or 0), ck, str(u.get("role") or "OPERADOR"), base, list(DEFAULT_PERMS.keys()), role_emp)
+        return bool(eff.get(perm, False))
+    except Exception:
+        return bool(base.get(perm, False))
 
 def require_perm(perm: str):
     if not has_perm(perm):
@@ -4203,6 +4031,7 @@ def ensure_user_client_access_table():
                 user_id BIGINT NOT NULL,
                 cliente_key TEXT NOT NULL,
                 is_company_admin BIGINT NOT NULL DEFAULT 0,
+                role_empresa TEXT NOT NULL DEFAULT 'OPERADOR',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 PRIMARY KEY (user_id, cliente_key)
@@ -4218,6 +4047,7 @@ def ensure_user_client_access_table():
             user_id INTEGER NOT NULL,
             cliente_key TEXT NOT NULL,
             is_company_admin INTEGER NOT NULL DEFAULT 0,
+            role_empresa TEXT NOT NULL DEFAULT 'OPERADOR',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, cliente_key)
@@ -4233,6 +4063,348 @@ def ensure_user_client_access_table_once(_db_backend: str, _dsn_fingerprint: str
     ensure_user_client_access_table()
     return True
 
+
+@st.cache_resource(show_spinner=False)
+def ensure_user_client_module_perms_table_once(_db_backend: str, _dsn_fingerprint: str):
+    ensure_user_client_module_perms_table(execute, _db_backend)
+    return True
+
+
+def ensure_legal_workflow_tables():
+    if DB_BACKEND == "postgres":
+        execute("""
+        CREATE TABLE IF NOT EXISTS legal_doc_approvals (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_key TEXT NOT NULL,
+            entity_table TEXT NOT NULL,
+            entity_id BIGINT NOT NULL,
+            doc_tipo TEXT,
+            nombre_archivo TEXT,
+            requested_by BIGINT,
+            requested_by_username TEXT,
+            requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            status TEXT NOT NULL DEFAULT 'PENDIENTE',
+            criticality TEXT NOT NULL DEFAULT 'ALTA',
+            requested_responsible_name TEXT,
+            requested_responsible_email TEXT,
+            signature_status TEXT NOT NULL DEFAULT 'NO_REQUERIDA',
+            signature_reference TEXT,
+            signature_requested_at TIMESTAMPTZ,
+            signed_at TIMESTAMPTZ,
+            legal_status TEXT NOT NULL DEFAULT 'PENDIENTE',
+            version_label TEXT,
+            version_no INTEGER NOT NULL DEFAULT 1,
+            effective_from TIMESTAMPTZ,
+            expires_at TIMESTAMPTZ,
+            renewal_period_days INTEGER,
+            renewal_status TEXT NOT NULL DEFAULT 'NO_REQUIERE_RENOVACION',
+            supersedes_approval_id BIGINT,
+            superseded_by_approval_id BIGINT,
+            review_comments TEXT,
+            reviewed_by BIGINT,
+            reviewed_by_username TEXT,
+            reviewed_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """)
+        for stmt in [
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS requested_responsible_name TEXT",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS requested_responsible_email TEXT",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS signature_status TEXT DEFAULT 'NO_REQUERIDA'",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS signature_reference TEXT",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS signature_requested_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS signed_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS legal_status TEXT DEFAULT 'PENDIENTE'",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS version_label TEXT",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS version_no INTEGER DEFAULT 1",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS effective_from TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS renewal_period_days INTEGER",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS renewal_status TEXT DEFAULT 'NO_REQUIERE_RENOVACION'",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS supersedes_approval_id BIGINT",
+            "ALTER TABLE IF EXISTS legal_doc_approvals ADD COLUMN IF NOT EXISTS superseded_by_approval_id BIGINT",
+        ]:
+            execute(stmt)
+        execute("CREATE INDEX IF NOT EXISTS idx_legal_doc_approvals_tenant ON legal_doc_approvals(cliente_key, status, entity_table)")
+        return
+    execute("""
+    CREATE TABLE IF NOT EXISTS legal_doc_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_key TEXT NOT NULL,
+        entity_table TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        doc_tipo TEXT,
+        nombre_archivo TEXT,
+        requested_by INTEGER,
+        requested_by_username TEXT,
+        requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+        status TEXT NOT NULL DEFAULT 'PENDIENTE',
+        criticality TEXT NOT NULL DEFAULT 'ALTA',
+        requested_responsible_name TEXT,
+        requested_responsible_email TEXT,
+        signature_status TEXT NOT NULL DEFAULT 'NO_REQUERIDA',
+        signature_reference TEXT,
+        signature_requested_at TEXT,
+        signed_at TEXT,
+        legal_status TEXT NOT NULL DEFAULT 'PENDIENTE',
+        version_label TEXT,
+        version_no INTEGER NOT NULL DEFAULT 1,
+        effective_from TEXT,
+        expires_at TEXT,
+        renewal_period_days INTEGER,
+        renewal_status TEXT NOT NULL DEFAULT 'NO_REQUIERE_RENOVACION',
+        supersedes_approval_id INTEGER,
+        superseded_by_approval_id INTEGER,
+        review_comments TEXT,
+        reviewed_by INTEGER,
+        reviewed_by_username TEXT,
+        reviewed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    """)
+    with conn() as c:
+        migrate_add_columns_if_missing(c, 'legal_doc_approvals', {
+            'requested_responsible_name': 'TEXT',
+            'requested_responsible_email': 'TEXT',
+            'signature_status': "TEXT DEFAULT 'NO_REQUERIDA'",
+            'signature_reference': 'TEXT',
+            'signature_requested_at': 'TEXT',
+            'signed_at': 'TEXT',
+            'legal_status': "TEXT DEFAULT 'PENDIENTE'",
+            'version_label': 'TEXT',
+            'version_no': 'INTEGER DEFAULT 1',
+            'effective_from': 'TEXT',
+            'expires_at': 'TEXT',
+            'renewal_period_days': 'INTEGER',
+            'renewal_status': "TEXT DEFAULT 'NO_REQUIERE_RENOVACION'",
+            'supersedes_approval_id': 'INTEGER',
+            'superseded_by_approval_id': 'INTEGER',
+        })
+        c.commit()
+    execute("CREATE INDEX IF NOT EXISTS idx_legal_doc_approvals_tenant ON legal_doc_approvals(cliente_key, status, entity_table)")
+
+@st.cache_resource(show_spinner=False)
+def ensure_legal_workflow_tables_once(_db_backend: str, _dsn_fingerprint: str):
+    ensure_legal_workflow_tables()
+    return True
+
+
+
+def _to_isoish(value) -> str:
+    return str(value or '').strip()
+
+
+def derive_renewal_status_row(row: dict) -> str:
+    legal_status = str(row.get('legal_status') or '').upper().strip()
+    expires_at = _to_isoish(row.get('expires_at'))
+    if legal_status != 'APROBADO':
+        return 'PENDIENTE_APROBACION'
+    if not expires_at:
+        return 'NO_REQUIERE_RENOVACION'
+    try:
+        exp = pd.to_datetime(expires_at, errors='coerce')
+        if pd.isna(exp):
+            return 'VIGENTE'
+        now = pd.Timestamp.utcnow()
+        if getattr(exp, 'tzinfo', None) is None:
+            exp = exp.tz_localize('UTC')
+        days = int((exp - now).total_seconds() // 86400)
+        if days < 0:
+            return 'VENCIDO'
+        if days <= 30:
+            return 'POR_VENCER'
+        return 'VIGENTE'
+    except Exception:
+        return 'VIGENTE'
+
+
+def legal_doc_versions_df(entity_table: str, entity_id: int, tenant_key: str) -> pd.DataFrame:
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    return fetch_df(
+        "SELECT id, status, legal_status, version_label, version_no, effective_from, expires_at, renewal_period_days, renewal_status, signature_status, requested_by_username, requested_at, reviewed_by_username, reviewed_at, review_comments FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? AND entity_table=? AND entity_id=? ORDER BY version_no DESC, id DESC",
+        (str(tenant_key or ''), str(entity_table), int(entity_id)),
+    )
+
+def latest_legal_approval_for_doc(entity_table: str, entity_id: int, tenant_key: str | None = None) -> dict:
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    ck = str(tenant_key or current_tenant_key() or '').strip()
+    if not ck:
+        return {}
+    try:
+        df = fetch_df(
+            "SELECT * FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? AND entity_table=? AND entity_id=? ORDER BY COALESCE(version_no, 1) DESC, id DESC LIMIT 1",
+            (ck, str(entity_table), int(entity_id)),
+        )
+        if df is not None and not df.empty:
+            return df.iloc[0].to_dict()
+    except Exception as exc:
+        _record_soft_error('legal.latest', exc)
+    return {}
+
+
+def request_legal_approval(entity_table: str, entity_id: int, doc_tipo: str, nombre_archivo: str, criticality: str, obs: str, responsible_name: str, responsible_email: str, signature_required: bool, version_label: str = '', effective_from: str = '', expires_at: str = '', renewal_period_days: int | None = None):
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    tenant_key = current_tenant_key()
+    u = current_user() or {}
+    sig_status = 'PENDIENTE_FIRMA' if signature_required else 'NO_REQUERIDA'
+    legal_status = 'EN_REVISION'
+    prev = latest_legal_approval_for_doc(entity_table, int(entity_id), tenant_key)
+    prev_id = int(prev.get('id') or 0) if prev else None
+    version_no = int(prev.get('version_no') or 0) + 1 if prev else 1
+    renewal_status = 'NO_REQUIERE_RENOVACION' if not str(expires_at or '').strip() else 'PENDIENTE_APROBACION'
+    execute(
+        "INSERT INTO legal_doc_approvals(cliente_key, entity_table, entity_id, doc_tipo, nombre_archivo, requested_by, requested_by_username, status, criticality, requested_responsible_name, requested_responsible_email, signature_status, signature_requested_at, legal_status, version_label, version_no, effective_from, expires_at, renewal_period_days, renewal_status, supersedes_approval_id, review_comments, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),?,?,?,?,?,?,?,?,datetime('now'))",
+        (
+            tenant_key,
+            str(entity_table),
+            int(entity_id),
+            str(doc_tipo or ''),
+            str(nombre_archivo or ''),
+            int(u.get('id') or 0),
+            str(u.get('username') or ''),
+            'PENDIENTE',
+            str(criticality or 'ALTA'),
+            str(responsible_name or ''),
+            str(responsible_email or ''),
+            sig_status,
+            legal_status,
+            str(version_label or ''),
+            version_no,
+            str(effective_from or '') or None,
+            str(expires_at or '') or None,
+            int(renewal_period_days) if renewal_period_days not in (None, '', 0, '0') else None,
+            renewal_status,
+            prev_id,
+            str(obs or ''),
+        ),
+    )
+    try:
+        latest_now = latest_legal_approval_for_doc(entity_table, int(entity_id), tenant_key)
+        new_id = int(latest_now.get('id') or 0)
+        if prev_id and new_id:
+            execute("UPDATE legal_doc_approvals SET superseded_by_approval_id=?, updated_at=datetime('now') WHERE id=? AND COALESCE(cliente_key,'')=?", (new_id, prev_id, tenant_key))
+    except Exception as exc:
+        _record_soft_error('legal.version.chain', exc)
+    audit_log('SOLICITAR_APROBACION', 'legal_doc_approvals', f'{entity_table}#{entity_id} {nombre_archivo}')
+
+
+def render_legal_doc_inline(entity_table: str, entity_id: int, doc_tipo: str, nombre_archivo: str):
+    tenant_key = current_tenant_key()
+    if not tenant_key:
+        return
+    try:
+        snap = latest_legal_approval_for_doc(entity_table, int(entity_id), tenant_key)
+    except Exception as exc:
+        _record_soft_error('legal.inline.snapshot', exc)
+        snap = {}
+    status = str(snap.get('status') or 'SIN SOLICITUD')
+    legal_status = str(snap.get('legal_status') or ('EN_REVISION' if status == 'PENDIENTE' else status))
+    sig_status = str(snap.get('signature_status') or 'NO_REQUERIDA')
+    st.markdown('#### ⚖️ Estado legal del documento')
+    c1, c2, c3 = st.columns(3)
+    c1.metric('Estado solicitud', status)
+    c2.metric('Estado legal', legal_status)
+    c3.metric('Firma', sig_status)
+    if snap:
+        resp = str(snap.get('requested_responsible_name') or '').strip()
+        mail = str(snap.get('requested_responsible_email') or '').strip()
+        extra = []
+        if resp:
+            extra.append(f"Responsable: **{resp}**")
+        if mail:
+            extra.append(f"Correo: **{mail}**")
+        vlabel = str(snap.get('version_label') or '').strip()
+        vno = int(snap.get('version_no') or 1)
+        exp = str(snap.get('expires_at') or '').strip()
+        eff = str(snap.get('effective_from') or '').strip()
+        renew = str(snap.get('renewal_status') or '').strip()
+        extra2 = []
+        if vlabel or vno:
+            extra2.append(f"Versión: **{vlabel or ('v'+str(vno))}**")
+        if eff:
+            extra2.append(f"Desde: **{eff}**")
+        if exp:
+            extra2.append(f"Vence: **{exp}**")
+        if renew:
+            extra2.append(f"Renovación: **{renew}**")
+        if extra or extra2:
+            st.caption(' · '.join(extra + extra2))
+        if str(snap.get('review_comments') or '').strip():
+            st.info(f"Última observación: {str(snap.get('review_comments') or '').strip()}")
+    if not has_perm('view_legal_audit'):
+        return
+    with st.expander('Solicitar/re-solicitar aprobación legal', expanded=False):
+        criticality = st.selectbox('Criticidad legal', ['ALTA','MEDIA','BAJA'], index=0, key=f'legal_inline_crit_{entity_table}_{entity_id}')
+        responsible_name = st.text_input('Responsable de aprobación', value=str(snap.get('requested_responsible_name') or ''), key=f'legal_inline_resp_{entity_table}_{entity_id}')
+        responsible_email = st.text_input('Correo responsable', value=str(snap.get('requested_responsible_email') or ''), key=f'legal_inline_mail_{entity_table}_{entity_id}')
+        signature_required = st.checkbox('Requiere firma/respaldo del responsable', value=(sig_status == 'PENDIENTE_FIRMA'), key=f'legal_inline_sig_{entity_table}_{entity_id}')
+        cver1, cver2 = st.columns(2)
+        version_label = cver1.text_input('Versión/folio', value=str(snap.get('version_label') or ''), key=f'legal_inline_ver_{entity_table}_{entity_id}')
+        effective_from = cver2.date_input('Vigencia desde', value=None, key=f'legal_inline_eff_{entity_table}_{entity_id}')
+        cver3, cver4 = st.columns(2)
+        expires_at = cver3.date_input('Vence el', value=None, key=f'legal_inline_exp_{entity_table}_{entity_id}')
+        renewal_period_days = cver4.number_input('Días antes para renovar', min_value=0, step=1, value=int(snap.get('renewal_period_days') or 0), key=f'legal_inline_ren_{entity_table}_{entity_id}')
+        obs = st.text_area('Observaciones', value='', key=f'legal_inline_obs_{entity_table}_{entity_id}')
+        if st.button('Solicitar aprobación legal', type='secondary', use_container_width=True, key=f'legal_inline_btn_{entity_table}_{entity_id}'):
+            request_legal_approval(entity_table, int(entity_id), str(doc_tipo or ''), str(nombre_archivo or ''), criticality, obs, responsible_name, responsible_email, signature_required, version_label=version_label, effective_from=str(effective_from or ''), expires_at=str(expires_at or ''), renewal_period_days=int(renewal_period_days or 0))
+            st.success('Solicitud legal registrada para este documento.')
+            st.rerun()
+    with st.expander('Historial de versiones y renovaciones', expanded=False):
+        versions = legal_doc_versions_df(entity_table, int(entity_id), tenant_key)
+        if versions is None or versions.empty:
+            st.caption('Sin historial de versiones aún.')
+        else:
+            st.dataframe(versions.rename(columns={'id':'Solicitud','status':'Estado solicitud','legal_status':'Estado legal','version_label':'Versión','version_no':'N° versión','effective_from':'Vigencia desde','expires_at':'Vence','renewal_period_days':'Días renovación','renewal_status':'Estado renovación','signature_status':'Firma','requested_by_username':'Solicitó','requested_at':'Fecha solicitud','reviewed_by_username':'Revisó','reviewed_at':'Fecha revisión','review_comments':'Comentarios'}), use_container_width=True, hide_index=True)
+
+
+def legal_status_matrix_df(tenant_key: str) -> pd.DataFrame:
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    docs_sql = (
+        "SELECT 'empresa_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? "
+        "UNION ALL "
+        "SELECT 'faena_empresa_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=? "
+        "UNION ALL "
+        "SELECT 'trabajador_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?"
+    )
+    docs = _df_with_columns(
+        fetch_df(docs_sql, (tenant_key, tenant_key, tenant_key)),
+        {'entity_table':'', 'entity_id':0, 'doc_tipo':'', 'nombre_archivo':'', 'created_at':''},
+    )
+    approvals = _df_with_columns(
+        fetch_df("SELECT * FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? ORDER BY id DESC", (tenant_key,)),
+        {
+            'id':0, 'status':'', 'legal_status':'', 'criticality':'', 'signature_status':'NO_REQUERIDA',
+            'requested_responsible_name':'', 'requested_responsible_email':'', 'entity_table':'', 'entity_id':0,
+            'doc_tipo':'', 'nombre_archivo':'', 'requested_by_username':'', 'requested_at':'',
+            'reviewed_by_username':'', 'reviewed_at':'', 'review_comments':'', 'version_label':'', 'version_no':1,
+            'effective_from':'', 'expires_at':'', 'renewal_period_days':0, 'renewal_status':'NO_REQUIERE_RENOVACION',
+        },
+    )
+    latest = {}
+    if approvals is not None and not approvals.empty:
+        for _, r in approvals.sort_values('id', ascending=False).iterrows():
+            latest[(str(r.get('entity_table')), _safe_numeric_int(r.get('entity_id')))] = r.to_dict()
+    rows = []
+    if docs is not None and not docs.empty:
+        for _, r in docs.iterrows():
+            snap = latest.get((str(r.get('entity_table')), _safe_numeric_int(r.get('entity_id'))), {})
+            rows.append({
+                'Origen': r.get('entity_table'),
+                'ID doc': _safe_numeric_int(r.get('entity_id')),
+                'Tipo': r.get('doc_tipo'),
+                'Archivo': r.get('nombre_archivo'),
+                'Criticidad': snap.get('criticality', 'SIN DEFINIR'),
+                'Estado legal': snap.get('legal_status', 'SIN SOLICITUD'),
+                'Estado solicitud': snap.get('status', 'SIN SOLICITUD'),
+                'Firma': snap.get('signature_status', 'NO_REQUERIDA'),
+                'Responsable': snap.get('requested_responsible_name', ''),
+                'Correo responsable': snap.get('requested_responsible_email', ''),
+                'Última revisión': snap.get('reviewed_at') or snap.get('requested_at') or '',
+                'Creado': r.get('created_at'),
+            })
+    return pd.DataFrame(rows)
 
 @st.cache_resource(show_spinner=False)
 def ensure_active_tenant_scaffold_once(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
@@ -4279,19 +4451,44 @@ def visible_clientes_df():
     if is_superadmin():
         return df
     u = current_user() or {}
-    user_id = int(u.get("id") or 0)
-    if user_id <= 0:
-        return df
-    try:
-        acc_df = fetch_df("SELECT cliente_key FROM user_client_access WHERE user_id=?", (user_id,))
-        if acc_df is None or acc_df.empty:
-            return df
-        allowed = set(acc_df["cliente_key"].astype(str).tolist())
-        if not allowed:
-            return df.iloc[0:0]
-        return df[df["cliente_key"].astype(str).isin(allowed)]
-    except Exception:
-        return df
+    allowed = allowed_client_keys_for_user_core(fetch_df, int(u.get("id") or 0), str(u.get("role") or "OPERADOR"))
+    return filter_visible_clientes_df_core(df, allowed, is_superadmin=False)
+
+
+def current_user_allowed_client_keys() -> list[str] | None:
+    u = current_user() or {}
+    return allowed_client_keys_for_user_core(fetch_df, int(u.get("id") or 0), str(u.get("role") or "OPERADOR"))
+
+
+def ensure_ui_tenant_access():
+    if not current_user():
+        return True
+    if is_superadmin():
+        return True
+    vis_df = visible_clientes_df()
+    if vis_df is None or vis_df.empty:
+        st.error("Tu usuario no tiene empresas asignadas. Pide al superadmin que te vincule a una empresa.")
+        st.stop()
+    resolved = resolve_active_client_key_core(
+        vis_df,
+        st.session_state.get('active_cliente_key'),
+        segav_erp_value('current_client_key', ''),
+    )
+    if not resolved:
+        st.error("No fue posible resolver una empresa activa autorizada para tu sesión.")
+        st.stop()
+    current_key = str(st.session_state.get('active_cliente_key') or '').strip()
+    if resolved != current_key:
+        st.session_state['active_cliente_key'] = resolved
+        clear_app_caches()
+    return True
+
+
+def is_company_admin_for_active_tenant() -> bool:
+    if is_superadmin():
+        return True
+    u = current_user() or {}
+    return active_company_admin_flag_core(fetch_df, int(u.get('id') or 0), current_tenant_key())
 
 
 def auth_gate_ui():
@@ -4539,6 +4736,14 @@ html,body{
                         st.session_state.pop("_lg_err", None)
                         auth_set_session(row)
                         try:
+                            _allowed = allowed_client_keys_for_user_core(fetch_df, int(row.get('id') or 0), str(row.get('role') or 'OPERADOR'))
+                            _visible = filter_visible_clientes_df_core(segav_clientes_df(), _allowed, is_superadmin=str(row.get('role') or '').upper() == 'SUPERADMIN')
+                            _resolved = resolve_active_client_key_core(_visible, st.session_state.get('active_cliente_key'), segav_erp_value('current_client_key', ''))
+                            if _resolved:
+                                st.session_state['active_cliente_key'] = _resolved
+                        except Exception as _exc:
+                            _record_soft_error('login.resolve_tenant', _exc)
+                        try:
                             audit_log("LOGIN", "users", f"Login exitoso: {u}")
                         except Exception as _exc:
                             _record_soft_error("audit", _exc)
@@ -4572,20 +4777,11 @@ bootstrap_app_or_stop()
 inject_css()
 
 def _record_soft_error(context: str, exc: Exception | None = None):
-    """Guarda fallos no críticos en session_state para diagnóstico local sin romper la UI."""
+    """Wrapper seguro para diagnóstico local."""
     try:
-        logs = st.session_state.setdefault("soft_errors", [])
-        msg = str(exc).strip() if exc is not None else ""
-        logs.append({
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "context": str(context or "").strip(),
-            "message": msg[:300],
-        })
-        # evita crecimiento infinito
-        if len(logs) > 30:
-            del logs[:-30]
-    except Exception as _exc:
-        _record_soft_error("line_4223", _exc)
+        return __import__('segav_core.error_handling', fromlist=['record_soft_error']).record_soft_error(context, exc)
+    except Exception:
+        return None
 
 
 # ----------------------------
@@ -4658,7 +4854,9 @@ PAGES = [
     "Asignar Trabajadores",
     "Documentos Trabajador",
     "Export (ZIP)",
+    "Aprobaciones / Auditoría legal",
     "Backup / Restore",
+    "Arquitectura / Escalabilidad",
 ]
 
 VISIBLE_PAGES = list(PAGES)
@@ -4688,6 +4886,7 @@ if "nav_page" not in st.session_state:
 # Si quedó algo inválido tras login/permisos, fuerza el primero visible
 if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
+ensure_ui_tenant_access()
 
 with st.sidebar:
     # Branding compacto
@@ -4744,6 +4943,7 @@ with st.sidebar:
         "Documentos Trabajador": "📎 Docs Trabajador",
         "Export (ZIP)": "📦 Export",
         "Backup / Restore": "💾 Backup",
+        "Arquitectura / Escalabilidad": "🧱 Arquitectura / Escalabilidad",
         "SuperAdmin / Empresas": "🌐 SuperAdmin / Empresas",
         "Admin Usuarios": "🔐 Usuarios",
     }
@@ -5212,6 +5412,34 @@ def _page_asignar_trabajadores_impl():
     # ---------------------------------
     # Tab 2: importar Excel y asignar
     # ---------------------------------
+    if tab3 is not None:
+        with tab3:
+            st.caption(f"Bitácora visible para la empresa activa: {tenant_key}")
+            aud_df = tenant_fetch_df(
+                "SELECT created_at, username, role_global, role_empresa, accion, entidad, detalle, cliente_key FROM segav_audit_log ORDER BY id DESC LIMIT 300"
+            )
+            if aud_df is None or aud_df.empty:
+                st.info("Aún no hay registros de auditoría para esta empresa.")
+            else:
+                col_a1, col_a2, col_a3 = st.columns(3)
+                with col_a1:
+                    _users = ["(Todos)"] + sorted(aud_df["username"].dropna().astype(str).unique().tolist())
+                    _fuser = st.selectbox("Usuario", _users, key="tenant_audit_user")
+                with col_a2:
+                    _acts = ["(Todas)"] + sorted(aud_df["accion"].dropna().astype(str).unique().tolist())
+                    _fact = st.selectbox("Acción", _acts, key="tenant_audit_action")
+                with col_a3:
+                    _q = st.text_input("Buscar detalle", key="tenant_audit_q", placeholder="Texto libre…")
+                _view = aud_df.copy()
+                if _fuser != "(Todos)":
+                    _view = _view[_view["username"].astype(str) == _fuser]
+                if _fact != "(Todas)":
+                    _view = _view[_view["accion"].astype(str) == _fact]
+                if str(_q or '').strip():
+                    _qq = str(_q).strip().lower()
+                    _view = _view[_view["detalle"].astype(str).str.lower().str.contains(_qq, na=False)]
+                st.dataframe(_view.rename(columns={"created_at":"Fecha/Hora","username":"Usuario","role_global":"Rol global","role_empresa":"Rol empresa","accion":"Acción","entidad":"Entidad","detalle":"Detalle","cliente_key":"Empresa"}), use_container_width=True, hide_index=True)
+
     with tab2:
         st.write("Sube Excel de trabajadores para **esta faena**. Columnas: **RUT, NOMBRE** (obligatorias) y opcionales: CARGO, CENTRO_COSTO, EMAIL, FECHA DE CONTRATO, VIGENCIA_EXAMEN.")
         st.download_button(
@@ -6356,6 +6584,145 @@ def _get_bytes(file_path, bucket, object_path):
 # Se conserva la última definición activa basada en módulos segav_core.
 
 
+def page_aprobaciones_legal():
+    ui_header("Aprobaciones / Auditoría legal", "Solicita y revisa aprobación de documentos críticos por empresa, con trazabilidad.")
+    require_perm("view_legal_audit")
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    tenant_key = current_tenant_key()
+    u = current_user() or {}
+    can_approve = has_perm("approve_legal_docs")
+    tabs = st.tabs(["📨 Solicitudes", "✅ Revisión", "🧾 Historial", "🧩 Matriz legal", "⏳ Renovaciones"])
+    docs_sql = (
+        "SELECT 'empresa_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM empresa_documentos WHERE COALESCE(cliente_key,'')=? "
+        "UNION ALL "
+        "SELECT 'faena_empresa_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE COALESCE(cliente_key,'')=? "
+        "UNION ALL "
+        "SELECT 'trabajador_documentos' AS entity_table, id AS entity_id, doc_tipo, nombre_archivo, created_at FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=?"
+    )
+    docs = _df_with_columns(
+        fetch_df(docs_sql, (tenant_key, tenant_key, tenant_key)),
+        {'entity_table':'', 'entity_id':0, 'doc_tipo':'', 'nombre_archivo':'', 'created_at':''},
+    )
+    approvals = _df_with_columns(
+        fetch_df("SELECT * FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? ORDER BY id DESC", (tenant_key,)),
+        {
+            'id':0, 'status':'', 'legal_status':'', 'criticality':'', 'signature_status':'NO_REQUERIDA',
+            'requested_responsible_name':'', 'requested_responsible_email':'', 'entity_table':'', 'entity_id':0,
+            'doc_tipo':'', 'nombre_archivo':'', 'requested_by_username':'', 'requested_at':'',
+            'reviewed_by_username':'', 'reviewed_at':'', 'review_comments':'', 'version_label':'', 'version_no':1,
+            'effective_from':'', 'expires_at':'', 'renewal_period_days':0, 'renewal_status':'NO_REQUIERE_RENOVACION',
+        },
+    )
+    with tabs[0]:
+        if docs is None or docs.empty:
+            st.info("No hay documentos de la empresa activa para solicitar aprobación.")
+        else:
+            latest = {}
+            if approvals is not None and not approvals.empty:
+                for _, r in approvals.sort_values('id', ascending=False).iterrows():
+                    latest[(str(r.get('entity_table')), _safe_numeric_int(r.get('entity_id')))] = r.to_dict()
+            rows = []
+            for _, r in docs.sort_values('created_at', ascending=False).iterrows():
+                key = (str(r.get('entity_table')), _safe_numeric_int(r.get('entity_id')))
+                snap = latest.get(key, {})
+                rows.append({
+                    'entity_table': r.get('entity_table'),
+                    'entity_id': _safe_numeric_int(r.get('entity_id')),
+                    'doc_tipo': r.get('doc_tipo'),
+                    'nombre_archivo': r.get('nombre_archivo'),
+                    'created_at': r.get('created_at'),
+                    'estado_aprobacion': snap.get('status', 'SIN SOLICITUD'),
+                    'estado_legal': snap.get('legal_status', 'SIN SOLICITUD'),
+                    'firma': snap.get('signature_status', 'NO_REQUERIDA'),
+                    'responsable': snap.get('requested_responsible_name', ''),
+                })
+            view = pd.DataFrame(rows)
+            st.dataframe(view.rename(columns={'entity_table':'Origen','entity_id':'ID doc','doc_tipo':'Tipo','nombre_archivo':'Archivo','created_at':'Creado','estado_aprobacion':'Estado aprobación','estado_legal':'Estado legal','firma':'Firma','responsable':'Responsable'}), use_container_width=True, hide_index=True)
+            options = [f"{r['entity_table']}::{r['entity_id']}::{r['nombre_archivo']}::{r['doc_tipo']}" for r in rows if r['estado_aprobacion'] != 'PENDIENTE']
+            if options:
+                sel = st.selectbox('Documento a solicitar/re-solicitar', options, key='legal_req_doc')
+                crit = st.selectbox('Criticidad', ['ALTA','MEDIA','BAJA'], index=0, key='legal_req_crit')
+                resp_name = st.text_input('Responsable de aprobación', key='legal_req_resp_name')
+                resp_mail = st.text_input('Correo responsable', key='legal_req_resp_mail')
+                require_signature = st.checkbox('Requiere firma/respaldo del responsable', value=False, key='legal_req_signature')
+                c5, c6 = st.columns(2)
+                version_label = c5.text_input('Versión/folio', key='legal_req_ver')
+                effective_from = c6.date_input('Vigencia desde', value=None, key='legal_req_eff')
+                c7, c8 = st.columns(2)
+                expires_at = c7.date_input('Vence el', value=None, key='legal_req_exp')
+                renewal_period_days = c8.number_input('Días antes para renovar', min_value=0, step=1, value=0, key='legal_req_ren')
+                obs = st.text_area('Observaciones de solicitud', key='legal_req_obs')
+                if st.button('Solicitar aprobación', type='primary', use_container_width=True, key='legal_req_btn'):
+                    et, eid, fname, doc_tipo = sel.split('::', 3)
+                    request_legal_approval(et, _safe_numeric_int(eid), doc_tipo, fname, crit, obs, resp_name, resp_mail, require_signature, version_label=version_label, effective_from=str(effective_from or ''), expires_at=str(expires_at or ''), renewal_period_days=int(renewal_period_days or 0))
+                    st.success('Solicitud registrada.')
+                    st.rerun()
+    with tabs[1]:
+        pend = approvals[approvals['status'].astype(str).str.upper()=='PENDIENTE'].copy() if approvals is not None and not approvals.empty else pd.DataFrame()
+        if pend.empty:
+            st.info('No hay solicitudes pendientes.')
+        else:
+            st.dataframe(pend[['id','entity_table','entity_id','doc_tipo','nombre_archivo','requested_by_username','requested_at','criticality','requested_responsible_name','signature_status']].rename(columns={'id':'Solicitud','entity_table':'Origen','entity_id':'ID doc','doc_tipo':'Tipo','nombre_archivo':'Archivo','requested_by_username':'Solicitó','requested_at':'Fecha','criticality':'Criticidad','requested_responsible_name':'Responsable','signature_status':'Firma'}), use_container_width=True, hide_index=True)
+            if not can_approve:
+                st.warning('Tu perfil puede ver la cola, pero no aprobar o rechazar.')
+            else:
+                sid = st.selectbox('Solicitud pendiente', pend['id'].tolist(), format_func=lambda x: f"#{x} - {pend[pend['id']==x].iloc[0]['nombre_archivo']}", key='legal_review_sel')
+                decision = st.radio('Decisión', ['APROBADO','RECHAZADO'], horizontal=True, key='legal_review_dec')
+                signature_status = st.selectbox('Estado de firma/respaldo', ['NO_REQUERIDA','PENDIENTE_FIRMA','FIRMADO'], key='legal_review_sig')
+                signature_ref = st.text_input('Referencia firma/respaldo', key='legal_review_sigref', placeholder='Ej: folio, hash, ID externo o comentario corto')
+                comments = st.text_area('Observaciones de revisión', key='legal_review_obs')
+                if st.button('Resolver solicitud', type='primary', use_container_width=True, key='legal_review_btn'):
+                    legal_status = 'APROBADO' if decision == 'APROBADO' else 'RECHAZADO'
+                    signed_at_sql = "datetime('now')" if signature_status == 'FIRMADO' else "NULL"
+                    if DB_BACKEND == 'postgres':
+                        sql = f"UPDATE legal_doc_approvals SET status=%s, legal_status=%s, signature_status=%s, signature_reference=%s, review_comments=%s, reviewed_by=%s, reviewed_by_username=%s, reviewed_at=now(), signed_at={('now()' if signature_status == 'FIRMADO' else 'NULL')}, updated_at=now() WHERE id=%s AND COALESCE(cliente_key,'')=%s"
+                        with conn() as c:
+                            c.execute(sql, (decision, legal_status, signature_status, signature_ref, comments, int(u.get('id') or 0), str(u.get('username') or ''), int(sid), tenant_key))
+                            c.commit()
+                    else:
+                        execute(f"UPDATE legal_doc_approvals SET status=?, legal_status=?, signature_status=?, signature_reference=?, review_comments=?, reviewed_by=?, reviewed_by_username=?, reviewed_at=datetime('now'), signed_at={signed_at_sql}, updated_at=datetime('now') WHERE id=? AND COALESCE(cliente_key,'')=?", (decision, legal_status, signature_status, signature_ref, comments, int(u.get('id') or 0), str(u.get('username') or ''), int(sid), tenant_key))
+                    try:
+                        exp_df = fetch_df("SELECT expires_at FROM legal_doc_approvals WHERE id=? AND COALESCE(cliente_key,'')=?", (int(sid), tenant_key))
+                        exp_val = '' if exp_df is None or exp_df.empty else exp_df.iloc[0].get('expires_at', '')
+                        execute("UPDATE legal_doc_approvals SET renewal_status=? WHERE id=? AND COALESCE(cliente_key,'')=?", (derive_renewal_status_row({'legal_status': legal_status, 'expires_at': exp_val}), int(sid), tenant_key))
+                    except Exception as exc:
+                        _record_soft_error('legal.renewal.resolve', exc)
+                    audit_log('RESOLVER_APROBACION', 'legal_doc_approvals', f'Solicitud #{sid} -> {decision}')
+                    st.success('Solicitud resuelta.')
+                    st.rerun()
+    with tabs[2]:
+        if approvals is None or approvals.empty:
+            st.info('Sin historial de aprobación aún.')
+        else:
+            st.dataframe(approvals[['id','status','legal_status','criticality','signature_status','requested_responsible_name','requested_responsible_email','entity_table','entity_id','doc_tipo','nombre_archivo','requested_by_username','requested_at','reviewed_by_username','reviewed_at','review_comments']].rename(columns={'id':'Solicitud','status':'Estado','legal_status':'Estado legal','criticality':'Criticidad','signature_status':'Firma','requested_responsible_name':'Responsable','requested_responsible_email':'Correo responsable','entity_table':'Origen','entity_id':'ID doc','doc_tipo':'Tipo','nombre_archivo':'Archivo','requested_by_username':'Solicitó','requested_at':'Fecha solicitud','reviewed_by_username':'Revisó','reviewed_at':'Fecha revisión','review_comments':'Comentarios'}), use_container_width=True, hide_index=True)
+    with tabs[3]:
+        matrix = legal_status_matrix_df(tenant_key)
+        if matrix.empty:
+            st.info('Aún no hay documentos para construir la matriz legal.')
+        else:
+            st.dataframe(matrix.sort_values(['Estado renovación','Estado legal','Criticidad','Creado'], ascending=[True, True, True, False]), use_container_width=True, hide_index=True)
+    with tabs[4]:
+        matrix = legal_status_matrix_df(tenant_key)
+        if matrix.empty:
+            st.info('Sin documentos con renovaciones aún.')
+        else:
+            renew = matrix[matrix['Vence'].astype(str).str.strip()!=''].copy()
+            if renew.empty:
+                st.info('No hay documentos con vencimiento configurado.')
+            else:
+                st.dataframe(renew.sort_values(['Estado renovación','Vence'], ascending=[True, True]), use_container_width=True, hide_index=True)
+                if can_approve:
+                    opts = approvals['id'].tolist() if approvals is not None and not approvals.empty else []
+                    if opts:
+                        sid2 = st.selectbox('Marcar renovación / nueva versión sobre solicitud', opts, format_func=lambda x: f"#{x}", key='legal_renew_sel')
+                        new_exp = st.date_input('Nueva fecha de vencimiento', value=None, key='legal_renew_exp')
+                        new_ver = st.text_input('Nueva versión/folio', key='legal_renew_ver')
+                        if st.button('Preparar próxima renovación', use_container_width=True, key='legal_renew_btn'):
+                            execute("UPDATE legal_doc_approvals SET expires_at=?, version_label=COALESCE(NULLIF(?,''), version_label), renewal_status='VIGENTE', updated_at=datetime('now') WHERE id=? AND COALESCE(cliente_key,'')=?", (str(new_exp or ''), str(new_ver or ''), int(sid2), tenant_key))
+                            st.success('Renovación/versionado actualizado.')
+                            st.rerun()
+
+
 def page_backup_restore():
     ui_header("Backup / Restore", "Diagnostica el backend activo y gestiona respaldos locales o heredados sin confundirlos con la persistencia real online.")
     st.warning(
@@ -6453,7 +6820,7 @@ def page_backup_restore():
                     st.write(last)
             if st.button("Probar subida Storage (archivo de prueba)", use_container_width=True):
                 try:
-                    test_path = f"_diagnostico/test_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+                    test_path = f"clientes/{storage_safe_segment(current_tenant_key() or 'diagnostico')}/_diagnostico/test_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
                     storage_upload(test_path, b"ok", content_type="text/plain", upsert=True)
                     st.success(f"Subida OK: {test_path}")
                 except Exception as e:
@@ -6477,11 +6844,38 @@ def page_admin_usuarios():
     ui_header("Administración de Usuarios", "Como SUPERADMIN puedes ver y gestionar todas las funciones. Más adelante podrás decidir qué ve cada usuario.")
     require_perm("manage_users")
     ensure_users_table()
+    ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    tenant_key = current_tenant_key()
+    scoped_mode = not is_superadmin()
+    company_caps = current_company_caps_for_active_tenant() if scoped_mode else {'role_empresa': 'SUPERADMIN', 'can_manage_users': True}
+    if scoped_mode and not company_caps.get('can_manage_users'):
+        st.error(f"Necesitas perfil ADMIN en la empresa activa para gestionar usuarios. Rol actual en empresa: {company_caps.get('role_empresa','OPERADOR')}.")
+        st.stop()
 
-    tab1, tab2 = st.tabs(["👥 Usuarios", "➕ Crear usuario"])
+    tab_labels = ["👥 Usuarios", "➕ Crear usuario", "🧩 Permisos empresa"]
+    if company_caps.get('can_view_audit'):
+        tab_labels.append("🧾 Auditoría empresa")
+    _tabs = st.tabs(tab_labels)
+    tab1, tab2, tab_perm = _tabs[0], _tabs[1], _tabs[2]
+    tab3 = _tabs[3] if len(_tabs) > 3 else None
 
     with tab1:
-        df = fetch_df("SELECT id, username, role, is_active, created_at, updated_at FROM users ORDER BY id DESC")
+        if scoped_mode:
+            df = fetch_df(
+                """
+                SELECT DISTINCT u.id, u.username, u.role, u.is_active, u.created_at, u.updated_at
+                  FROM users u
+                  JOIN user_client_access a ON a.user_id=u.id
+                 WHERE a.cliente_key=?
+                 ORDER BY u.id DESC
+                """,
+                (tenant_key,),
+            )
+            st.caption(f"Gestión acotada a la empresa activa: {tenant_key}")
+        else:
+            df = fetch_df("SELECT id, username, role, is_active, created_at, updated_at FROM users ORDER BY id DESC")
         if df.empty:
             st.info("No hay usuarios.")
             return
@@ -6494,11 +6888,20 @@ def page_admin_usuarios():
             format_func=lambda x: df[df["id"]==x].iloc[0]["username"],
             key="adm_user_sel",
         )
-        row = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),)).iloc[0].to_dict()
+        _row_df = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),))
+        if _row_df is None or _row_df.empty:
+            st.error("Usuario no encontrado.")
+            st.stop()
+        row = _row_df.iloc[0].to_dict()
+        if scoped_mode:
+            _allowed_target = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), tenant_key), default=0)
+            if int(_allowed_target or 0) <= 0:
+                st.error("Ese usuario no pertenece a la empresa activa.")
+                st.stop()
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            role_options = list(USER_ROLE_OPTIONS)
+            role_options = ['OPERADOR', 'LECTOR'] if scoped_mode else list(USER_ROLE_OPTIONS)
             current_role = (row.get("role") or "OPERADOR").upper()
             if current_role not in role_options:
                 role_options.append(current_role)
@@ -6534,7 +6937,13 @@ def page_admin_usuarios():
         if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
             try:
                 # Seguridad: SUPERADMIN y ADMIN conservan acceso de administración
-                if (new_role or "").upper() == "SUPERADMIN":
+                if scoped_mode:
+                    if (new_role or '').upper() not in {'OPERADOR', 'LECTOR'}:
+                        st.error('En modo empresa solo puedes asignar roles OPERADOR o LECTOR.')
+                        st.stop()
+                    new_perms = ROLE_TEMPLATES.get((new_role or 'OPERADOR').upper(), ROLE_TEMPLATES['OPERADOR']).copy()
+                    new_perms['manage_users'] = False
+                elif (new_role or "").upper() == "SUPERADMIN":
                     new_perms = SUPERADMIN_PERMS.copy()
                 elif (new_role or "").upper() == "ADMIN":
                     new_perms["manage_users"] = True
@@ -6603,10 +7012,36 @@ def page_admin_usuarios():
             except Exception as e:
                 st.error(f"No se pudo eliminar: {e}")
 
+    with tab_perm:
+        st.caption("Permisos por módulo para la empresa activa. Estos permisos sobrescriben lo base del usuario solo dentro de esta empresa.")
+        target_df = df if 'df' in locals() else pd.DataFrame()
+        if target_df is None or target_df.empty:
+            st.info('No hay usuarios disponibles para configurar.')
+        else:
+            uid_perm = st.selectbox('Usuario para permisos empresa', target_df['id'].tolist(), format_func=lambda x: target_df[target_df['id']==x].iloc[0]['username'], key='tenant_perm_uid')
+            if scoped_mode and int(fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key), default=0) or 0) <= 0:
+                st.warning('Ese usuario no pertenece a la empresa activa.')
+            else:
+                role_global_edit = str(fetch_value('SELECT role FROM users WHERE id=?', (int(uid_perm),), default='OPERADOR') or 'OPERADOR')
+                role_emp_edit = company_role_for_user_core(fetch_df, int(uid_perm), tenant_key, role_global_edit)
+                base_global = perms_from_row(role_global_edit, fetch_value('SELECT perms_json FROM users WHERE id=?', (int(uid_perm),), default='{}'))
+                eff = effective_company_perms(fetch_df, int(uid_perm), tenant_key, role_global_edit, base_global, list(DEFAULT_PERMS.keys()), role_emp_edit)
+                cols = st.columns(3)
+                over = {}
+                for i,k in enumerate(DEFAULT_PERMS.keys()):
+                    with cols[i%3]:
+                        over[k] = st.checkbox(f"{k}", value=bool(eff.get(k, False)), key=f'tenant_modperm_{uid_perm}_{k}')
+                if st.button('Guardar permisos empresa', type='primary', use_container_width=True, key='tenant_perm_save'):
+                    execute("DELETE FROM user_client_module_perms WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key))
+                    execute("INSERT INTO user_client_module_perms(user_id, cliente_key, perms_json, updated_at) VALUES(?,?,?,datetime('now'))", (int(uid_perm), tenant_key, json.dumps(over)))
+                    audit_log('PERMISOS_EMPRESA', 'user_client_module_perms', f'Usuario {uid_perm} empresa {tenant_key}')
+                    st.success('Permisos por empresa actualizados.')
+                    st.rerun()
+
     with tab2:
         with st.form("form_create_user", clear_on_submit=True):
             username = st.text_input("Usuario", placeholder="ej: operador1")
-            role = st.selectbox("Rol", USER_ROLE_OPTIONS)
+            role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
             pw1 = st.text_input("Contraseña", type="password")
             pw2 = st.text_input("Repetir contraseña", type="password")
             st.markdown("#### Poderes")
@@ -6621,7 +7056,13 @@ def page_admin_usuarios():
 
         if ok:
             # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
-            if (role or "").upper() == "SUPERADMIN":
+            if scoped_mode:
+                if (role or '').upper() not in {'OPERADOR', 'LECTOR'}:
+                    st.error('En modo empresa solo puedes crear usuarios OPERADOR o LECTOR.')
+                    st.stop()
+                perms = ROLE_TEMPLATES.get((role or 'OPERADOR').upper(), ROLE_TEMPLATES['OPERADOR']).copy()
+                perms['manage_users'] = False
+            elif (role or "").upper() == "SUPERADMIN":
                 perms = SUPERADMIN_PERMS.copy()
             elif (role or "").upper() == "ADMIN":
                 perms["manage_users"] = True
@@ -6642,6 +7083,17 @@ def page_admin_usuarios():
                     "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
                     (u, salt_b64, h_b64, role, json.dumps(perms)),
                 )
+                if scoped_mode:
+                    new_user_id = int(fetch_value("SELECT id FROM users WHERE username=?", (u,), default=0) or 0)
+                    now_assign = datetime.now().isoformat(timespec='seconds')
+                    execute(
+                        "DELETE FROM user_client_access WHERE user_id=? AND cliente_key=?",
+                        (new_user_id, tenant_key),
+                    )
+                    execute(
+                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                        (new_user_id, tenant_key, 0, role, now_assign, now_assign),
+                    )
                 auto_backup_db("users_create")
                 try:
                     audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role}")
@@ -6669,6 +7121,7 @@ from segav_core import ops_sgsst as _ops_sgsst
 from segav_core import ops_compliance as _ops_compliance
 from segav_core import ops_dashboard as _ops_dashboard
 from segav_core import ops_superadmin as _ops_superadmin
+from segav_core import ops_architecture as _ops_architecture
 
 
 def page_dashboard():
@@ -6700,19 +7153,19 @@ def page_asignar_trabajadores():
 
 
 def page_documentos_empresa():
-    return _ops_docs.page_documentos_empresa(fetch_df=tenant_fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record)
+    return _ops_docs.page_documentos_empresa(fetch_df=tenant_fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_documentos_empresa_faena():
-    return _ops_docs.page_documentos_empresa_faena(fetch_df=tenant_fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES)
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=tenant_fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_documentos_trabajador():
-    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=tenant_fetch_df, fetch_df_uncached=tenant_fetch_df_uncached, execute=tenant_execute, execute_rowcount=tenant_execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record)
+    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=tenant_fetch_df, fetch_df_uncached=tenant_fetch_df_uncached, execute=tenant_execute, execute_rowcount=tenant_execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_export_zip():
-    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date)
+    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date, current_tenant_key=current_tenant_key, current_segav_client_key=current_segav_client_key, visible_clientes_df=visible_clientes_df)
 
 
 def page_sgsst():
@@ -6720,6 +7173,9 @@ def page_sgsst():
 
 
 def page_superadmin_empresas():
+    if not is_superadmin():
+        st.error('Esta sección es exclusiva para superadmin.')
+        st.stop()
     return _ops_superadmin.page_superadmin_empresas(
         st=st,
         ui_header=ui_header,
@@ -6741,6 +7197,73 @@ def page_superadmin_empresas():
     )
 
 
+
+def page_architecture_scalability():
+    return _ops_architecture.page_architecture(
+        st=st,
+        ui_header=ui_header,
+        root_dir=os.path.dirname(__file__),
+        db_backend=DB_BACKEND,
+        pg_dsn_available=bool(PG_DSN),
+        api_enabled=True,
+        ci_enabled=os.path.exists(os.path.join(os.path.dirname(__file__), '.github', 'workflows', 'segav-ci.yml')),
+        tests_count=5,
+    )
+
+
+def _ensure_page_runtime_health(page_name: str):
+    try:
+        ensure_dirs()
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.dirs", exc)
+    try:
+        ensure_segav_erp_tables()
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.erp_tables", exc)
+    try:
+        ensure_users_table()
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.users", exc)
+    try:
+        ensure_user_client_access_table()
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.user_client_access", exc)
+    try:
+        ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.module_perms", exc)
+    try:
+        ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.legal", exc)
+    try:
+        ensure_multiempresa_compliance_schema_once(DB_BACKEND, PG_DSN_FINGERPRINT, current_segav_client_key(), execute, conn)
+    except Exception as exc:
+        _record_soft_error(f"page_health.{page_name}.compliance", exc)
+
+
+def _render_page_safely(page_name: str, page_callable):
+    _ensure_page_runtime_health(page_name)
+    try:
+        return page_callable()
+    except Exception as exc:
+        _record_soft_error(f"page.{page_name}", exc)
+        try:
+            clear_app_caches()
+        except Exception:
+            pass
+        try:
+            _ensure_page_runtime_health(f"{page_name}.retry")
+            return page_callable()
+        except Exception as exc2:
+            _record_soft_error(f"page.{page_name}.retry", exc2)
+            st.error(f"Ocurrió un problema al abrir la sección '{page_name}'.")
+            with st.expander('Detalle técnico', expanded=False):
+                st.code(str(exc2))
+            st.info('La app aplicó autocorrección de caché/esquema. Si este apartado sigue fallando, vuelve a cargar la página.')
+            return None
+
+
 PAGE_PERM_ROUTE = {
     "Dashboard": "view_dashboard",
     "Cumplimiento / Alertas": "view_sgsst",
@@ -6754,46 +7277,39 @@ PAGE_PERM_ROUTE = {
     "Asignar Trabajadores": "view_asignaciones",
     "Documentos Trabajador": "view_docs_trabajador",
     "Export (ZIP)": "view_export",
+    "Aprobaciones / Auditoría legal": "view_legal_audit",
     "Backup / Restore": "view_backup",
+    "Arquitectura / Escalabilidad": "manage_users",
     "Admin Usuarios": "manage_users",
 }
 if p in PAGE_PERM_ROUTE:
     require_perm(PAGE_PERM_ROUTE[p])
 
-if p == "Dashboard":
-    page_dashboard()
-elif p == "Cumplimiento / Alertas":
-    page_compliance_alerts()
-elif p == "Mi Empresa / SGSST":
-    page_sgsst()
-elif p == "Mandantes":
-    page_mandantes()
-elif p == "Contratos de Faena":
-    page_contratos_faena()
-elif p == "Faenas":
-    page_faenas()
-elif p == "Trabajadores":
-    page_trabajadores()
-elif p == "Documentos Empresa":
-    page_documentos_empresa()
-elif p == "Documentos Empresa (Faena)":
-    page_documentos_empresa_faena()
-elif p == "Asignar Trabajadores":
-    page_asignar_trabajadores()
-elif p == "Documentos Trabajador":
-    page_documentos_trabajador()
-elif p == "Export (ZIP)":
-    page_export_zip()
-elif p == "Backup / Restore":
-    page_backup_restore()
-elif p == "SuperAdmin / Empresas":
-    if not is_superadmin():
-        st.error("Esta sección es exclusiva para SUPERADMIN.")
-        st.stop()
-    page_superadmin_empresas()
-elif p == "Admin Usuarios":
-    page_admin_usuarios()
-else:
-    # Si el estado quedó con un valor inesperado, vuelve a Dashboard
+_PAGE_RENDERERS = {
+    "Dashboard": page_dashboard,
+    "Cumplimiento / Alertas": page_compliance_alerts,
+    "Mi Empresa / SGSST": page_sgsst,
+    "Mandantes": page_mandantes,
+    "Contratos de Faena": page_contratos_faena,
+    "Faenas": page_faenas,
+    "Trabajadores": page_trabajadores,
+    "Documentos Empresa": page_documentos_empresa,
+    "Documentos Empresa (Faena)": page_documentos_empresa_faena,
+    "Asignar Trabajadores": page_asignar_trabajadores,
+    "Documentos Trabajador": page_documentos_trabajador,
+    "Export (ZIP)": page_export_zip,
+    "Aprobaciones / Auditoría legal": page_aprobaciones_legal,
+    "Backup / Restore": page_backup_restore,
+    "Arquitectura / Escalabilidad": page_architecture_scalability,
+    "SuperAdmin / Empresas": page_superadmin_empresas,
+    "Admin Usuarios": page_admin_usuarios,
+}
+
+renderer = _PAGE_RENDERERS.get(p)
+if renderer is None:
     st.session_state["nav_page"] = "Dashboard"
     st.rerun()
+if p == "SuperAdmin / Empresas" and not is_superadmin():
+    st.error("Esta sección es exclusiva para SUPERADMIN.")
+    st.stop()
+_render_page_safely(p, renderer)
