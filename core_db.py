@@ -3,7 +3,29 @@ import re
 import sqlite3
 import hashlib
 import pandas as pd
-import streamlit as st
+
+try:
+    import streamlit as st
+except Exception:
+    class _FallbackStreamlit:
+        session_state = {}
+        secrets = {}
+
+        @staticmethod
+        def cache_resource(*args, **kwargs):
+            def deco(fn):
+                fn.clear = lambda: None
+                return fn
+            return deco
+
+        @staticmethod
+        def cache_data(*args, **kwargs):
+            def deco(fn):
+                fn.clear = lambda: None
+                return fn
+            return deco
+
+    st = _FallbackStreamlit()
 
 # Manejo seguro de dependencias Postgres (Supabase)
 try:
@@ -70,7 +92,15 @@ def _build_pg_dsn_from_parts() -> str:
 raw_pg_dsn = _get_cfg("SUPABASE_DB_URL", _get_cfg("PG_DSN", ""))
 PG_DSN = _normalize_pg_dsn(raw_pg_dsn) or _build_pg_dsn_from_parts()
 PG_DSN_FINGERPRINT = _fingerprint(PG_DSN) if PG_DSN else "none"
-DB_BACKEND = "postgres" if (PG_DSN and psycopg is not None) else "sqlite"
+DB_BACKEND_PREF = str(_get_cfg("SEGAV_DB_BACKEND", "postgres") or "postgres").strip().lower()
+if DB_BACKEND_PREF not in {"postgres", "sqlite"}:
+    DB_BACKEND_PREF = "postgres"
+if DB_BACKEND_PREF == "sqlite":
+    DB_BACKEND = "sqlite"
+elif PG_DSN and psycopg is not None:
+    DB_BACKEND = "postgres"
+else:
+    DB_BACKEND = "sqlite"
 
 @st.cache_resource(show_spinner=False)
 def get_pg_pool(dsn: str):

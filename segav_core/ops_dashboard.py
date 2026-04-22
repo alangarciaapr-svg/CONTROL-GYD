@@ -7,7 +7,7 @@ from typing import Callable
 import pandas as pd
 import streamlit as st
 
-from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once
+from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once, legal_docs_status_summary
 
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
@@ -259,6 +259,7 @@ def page_dashboard(
     program = _program_stats(fetch_df, current_key)
     cap = _training_stats(fetch_df, current_key)
     actions = _actions_stats(fetch_df, current_key)
+    legal = legal_docs_status_summary(fetch_df=fetch_df, client_key=current_key)
 
     trabajadores_activos = int(faena_risk["trabajadores_activos"].sum()) if faena_risk is not None and not faena_risk.empty else 0
     trabajadores_ok = int(faena_risk["trabajadores_ok"].sum()) if faena_risk is not None and not faena_risk.empty else 0
@@ -279,7 +280,7 @@ def page_dashboard(
     )
     score_label, score_icon = _score_label(score)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     with m1:
         st.metric("Score ejecutivo", f"{score:.1f}/100", help="Índice compuesto de cobertura documental, habilitación, programa anual, capacitaciones y criticidad.")
     with m2:
@@ -292,6 +293,8 @@ def page_dashboard(
         st.metric("Programa anual", f"{float(program['cerradas_pct']):.1f}%")
     with m6:
         st.metric("Alertas / planes", int(auto_high + actions["abiertas"]))
+    with m7:
+        st.metric("Docs críticos vencidos", int(legal.get("criticos_vencidos", 0)))
 
     st.caption(f"Estado gerencial: **{score_icon} {score_label}** · Cliente activo: **{current_name}** · Vertical: **{current_client.get('vertical') or 'General'}** · Modo: **{current_client.get('modo_implementacion') or 'CONFIGURABLE'}**")
 
@@ -310,6 +313,8 @@ def page_dashboard(
                 {"Indicador": "Planes abiertos", "Valor": int(actions["abiertas"])},
                 {"Indicador": "Planes vencidos", "Valor": int(actions["vencidas"])},
                 {"Indicador": "Capacitaciones vigentes", "Valor": f"{float(cap['vigentes_pct']):.1f}%"},
+                {"Indicador": "Docs legales críticos vencidos", "Valor": int(legal.get("criticos_vencidos", 0))},
+                {"Indicador": "Docs legales por vencer", "Valor": int(legal.get("criticos_por_vencer", 0))},
             ])
             st.dataframe(resumen_rows, use_container_width=True, hide_index=True)
 
@@ -370,6 +375,10 @@ def page_dashboard(
                     if not docs_month.empty:
                         st.markdown("#### Documentos empresa mensuales")
                         st.dataframe(docs_month, use_container_width=True, hide_index=True)
+                legal_agenda = legal.get("agenda") if isinstance(legal, dict) else pd.DataFrame()
+                if isinstance(legal_agenda, pd.DataFrame) and not legal_agenda.empty:
+                    st.markdown("#### Documentos legales críticos")
+                    st.dataframe(legal_agenda.head(8), use_container_width=True, hide_index=True)
 
     with tabs[2]:
         st.markdown("### Vista comercial del producto")

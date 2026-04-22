@@ -1,5 +1,47 @@
 from __future__ import annotations
 
+import pandas as pd
+
+def _legal_export_blockers(fetch_df, faena_id: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    latest = fetch_df(
+        """
+        SELECT id, entity_table, entity_id, doc_tipo, nombre_archivo, criticality, legal_status, renewal_status, expires_at
+          FROM legal_doc_approvals
+         ORDER BY entity_table, entity_id, version_no DESC, id DESC
+        """
+    )
+    if latest is None or latest.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    work = latest.copy()
+    for c in ["criticality", "legal_status", "renewal_status", "entity_table"]:
+        if c in work.columns:
+            work[c] = work[c].fillna('').astype(str).str.upper().str.strip()
+    work = work.drop_duplicates(subset=["entity_table", "entity_id"], keep="first")
+    crit = work[work["criticality"].isin(["ALTA", "CRITICA"])].copy()
+    if crit.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    docs_faena = fetch_df("SELECT id FROM faena_empresa_documentos WHERE faena_id=?", (int(faena_id),))
+    ids_emp = {int(v) for v in docs_faena["id"].tolist()} if docs_faena is not None and not docs_faena.empty else set()
+    docs_trab = fetch_df(
+        """
+        SELECT td.id
+          FROM trabajador_documentos td
+          JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
+         WHERE a.faena_id=?
+           AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
+        """,
+        (int(faena_id),),
+    )
+    ids_trab = {int(v) for v in docs_trab["id"].tolist()} if docs_trab is not None and not docs_trab.empty else set()
+    rel = crit[((crit["entity_table"] == "FAENA_EMPRESA_DOCUMENTOS") & crit["entity_id"].isin(ids_emp)) | ((crit["entity_table"] == "TRABAJADOR_DOCUMENTOS") & crit["entity_id"].isin(ids_trab))].copy()
+    if rel.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    blockers = rel[rel["renewal_status"].eq("VENCIDO")].copy()
+    warnings = rel[rel["renewal_status"].isin(["POR_VENCER"]) | rel["legal_status"].ne("APROBADO")].copy()
+    cols = [c for c in ["doc_tipo", "nombre_archivo", "entity_table", "entity_id", "legal_status", "renewal_status", "expires_at"] if c in rel.columns]
+    return blockers[cols].reset_index(drop=True), warnings[cols].reset_index(drop=True)
+
+
 def page_export_zip(
     *,
     st,
@@ -18,8 +60,22 @@ def page_export_zip(
     persist_export_mes,
     os,
     date,
+    current_tenant_key,
+    current_segav_client_key,
+    visible_clientes_df,
 ):
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
+    tenant_key = str(current_tenant_key() or current_segav_client_key() or '').strip()
+    tenant_name = tenant_key
+    try:
+        _vdf = visible_clientes_df()
+        if _vdf is not None and not _vdf.empty:
+            _row = _vdf[_vdf["cliente_key"].astype(str) == tenant_key]
+            if not _row.empty:
+                tenant_name = str(_row.iloc[0].get("cliente_nombre") or tenant_key)
+    except Exception:
+        pass
+    st.caption(f"Empresa activa para esta exportación: {tenant_name} ({tenant_key})")
 
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
@@ -44,6 +100,8 @@ def page_export_zip(
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Export por mes", "📄 Reporte Cumplimiento"])
 
+    legal_blockers, legal_warnings = _legal_export_blockers(fetch_df, int(faena_id))
+
     with tab1:
         pend = pendientes_obligatorios(int(faena_id))
         miss_emp = pendientes_empresa_faena(int(faena_id))
@@ -63,6 +121,17 @@ def page_export_zip(
             st.error("Faltan: " + ", ".join(miss_emp))
         else:
             st.success("OK (requeridos completos).")
+
+        st.divider()
+        st.write("**Control legal crítico:**")
+        if legal_blockers is not None and not legal_blockers.empty:
+            st.error("Hay documentos críticos vencidos. La exportación quedará bloqueada hasta renovarlos.")
+            st.dataframe(legal_blockers, use_container_width=True, hide_index=True)
+        else:
+            st.success("No hay bloqueos legales críticos por vencimiento para esta faena.")
+        if legal_warnings is not None and not legal_warnings.empty:
+            st.warning("Hay documentos críticos por vencer o pendientes de aprobación.")
+            st.dataframe(legal_warnings.head(10), use_container_width=True, hide_index=True)
 
     with tab2:
         st.markdown("### 📦 Selecciona qué incluir en el ZIP")
@@ -221,7 +290,10 @@ def page_export_zip(
         st.divider()
         colx1, colx2 = st.columns([1, 1])
         with colx1:
-            if st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
+            if legal_blockers is not None and not legal_blockers.empty:
+                st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True, disabled=True)
+                st.caption("Exportación bloqueada por documentos críticos vencidos.")
+            elif st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
                 try:
                     zip_bytes, name = export_zip_for_faena(
                         int(faena_id),
@@ -273,6 +345,7 @@ def page_export_zip(
             view["tamaño"] = view["size_bytes"].apply(human_file_size)
             show_cols = ["id", "faena_id", "faena_nombre", "archivo", "tamaño", "created_at"]
             st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
+            st.caption(f"Historial acotado a la empresa activa: {tenant_name}")
 
             hid = st.selectbox(
                 "ZIP del historial",
@@ -343,6 +416,7 @@ def page_export_zip(
             )
             view["tamaño"] = view["size_bytes"].apply(human_file_size)
             st.dataframe(view[["id", "year_month", "archivo", "tamaño", "created_at"]], use_container_width=True, hide_index=True)
+            st.caption(f"Exportaciones mensuales visibles solo para: {tenant_name}")
 
             mid = st.selectbox(
                 "ZIP mensual del historial",
@@ -416,7 +490,7 @@ td{{padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:12px}}
 </style></head><body>
 <h1>SEGAV ERP — Reporte de Cumplimiento Documental</h1>
 <div class="summary">
-<p><b>Faena:</b> {fi.get('nombre','N/A')} &nbsp;|&nbsp; <b>Mandante:</b> {fi.get('mandante','N/A')} &nbsp;|&nbsp; <b>Estado:</b> {fi.get('estado','N/A')}</p>
+<p><b>Empresa:</b> {tenant_name} ({tenant_key}) &nbsp;|&nbsp; <b>Faena:</b> {fi.get('nombre','N/A')} &nbsp;|&nbsp; <b>Mandante:</b> {fi.get('mandante','N/A')} &nbsp;|&nbsp; <b>Estado:</b> {fi.get('estado','N/A')}</p>
 <p><b>Período:</b> {fi.get('fecha_inicio','?')} a {fi.get('fecha_termino','vigente')} &nbsp;|&nbsp; <b>Fecha reporte:</b> {_date.today().isoformat()}</p>
 <div class="metric">Trabajadores: <b>{total_trab}</b></div>
 <div class="metric">Completos: <b style="color:#16a34a">{total_ok}</b></div>

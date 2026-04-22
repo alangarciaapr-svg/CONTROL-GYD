@@ -1,4 +1,4 @@
-# SEGAV ERP (v8.4.70)
+# SEGAV ERP (v8.5.00)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
@@ -12,6 +12,9 @@ Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixe
 - Gestión de **mandantes, contratos, faenas, trabajadores, asignaciones y documentos**.
 - Módulo **Mi Empresa / SGSST** con base para DS 44, Ley 16.744 y DS 594.
 - Exportación ZIP, backups y restore.
+- Nuevo módulo **Arquitectura / Escalabilidad** para visualizar la base técnica de crecimiento del ERP.
+- **API REST** (`api_rest.py`) lista para integración externa.
+- **Tests automatizados** y **CI/CD** con GitHub Actions.
 
 ## Estructura mínima del proyecto
 - `streamlit_app.py`
@@ -31,7 +34,9 @@ Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixe
    - `pip install -r requirements.txt`
 4. Opcional: ejecuta validación previa:
    - `python check_setup.py`
-5. Inicia la app:
+5. Ejecuta tests automáticos:
+   - `pytest -q`
+6. Inicia la app:
    - `python -m streamlit run streamlit_app.py`
 
 También puedes usar:
@@ -49,6 +54,7 @@ Si la tabla `users` está vacía, la app siembra un SUPERADMIN por defecto con:
 Copia `.streamlit/secrets.toml.example` como base para tu archivo de secretos y completa lo que corresponda.
 
 Variables soportadas:
+- `SEGAV_DB_BACKEND` (`postgres` recomendado, `sqlite` solo fallback local)
 - `SUPABASE_DB_URL`
 - `SUPABASE_DB_HOST`
 - `SUPABASE_DB_PORT`
@@ -100,3 +106,28 @@ Fase de saneamiento v8.4.70:
 - Se limpió el sombreado/confusión de `bootstrap_app` y un import no usado.
 - Se incorporó diagnóstico liviano para algunos fallos no críticos que antes quedaban totalmente silenciosos.
 - Se mantuvo la funcionalidad visible sin quitar módulos.
+
+
+## API REST
+- Ejecuta con: `uvicorn api_rest:app --reload`
+- Health: `/health`
+- Login: `POST /api/v1/auth/login`
+- Endpoints iniciales: clientes, faenas, trabajadores y exportación ZIP por faena.
+
+## CI/CD
+- Workflow: `.github/workflows/segav-ci.yml`
+- Corre tests, smoke-check de la API, empaqueta ZIP y puede disparar despliegue por `DEPLOY_WEBHOOK_URL`.
+
+
+Novedades v8.5.00:
+- Se agrega base de arquitectura y escalabilidad sin eliminar funciones existentes.
+- PostgreSQL queda como backend preferido para producción, manteniendo SQLite como fallback local.
+- Se incorporan tests automáticos, API REST inicial y pipeline CI/CD con GitHub Actions.
+- Nuevo módulo interno **Arquitectura / Escalabilidad** para supervisar la madurez técnica del ERP.
+
+Novedades v8.7.00:
+- Blindaje de tenant en la API con lectura puntual y eliminación segura por empresa activa en faenas y trabajadores.
+- Migraciones versionadas con estado consultable vía API y script `scripts/migrate.py`.
+- Readiness de producción con chequeos de secreto, backend preferido, utilitarios Postgres y datos mínimos.
+- Respaldos con manifiesto SHA256 y fallback JSON si `pg_dump`/`pg_restore` no están disponibles.
+- CI/CD reforzado con migraciones dry-run, resumen de readiness y checksum del artefacto.

@@ -798,6 +798,7 @@ def page_documentos_trabajador(
     cargo_docs_catalog_rows,
     pendientes_obligatorios,
     delete_uploaded_document_record,
+    render_legal_doc_inline=None,
 ):
     ui_header(
         "Documentos Trabajador",
@@ -1041,6 +1042,9 @@ def page_documentos_trabajador(
                     "El archivo no está disponible (Storage/disco). "
                     "Verifica configuración de Storage o vuelve a cargar el documento."
                 )
+
+            if render_legal_doc_inline:
+                render_legal_doc_inline('trabajador_documentos', int(pick_id), str(row.get('doc_tipo') or ''), str(fname or ''))
 
             confirm_del = st.checkbox(
                 "Confirmo que quiero eliminar este documento cargado.",
