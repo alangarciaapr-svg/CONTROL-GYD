@@ -1,9 +1,7 @@
-streamlit>=1.28
-pandas>=2.0
-openpyxl>=3.1
-psycopg[binary]>=3.2
-requests>=2.31.0
-psycopg-pool>=3.2
-fastapi>=0.115
-uvicorn>=0.30
-pytest>=8.3
+# SEGAV ERP — Dependencies
+streamlit>=1.28,<2.0
+pandas>=2.0,<3.0
+openpyxl>=3.1,<4.0
+psycopg[binary]>=3.2,<4.0
+psycopg-pool>=3.2,<4.0
+requests>=2.31.0,<3.0

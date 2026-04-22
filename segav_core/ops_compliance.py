@@ -322,50 +322,6 @@ def build_faena_risk_table(*, fetch_df: Callable, client_key: str, required_doc_
 
 
 
-def _legal_latest_rows(fetch_df: Callable, client_key: str) -> pd.DataFrame:
-    df = fetch_df(
-        """
-        SELECT id, entity_table, entity_id, doc_tipo, nombre_archivo, criticality, status, legal_status,
-               effective_from, expires_at, renewal_period_days, renewal_status, reviewed_at, updated_at
-          FROM legal_doc_approvals
-         WHERE COALESCE(cliente_key,'')=?
-         ORDER BY entity_table, entity_id, version_no DESC, id DESC
-        """,
-        (client_key,),
-    )
-    if df is None or df.empty:
-        return pd.DataFrame()
-    work = df.copy()
-    for col in ["criticality", "status", "legal_status", "renewal_status"]:
-        if col in work.columns:
-            work[col] = work[col].fillna('').astype(str).str.upper().str.strip()
-    work = work.drop_duplicates(subset=["entity_table", "entity_id"], keep="first")
-    return work.reset_index(drop=True)
-
-
-def legal_docs_status_summary(*, fetch_df: Callable, client_key: str) -> dict:
-    latest = _legal_latest_rows(fetch_df, client_key)
-    if latest.empty:
-        return {"total": 0, "criticos_vencidos": 0, "criticos_por_vencer": 0, "criticos_pend_aprob": 0, "agenda": pd.DataFrame(), "blockers": pd.DataFrame()}
-    crit = latest[latest["criticality"].isin(["ALTA", "CRITICA"])].copy()
-    if crit.empty:
-        return {"total": 0, "criticos_vencidos": 0, "criticos_por_vencer": 0, "criticos_pend_aprob": 0, "agenda": pd.DataFrame(), "blockers": pd.DataFrame()}
-    crit["renewal_bucket"] = crit.get("renewal_status", pd.Series([''] * len(crit))).fillna('').astype(str).str.upper().str.strip()
-    crit["needs_review"] = crit.get("legal_status", pd.Series([''] * len(crit))).fillna('').astype(str).str.upper().ne('APROBADO')
-    blockers = crit[crit["renewal_bucket"].eq("VENCIDO")].copy()
-    agenda = crit[crit["renewal_bucket"].isin(["VENCIDO", "POR_VENCER"]) | crit["needs_review"]].copy()
-    show_cols = [c for c in ["doc_tipo", "nombre_archivo", "entity_table", "entity_id", "legal_status", "renewal_status", "expires_at", "updated_at"] if c in agenda.columns]
-    block_cols = [c for c in ["doc_tipo", "nombre_archivo", "entity_table", "entity_id", "expires_at", "renewal_status"] if c in blockers.columns]
-    return {
-        "total": int(len(crit)),
-        "criticos_vencidos": int((crit["renewal_bucket"] == "VENCIDO").sum()),
-        "criticos_por_vencer": int((crit["renewal_bucket"] == "POR_VENCER").sum()),
-        "criticos_pend_aprob": int(crit["needs_review"].sum()),
-        "agenda": agenda[show_cols].head(15).reset_index(drop=True) if show_cols else pd.DataFrame(),
-        "blockers": blockers[block_cols].head(15).reset_index(drop=True) if block_cols else pd.DataFrame(),
-    }
-
-
 def build_auto_alerts(*, fetch_df: Callable, fetch_value: Callable, client_key: str, client_name: str, required_doc_types: list[str], worker_required_docs: Callable[[str | None], list[str]], doc_tipo_label: Callable[[str], str]):
     today = date.today().isoformat()
     soon = (date.today() + timedelta(days=30)).isoformat()
@@ -505,38 +461,6 @@ def build_auto_alerts(*, fetch_df: Callable, fetch_value: Callable, client_key: 
             }
         )
 
-    legal = legal_docs_status_summary(fetch_df=fetch_df, client_key=client_key)
-    if int(legal.get("criticos_vencidos", 0)) > 0:
-        rows.append({
-            "severidad": "CRITICA",
-            "categoria": "Documentos legales críticos",
-            "titulo": f"{int(legal['criticos_vencidos'])} documentos críticos vencidos",
-            "detalle": "Bloquean exportaciones y requieren renovación inmediata.",
-            "responsable": "Administración / Legal / Prevención",
-            "fecha_limite": today,
-            "origen": "LEGAL:VENCIDOS",
-        })
-    if int(legal.get("criticos_por_vencer", 0)) > 0:
-        rows.append({
-            "severidad": "ALTA",
-            "categoria": "Documentos legales críticos",
-            "titulo": f"{int(legal['criticos_por_vencer'])} documentos críticos por vencer",
-            "detalle": "Programa su renovación antes de que bloqueen la operación.",
-            "responsable": "Administración / Legal / Prevención",
-            "fecha_limite": soon,
-            "origen": "LEGAL:POR_VENCER",
-        })
-    if int(legal.get("criticos_pend_aprob", 0)) > 0:
-        rows.append({
-            "severidad": "ALTA",
-            "categoria": "Aprobación legal",
-            "titulo": f"{int(legal['criticos_pend_aprob'])} documentos críticos pendientes de aprobación",
-            "detalle": "Documentos cargados sin cierre legal todavía.",
-            "responsable": "Aprobador legal / Prevención",
-            "fecha_limite": soon,
-            "origen": "LEGAL:PENDIENTES",
-        })
-
     out = pd.DataFrame(rows)
     if out.empty:
         return out, faena_risk
@@ -614,9 +538,8 @@ def page_compliance_alerts(
     crit_faenas = int((faena_risk["semaforo"] == "CRITICO").sum()) if faena_risk is not None and not faena_risk.empty else 0
     open_manual = int((open_actions["estado"].fillna("ABIERTA") == "ABIERTA").sum()) if not open_actions.empty else 0
     overdue_manual = int(((open_actions["estado"].fillna("ABIERTA") == "ABIERTA") & (open_actions["fecha_limite"].fillna("") < date.today().isoformat())).sum()) if not open_actions.empty and "fecha_limite" in open_actions.columns else 0
-    legal = legal_docs_status_summary(fetch_df=fetch_df, client_key=current_key)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         _metric_card("Faenas críticas", crit_faenas)
     with m2:
@@ -627,10 +550,8 @@ def page_compliance_alerts(
         _metric_card("Planes abiertos", open_manual)
     with m5:
         _metric_card("Planes vencidos", overdue_manual)
-    with m6:
-        _metric_card("Docs críticos vencidos", int(legal.get("criticos_vencidos", 0)))
 
-    tabs = st.tabs(["🚦 Semáforo ejecutivo", "🔔 Alertas automáticas", "🛠️ Planes de acción", "📋 Riesgo por faena", "⚖️ Legal crítico"])
+    tabs = st.tabs(["🚦 Semáforo ejecutivo", "🔔 Alertas automáticas", "🛠️ Planes de acción", "📋 Riesgo por faena"])
 
     with tabs[0]:
         left, right = st.columns([1.15, 1])
@@ -743,19 +664,3 @@ def page_compliance_alerts(
             st.info("No hay faenas para analizar en la empresa activa.")
         else:
             st.dataframe(faena_risk, use_container_width=True, hide_index=True)
-
-    with tabs[4]:
-        st.markdown("### Legal crítico")
-        if int(legal.get("criticos_vencidos", 0)) > 0:
-            st.error("Hay documentos críticos vencidos. Esto debe tratarse como bloqueo operativo.")
-        else:
-            st.success("No hay documentos críticos vencidos en la empresa activa.")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Vencidos", int(legal.get("criticos_vencidos", 0)))
-        c2.metric("Por vencer", int(legal.get("criticos_por_vencer", 0)))
-        c3.metric("Pend. aprobación", int(legal.get("criticos_pend_aprob", 0)))
-        agenda = legal.get("agenda") if isinstance(legal, dict) else pd.DataFrame()
-        if isinstance(agenda, pd.DataFrame) and not agenda.empty:
-            st.dataframe(agenda, use_container_width=True, hide_index=True)
-        else:
-            st.info("No hay documentos legales críticos en agenda para esta empresa.")

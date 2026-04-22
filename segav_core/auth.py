@@ -12,28 +12,7 @@ import hashlib
 import secrets
 from typing import Callable
 
-try:
-    import streamlit as st
-except Exception:
-    class _FallbackStreamlit:
-        session_state = {}
-        secrets = {}
-
-        @staticmethod
-        def cache_resource(*args, **kwargs):
-            def deco(fn):
-                fn.clear = lambda: None
-                return fn
-            return deco
-
-        @staticmethod
-        def cache_data(*args, **kwargs):
-            def deco(fn):
-                fn.clear = lambda: None
-                return fn
-            return deco
-
-    st = _FallbackStreamlit()
+import streamlit as st
 
 from core_db import DB_BACKEND, execute, fetch_df
 

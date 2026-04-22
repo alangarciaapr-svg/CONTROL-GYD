@@ -21,7 +21,6 @@ def page_documentos_empresa(
     auto_backup_db,
     load_file_anywhere,
     delete_uploaded_document_record,
-    render_legal_doc_inline=None,
 ):
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos requeridos base son liquidaciones de sueldo, F30, F30-1 y certificado de accidentabilidad; además puedes crear tus propios tipos con OTRO.")
@@ -114,9 +113,6 @@ def page_documentos_empresa(
                     "Verifica configuración de Storage o vuelve a cargar el documento."
                 )
 
-            if render_legal_doc_inline:
-                render_legal_doc_inline('empresa_documentos', int(pick_id), str(row.get('doc_tipo') or ''), str(fname or ''))
-
             confirm_del = st.checkbox(
                 "Confirmo que quiero eliminar este documento cargado.",
                 key="emp_del_confirm",
@@ -155,7 +151,6 @@ def page_documentos_empresa_faena(
     load_file_anywhere=None,
     delete_uploaded_document_record=None,
     MESES_ES=None,
-    render_legal_doc_inline=None,
     pendientes_empresa_faena_periodo=None,
     periodo_folder_segment=None,
     date=None,
@@ -335,9 +330,6 @@ def page_documentos_empresa_faena(
                     "El archivo no está disponible (Storage/disco). "
                     "Verifica configuración de Storage o vuelve a cargar el documento."
                 )
-
-            if render_legal_doc_inline:
-                render_legal_doc_inline('faena_empresa_documentos', int(pick_id), str(row.get('doc_tipo') or ''), str(fname or ''))
 
             confirm_del = st.checkbox(
                 "Confirmo que quiero eliminar este documento cargado.",

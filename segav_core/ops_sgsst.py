@@ -520,14 +520,43 @@ def page_sgsst(
             ins_accion = st.text_area("Acción correctiva", key="sgsst_ins_accion", height=100)
             ins_resp = st.text_input("Responsable", key="sgsst_ins_resp")
             ins_plazo = st.date_input("Plazo", value=date.today(), key="sgsst_ins_plazo")
+
+        # ── GPS automático ────────────────────────────────────────────────
+        st.markdown(
+            '<div id="gps-ins" style="background:var(--color-background-secondary,#f1f5f9);border-radius:8px;'
+            'padding:8px 12px;font-size:12px;color:var(--color-text-secondary,#64748b);margin:4px 0">'
+            '📍 Obteniendo ubicación…</div>'
+            '<script>'
+            'if(navigator.geolocation){'
+            'navigator.geolocation.getCurrentPosition('
+            'function(p){'
+            'var el=document.getElementById("gps-ins");'
+            'if(el)el.innerHTML="📍 GPS: "+p.coords.latitude.toFixed(5)+", "+p.coords.longitude.toFixed(5);'
+            'var h=document.getElementById("gps-ins-val");'
+            'if(h)h.value=p.coords.latitude.toFixed(6)+","+p.coords.longitude.toFixed(6);'
+            '},'
+            'function(e){'
+            'var el=document.getElementById("gps-ins");'
+            'if(el)el.innerHTML="📍 GPS no disponible";'
+            '}'
+            ');'
+            '}else{'
+            'var el=document.getElementById("gps-ins");'
+            'if(el)el.innerHTML="📍 Geolocalización no soportada";'
+            '}'
+            '</script>',
+            unsafe_allow_html=True,
+        )
+        ins_gps = st.text_input("Coordenadas GPS (automático)", key="sgsst_ins_gps", placeholder="Se captura automáticamente si el navegador lo permite")
+
         if st.button("Registrar inspección", key="sgsst_add_ins"):
             if not ins_item.strip():
                 st.error("El ítem inspeccionado es obligatorio.")
             else:
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
-                    "INSERT INTO sgsst_inspecciones(faena_id, tipo, area, item, resultado, observacion, accion_correctiva, responsable, plazo, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (ins_faena, ins_tipo, ins_area.strip(), ins_item.strip(), ins_result, ins_obs.strip(), ins_accion.strip(), ins_resp.strip(), ins_plazo.isoformat(), now, now),
+                    "INSERT INTO sgsst_inspecciones(faena_id, tipo, area, item, resultado, observacion, accion_correctiva, responsable, plazo, gps_coords, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ins_faena, ins_tipo, ins_area.strip(), ins_item.strip(), ins_result, ins_obs.strip(), ins_accion.strip(), ins_resp.strip(), ins_plazo.isoformat(), ins_gps.strip() or None, now, now),
                 )
                 sgsst_log("Inspecciones DS 594", "Registrar", f"{ins_tipo} · {ins_item.strip()}")
                 st.success("Inspección registrada.")
@@ -738,13 +767,55 @@ def page_sgsst(
                 epp_marca = st.text_input("Marca", key="epp_marca")
             epp_obs = st.text_input("Observación", key="epp_obs")
 
+            # ── Firma digital táctil ──────────────────────────────────────
+            st.markdown("##### ✍️ Firma del trabajador")
+            st.markdown(
+                '<canvas id="epp-sig" width="320" height="120" style="border:1.5px solid var(--color-border-secondary,#ccc);'
+                'border-radius:8px;background:white;touch-action:none;cursor:crosshair;width:100%;max-width:320px"></canvas>'
+                '<div style="display:flex;gap:8px;margin-top:4px">'
+                '<button onclick="'
+                'var c=document.getElementById(\'epp-sig\');var ctx=c.getContext(\'2d\');ctx.clearRect(0,0,c.width,c.height);'
+                'var h=document.querySelector(\'[data-testid=stTextInput] input[aria-label=firma_b64]\');'
+                'if(h){h.value=\'\';h.dispatchEvent(new Event(\'input\',{bubbles:true}));}'
+                '" style="font-size:11px;padding:4px 12px;border:1px solid #ccc;border-radius:6px;background:white;cursor:pointer">Limpiar firma</button>'
+                '</div>'
+                '<script>'
+                '(function(){'
+                'var c=document.getElementById("epp-sig");if(!c)return;'
+                'var ctx=c.getContext("2d");var drawing=false;var lx=0,ly=0;'
+                'ctx.strokeStyle="#1a56db";ctx.lineWidth=2;ctx.lineCap="round";'
+                'function pos(e){var r=c.getBoundingClientRect();'
+                'var t=e.touches?e.touches[0]:e;'
+                'return{x:(t.clientX-r.left)*(c.width/r.width),y:(t.clientY-r.top)*(c.height/r.height)};}'
+                'function start(e){e.preventDefault();drawing=true;var p=pos(e);lx=p.x;ly=p.y;}'
+                'function move(e){if(!drawing)return;e.preventDefault();var p=pos(e);'
+                'ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(p.x,p.y);ctx.stroke();lx=p.x;ly=p.y;}'
+                'function end(){if(!drawing)return;drawing=false;'
+                'try{var d=c.toDataURL("image/png");'
+                'var inputs=document.querySelectorAll("input");'
+                'for(var i=0;i<inputs.length;i++){if(inputs[i].getAttribute("aria-label")==="firma_b64"||'
+                '(inputs[i].closest&&inputs[i].closest("[data-testid=stTextInput]")&&inputs[i].placeholder&&inputs[i].placeholder.indexOf("firma")>=0))'
+                '{inputs[i].value=d.substring(0,200);inputs[i].dispatchEvent(new Event("input",{bubbles:true}));break;}}}'
+                'catch(ex){}}'
+                'c.addEventListener("mousedown",start);c.addEventListener("mousemove",move);'
+                'c.addEventListener("mouseup",end);c.addEventListener("mouseleave",end);'
+                'c.addEventListener("touchstart",start,{passive:false});'
+                'c.addEventListener("touchmove",move,{passive:false});'
+                'c.addEventListener("touchend",end);'
+                '})();'
+                '</script>',
+                unsafe_allow_html=True,
+            )
+            epp_firma = st.text_input("firma_b64", key="epp_firma", label_visibility="collapsed", placeholder="firma digital (se captura automáticamente)")
+
             if st.button("💾 Registrar entrega EPP", type="primary", use_container_width=True, key="epp_save"):
                 now = datetime.now().isoformat(timespec='seconds')
                 execute(
-                    "INSERT INTO sgsst_epp_entrega(trabajador_id, faena_id, epp_tipo, fecha_entrega, fecha_vencimiento, cantidad, talla, marca, observacion, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO sgsst_epp_entrega(trabajador_id, faena_id, epp_tipo, fecha_entrega, fecha_vencimiento, cantidad, talla, marca, observacion, firma_b64, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (int(epp_trab), int(epp_faena) if epp_faena else None, epp_tipo,
                      epp_fecha.isoformat(), epp_venc.isoformat() if epp_venc else None,
-                     int(epp_cant), epp_talla.strip(), epp_marca.strip(), epp_obs.strip(), now, now),
+                     int(epp_cant), epp_talla.strip(), epp_marca.strip(), epp_obs.strip(),
+                     epp_firma.strip() if epp_firma else None, now, now),
                 )
                 sgsst_log("EPP", "Entrega", f"{epp_tipo} a trabajador {epp_trab}")
                 st.success("Entrega de EPP registrada.")

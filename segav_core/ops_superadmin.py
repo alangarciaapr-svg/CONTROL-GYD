@@ -282,7 +282,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
 
         try:
             audit_df = fetch_df(
-                "SELECT created_at, username, role_global, role_empresa, accion, entidad, detalle, cliente_key "
+                "SELECT created_at, username, accion, entidad, detalle, cliente_key "
                 "FROM segav_audit_log ORDER BY id DESC LIMIT 500"
             )
         except Exception:
@@ -291,17 +291,14 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         if audit_df is None or audit_df.empty:
             st.info("Aún no hay registros de auditoría. Las acciones de login y cambios importantes se registrarán automáticamente.")
         else:
-            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
-                usuarios_uniq = ["(Todos)"] + sorted(audit_df["username"].dropna().astype(str).unique().tolist())
+                usuarios_uniq = ["(Todos)"] + sorted(audit_df["username"].dropna().unique().tolist())
                 filtro_user = st.selectbox("Filtrar por usuario", usuarios_uniq, key="audit_user_f")
             with col_f2:
-                acciones_uniq = ["(Todas)"] + sorted(audit_df["accion"].dropna().astype(str).unique().tolist())
+                acciones_uniq = ["(Todas)"] + sorted(audit_df["accion"].dropna().unique().tolist())
                 filtro_acc = st.selectbox("Filtrar por acción", acciones_uniq, key="audit_acc_f")
             with col_f3:
-                empresas_uniq = ["(Todas)"] + sorted(audit_df["cliente_key"].dropna().astype(str).unique().tolist())
-                filtro_emp = st.selectbox("Filtrar por empresa", empresas_uniq, key="audit_emp_f")
-            with col_f4:
                 filtro_txt = st.text_input("Buscar en detalle", placeholder="Texto libre…", key="audit_txt_f")
 
             view_a = audit_df.copy()
@@ -309,8 +306,6 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 view_a = view_a[view_a["username"] == filtro_user]
             if filtro_acc != "(Todas)":
                 view_a = view_a[view_a["accion"] == filtro_acc]
-            if filtro_emp != "(Todas)":
-                view_a = view_a[view_a["cliente_key"].astype(str) == filtro_emp]
             if filtro_txt.strip():
                 qq = filtro_txt.strip().lower()
                 view_a = view_a[view_a["detalle"].astype(str).str.lower().str.contains(qq, na=False)]
@@ -319,7 +314,6 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             st.dataframe(
                 view_a.rename(columns={
                     "created_at": "Fecha/Hora", "username": "Usuario",
-                    "role_global": "Rol global", "role_empresa": "Rol empresa",
                     "accion": "Acción", "entidad": "Entidad",
                     "detalle": "Detalle", "cliente_key": "Empresa"
                 }),
