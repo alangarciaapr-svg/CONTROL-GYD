@@ -563,7 +563,7 @@ def page_sgsst(
                     with c1:
                         st.caption(item)
                     with c2:
-                        key_ck = f"ck594_{cat[:8]}_{idx_item}"
+                        key_ck = K(f"ck594_{cat[:8]}_{idx_item}")
                         results[(cat, item)] = st.checkbox("Cumple", value=True, key=key_ck)
 
             if st.button("💾 Guardar checklist completo", type="primary", use_container_width=True, key=K("ck594_save")):
