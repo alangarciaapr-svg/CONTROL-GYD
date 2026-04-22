@@ -1132,9 +1132,6 @@ def safe_name(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "item"
-    s = (s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_") or "item"
 
 
 
@@ -1578,6 +1575,10 @@ def conn():
     c = sqlite3.connect(DB_PATH, check_same_thread=False)
     try:
         c.execute("PRAGMA foreign_keys = ON;")
+        c.execute("PRAGMA journal_mode = WAL;")
+        c.execute("PRAGMA synchronous = NORMAL;")
+        c.execute("PRAGMA temp_store = MEMORY;")
+        c.execute("PRAGMA busy_timeout = 5000;")
     except Exception as _exc:
         _record_soft_error("execute", _exc)
     return c
@@ -2323,9 +2324,17 @@ def ensure_sgsst_tables_sqlite(c):
     c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_rut ON trabajadores(rut);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_apellidos ON trabajadores(apellidos, nombres);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_empresa_documentos_doc_tipo ON empresa_documentos(doc_tipo);")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_faenas_estado ON faenas(estado);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_asignaciones_estado ON asignaciones(estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_faenas_tenant_estado ON faenas(cliente_key, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_tenant_estado ON trabajadores(cliente_key, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_asignaciones_tenant_faena_estado ON asignaciones(cliente_key, faena_id, estado);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_trabajador_tenant_trab_tipo ON trabajador_documentos(cliente_key, trabajador_id, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_empresa_tenant_tipo ON empresa_documentos(cliente_key, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_doc_empresa_faena_tenant_faena_tipo ON faena_empresa_documentos(cliente_key, faena_id, doc_tipo);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_export_hist_tenant_faena ON export_historial(cliente_key, faena_id, created_at);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_export_hist_mes_tenant_periodo ON export_historial_mes(cliente_key, year_month, created_at);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_legal_doc_latest ON legal_doc_approvals(cliente_key, entity_table, entity_id, version_no, id);")
 
 
 def ensure_sgsst_seed_data():
@@ -4195,7 +4204,7 @@ def latest_legal_approval_for_doc(entity_table: str, entity_id: int, tenant_key:
         return {}
     try:
         df = fetch_df(
-            "SELECT * FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? AND entity_table=? AND entity_id=? ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? AND entity_table=? AND entity_id=? ORDER BY COALESCE(version_no, 1) DESC, id DESC LIMIT 1",
             (ck, str(entity_table), int(entity_id)),
         )
         if df is not None and not df.empty:
