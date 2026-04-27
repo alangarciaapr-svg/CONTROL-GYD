@@ -2106,6 +2106,9 @@ def ensure_sgsst_tables_postgres():
             politica_version TEXT,
             politica_fecha TEXT,
             observaciones TEXT,
+            logo_local_path TEXT,
+            logo_bucket TEXT,
+            logo_object_path TEXT,
             created_at TEXT,
             updated_at TEXT
         );
@@ -2859,6 +2862,9 @@ def ensure_segav_erp_tables():
             contacto TEXT,
             email TEXT,
             observaciones TEXT,
+            logo_local_path TEXT,
+            logo_bucket TEXT,
+            logo_object_path TEXT,
             created_at TEXT,
             updated_at TEXT
         );
@@ -2913,6 +2919,24 @@ def ensure_segav_erp_tables():
     execute("CREATE INDEX IF NOT EXISTS idx_erp_clientes_activo ON segav_erp_clientes(activo);")
     execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON segav_audit_log(created_at);")
     execute("CREATE INDEX IF NOT EXISTS idx_audit_log_username ON segav_audit_log(username);")
+    ensure_segav_client_logo_columns()
+
+
+def ensure_segav_client_logo_columns():
+    try:
+        if DB_BACKEND == "postgres":
+            execute("ALTER TABLE IF EXISTS segav_erp_clientes ADD COLUMN IF NOT EXISTS logo_local_path TEXT")
+            execute("ALTER TABLE IF EXISTS segav_erp_clientes ADD COLUMN IF NOT EXISTS logo_bucket TEXT")
+            execute("ALTER TABLE IF EXISTS segav_erp_clientes ADD COLUMN IF NOT EXISTS logo_object_path TEXT")
+        else:
+            with conn() as c:
+                migrate_add_columns_if_missing(c, 'segav_erp_clientes', {
+                    'logo_local_path': 'TEXT',
+                    'logo_bucket': 'TEXT',
+                    'logo_object_path': 'TEXT',
+                })
+    except Exception as _exc:
+        _record_soft_error('segav_erp_clientes.logo_cols', _exc)
 
 
 def set_segav_erp_config_value(key: str, value: str):
@@ -2977,8 +3001,8 @@ def ensure_segav_erp_seed_data():
         cliente_nombre = segav_erp_value('cliente_actual', razon) or razon
         cliente_key = make_erp_key(cliente_nombre, prefix='cli_')
         execute(
-            "INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (cliente_key, cliente_nombre, rut, segav_erp_value('erp_vertical', 'General'), segav_erp_value('modo_implementacion', 'CONFIGURABLE'), 1, '', '', 'Cliente inicial sembrado desde la configuración actual.', now, now),
+            "INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, logo_local_path, logo_bucket, logo_object_path, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cliente_key, cliente_nombre, rut, segav_erp_value('erp_vertical', 'General'), segav_erp_value('modo_implementacion', 'CONFIGURABLE'), 1, '', '', 'Cliente inicial sembrado desde la configuración actual.', '', '', '', now, now),
         )
         for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
             execute(
@@ -3110,12 +3134,82 @@ def segav_template_payload(template_key: str) -> dict:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_segav_clientes_df(_backend: str, _dsn: str):
-    df = fetch_df("SELECT cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at FROM segav_erp_clientes ORDER BY COALESCE(activo,1) DESC, cliente_nombre")
+    df = fetch_df("SELECT cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, logo_local_path, logo_bucket, logo_object_path, created_at, updated_at FROM segav_erp_clientes ORDER BY COALESCE(activo,1) DESC, cliente_nombre")
     return df if df is not None else pd.DataFrame()
 
 
 def segav_clientes_df():
     return get_segav_clientes_df(DB_BACKEND, PG_DSN_FINGERPRINT)
+
+
+
+def current_client_row() -> dict:
+    try:
+        df = segav_clientes_df()
+        ck = current_segav_client_key() if 'current_segav_client_key' in globals() else str(st.session_state.get('active_cliente_key') or '').strip()
+        if df is not None and not df.empty and ck:
+            row = df[df['cliente_key'].astype(str) == str(ck)]
+            if not row.empty:
+                return row.iloc[0].to_dict()
+    except Exception as _exc:
+        _record_soft_error('client.current_row', _exc)
+    return {}
+
+
+def save_company_logo_for_cliente(cliente_key: str, uploaded_file):
+    cliente_key = str(cliente_key or '').strip()
+    if not cliente_key or uploaded_file is None:
+        return None
+    raw = uploaded_file.getvalue()
+    ctype = getattr(uploaded_file, 'type', None) or 'application/octet-stream'
+    payload = prepare_upload_payload(getattr(uploaded_file, 'name', 'logo_empresa'), raw, ctype)
+    ext = os.path.splitext(str(payload['file_name'] or 'logo.png'))[1] or '.png'
+    file_name = f'logo_empresa{ext.lower()}'
+    folder_parts = ['clientes', storage_safe_segment(cliente_key), '_branding']
+    local_path = save_file(folder_parts, file_name, payload['file_bytes'])
+    object_path = _storage_object_path(folder_parts, file_name)
+    bucket = STORAGE_BUCKET if storage_admin_enabled() else None
+    if storage_admin_enabled():
+        try:
+            storage_upload(object_path, payload['file_bytes'], content_type=payload.get('content_type') or ctype, upsert=True)
+        except Exception:
+            bucket = None
+            object_path = None
+    execute(
+        "UPDATE segav_erp_clientes SET logo_local_path=?, logo_bucket=?, logo_object_path=?, updated_at=? WHERE cliente_key=?",
+        (local_path, bucket, object_path, datetime.now().isoformat(timespec='seconds'), cliente_key),
+    )
+    clear_app_caches()
+    return {'local_path': local_path, 'bucket': bucket, 'object_path': object_path}
+
+
+def get_company_logo_bytes(cliente_key: str | None = None) -> bytes | None:
+    try:
+        row = current_client_row() if not cliente_key else {}
+        if cliente_key and (not row or str(row.get('cliente_key') or '') != str(cliente_key)):
+            df = segav_clientes_df()
+            if df is not None and not df.empty:
+                hit = df[df['cliente_key'].astype(str) == str(cliente_key)]
+                if not hit.empty:
+                    row = hit.iloc[0].to_dict()
+        if row:
+            lp = row.get('logo_local_path')
+            bk = row.get('logo_bucket')
+            op = row.get('logo_object_path')
+            if lp or op:
+                return load_file_anywhere(lp, bk, op)
+    except Exception as _exc:
+        _record_soft_error('client.logo_bytes', _exc)
+    return None
+
+
+def render_current_company_logo(width: int = 180):
+    row = current_client_row()
+    logo = get_company_logo_bytes(str(row.get('cliente_key') or '')) if row else None
+    if logo:
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.image(logo, width=width)
 
 
 def current_segav_client_key() -> str:
@@ -4787,16 +4881,37 @@ html,body{
                 placeholder="Ingrese su contraseña",
                 label_visibility="collapsed",
             )
-            # Link olvidé
-            st.markdown(
-                '<div style="text-align:center;margin:8px 0 16px 0;">'
-                '<span style="color:#2563eb;font-size:13px;cursor:default;">¿Olvidó su contraseña?</span>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
             submitted = st.form_submit_button(
                 "Ingresar", type="primary", use_container_width=True
             )
+
+        with st.expander("¿Olvidó su contraseña?", expanded=False):
+            st.caption("Recupera tu contraseña validando tu RUT y tu correo registrado.")
+            rec_rut = st.text_input("RUT registrado", key="_recrut", placeholder="12.345.678-5")
+            _rec_fmt = normalize_login_rut(rec_rut)
+            if str(rec_rut or '').strip() and _rec_fmt and _rec_fmt != str(rec_rut or '').strip():
+                st.caption(f"Se usará como RUT: {_rec_fmt}")
+            rec_email = st.text_input("Correo registrado", key="_recemail", placeholder="correo@empresa.cl")
+            rec_pw1 = st.text_input("Nueva contraseña", key="_recpw1", type="password")
+            rec_pw2 = st.text_input("Repetir nueva contraseña", key="_recpw2", type="password")
+            if st.button("Restablecer contraseña", use_container_width=True, key="_recbtn"):
+                rrut = normalize_login_rut(rec_rut)
+                if not rrut or not rec_email.strip() or not rec_pw1 or not rec_pw2:
+                    st.error("Completa RUT, correo y la nueva contraseña.")
+                elif rec_pw1 != rec_pw2 or len(rec_pw1) < 8:
+                    st.error("La nueva contraseña no coincide o es muy corta (mínimo 8).")
+                else:
+                    udf = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (rrut,))
+                    if udf is None or udf.empty:
+                        st.error("No existe un usuario activo con ese RUT.")
+                    else:
+                        urow = udf.iloc[0].to_dict()
+                        if str(urow.get('email') or '').strip().lower() != rec_email.strip().lower():
+                            st.error("El correo no coincide con el registrado para ese usuario.")
+                        else:
+                            salt_b64, h_b64 = hash_password(rec_pw1)
+                            execute("UPDATE users SET salt_b64=?, pass_hash_b64=?, password_must_change=0, updated_at=? WHERE id=?", (salt_b64, h_b64, datetime.now().isoformat(timespec='seconds'), int(urow.get('id') or 0)))
+                            st.success("Contraseña restablecida correctamente. Ya puedes iniciar sesión.")
 
         # Logo + marca
         logo_tag = (
@@ -5122,6 +5237,10 @@ with st.sidebar:
 
 current_section = st.session_state.get("nav_page", "Dashboard")
 st.title(str(current_section))
+try:
+    render_current_company_logo(width=170)
+except Exception as exc:
+    _record_soft_error('topbar.company_logo', exc)
 try:
     _clientes_top = segav_clientes_df()
     _cli_key_top = current_segav_client_key()
@@ -7519,7 +7638,7 @@ def page_export_zip():
 
 
 def page_sgsst():
-    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user, segav_template_payload=segav_template_payload, DS594_CHECKLIST_ITEMS=DS594_CHECKLIST_ITEMS, EPP_TIPOS=EPP_TIPOS, ROLES_EMPRESA=ROLES_EMPRESA)
+    return _ops_sgsst.page_sgsst(fetch_df=tenant_fetch_df, fetch_value=tenant_fetch_value, execute=tenant_execute, clear_app_caches=clear_app_caches, ensure_sgsst_seed_data=ensure_sgsst_seed_data, segav_erp_config_map=segav_erp_config_map, segav_clientes_df=segav_clientes_df, current_segav_client_key=current_segav_client_key, segav_cargos_df=segav_cargos_df, get_empresa_required_doc_types=get_empresa_required_doc_types, clean_rut=clean_rut, go=go, segav_templates_df=segav_templates_df, ERP_TEMPLATE_PRESETS=ERP_TEMPLATE_PRESETS, apply_segav_template=apply_segav_template, sgsst_log=sgsst_log, make_erp_key=make_erp_key, segav_erp_value=segav_erp_value, ERP_CLIENT_PARAM_DEFAULTS=ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value=set_segav_erp_config_value, segav_cliente_params=segav_cliente_params, segav_cargo_labels=segav_cargo_labels, segav_cargo_rules=segav_cargo_rules, DOC_OBLIGATORIOS=DOC_OBLIGATORIOS, DOC_TIPO_LABELS=DOC_TIPO_LABELS, doc_tipo_label=doc_tipo_label, segav_empresa_docs_df=segav_empresa_docs_df, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, parse_date_maybe=parse_date_maybe, SGSST_NORMAS=SGSST_NORMAS, SGSST_ESTADOS=SGSST_ESTADOS, SGSST_GRAVEDADES=SGSST_GRAVEDADES, SGSST_RESULTADOS=SGSST_RESULTADOS, SGSST_TIPOS_EVENTO=SGSST_TIPOS_EVENTO, SGSST_TIPOS_CAP=SGSST_TIPOS_CAP, doc_tipo_join=doc_tipo_join, current_user=current_user, segav_template_payload=segav_template_payload, DS594_CHECKLIST_ITEMS=DS594_CHECKLIST_ITEMS, EPP_TIPOS=EPP_TIPOS, ROLES_EMPRESA=ROLES_EMPRESA, is_company_admin_for_active_tenant=is_company_admin_for_active_tenant, save_company_logo_for_cliente=save_company_logo_for_cliente, get_company_logo_bytes=get_company_logo_bytes)
 
 
 def page_superadmin_empresas():
@@ -7544,6 +7663,8 @@ def page_superadmin_empresas():
         current_user=current_user,
         is_superadmin=is_superadmin,
         ensure_user_client_access_table=lambda: ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT),
+        save_company_logo_for_cliente=save_company_logo_for_cliente,
+        get_company_logo_bytes=get_company_logo_bytes,
     )
 
 

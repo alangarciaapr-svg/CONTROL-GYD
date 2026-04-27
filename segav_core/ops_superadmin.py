@@ -25,7 +25,7 @@ def _dep_count(fetch_value, table: str, cliente_key: str) -> int:
         return 0
 
 
-def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, clear_app_caches, segav_clientes_df, visible_clientes_df, current_segav_client_key, make_erp_key, clean_rut, ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value, sgsst_log, current_user, is_superadmin, ensure_user_client_access_table):
+def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, clear_app_caches, segav_clientes_df, visible_clientes_df, current_segav_client_key, make_erp_key, clean_rut, ERP_CLIENT_PARAM_DEFAULTS, set_segav_erp_config_value, sgsst_log, current_user, is_superadmin, ensure_user_client_access_table, save_company_logo_for_cliente, get_company_logo_bytes):
     if not is_superadmin():
         st.error("Esta sección es exclusiva para SUPERADMIN.")
         st.stop()
@@ -109,6 +109,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         new_contact = c5.text_input("Contacto", key="sa_new_empresa_contacto")
         new_email = c6.text_input("Email", key="sa_new_empresa_email")
         new_obs = st.text_area("Observaciones", key="sa_new_empresa_obs", height=80)
+        new_logo = st.file_uploader("Logo empresa (opcional)", type=['png','jpg','jpeg','webp'], key='sa_new_empresa_logo')
         if st.button("Crear empresa", type="primary", key="sa_btn_crear_empresa"):
             if not new_name.strip():
                 st.error("Debes indicar el nombre de la empresa.")
@@ -120,8 +121,8 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                     st.error("Ya existe una empresa con ese código. Cambia el nombre o edítala abajo.")
                 else:
                     execute(
-                        "INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                        (cliente_key, new_name.strip(), clean_rut(new_rut), new_vertical.strip() or "General", new_impl, 1, new_contact.strip(), new_email.strip(), new_obs.strip(), now, now),
+                        "INSERT INTO segav_erp_clientes(cliente_key, cliente_nombre, rut, vertical, modo_implementacion, activo, contacto, email, observaciones, logo_local_path, logo_bucket, logo_object_path, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (cliente_key, new_name.strip(), clean_rut(new_rut), new_vertical.strip() or "General", new_impl, 1, new_contact.strip(), new_email.strip(), new_obs.strip(), '', '', '', now, now),
                     )
                     for param_key, param_value in ERP_CLIENT_PARAM_DEFAULTS.items():
                         execute(
@@ -130,6 +131,11 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                         )
                     clear_app_caches()
                     sgsst_log("SuperAdmin / Empresas", "Crear empresa", f"{new_name.strip()} ({cliente_key})")
+                    if new_logo is not None:
+                        try:
+                            save_company_logo_for_cliente(cliente_key, new_logo)
+                        except Exception as exc:
+                            st.warning(f'La empresa se creó, pero no se pudo guardar el logo: {exc}')
                     st.success("Empresa creada correctamente.")
                     st.rerun()
 
@@ -152,6 +158,14 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             edit_contact = e5.text_input("Contacto", value=str(row.get("contacto") or ""), key="sa_edit_contacto")
             edit_email = e6.text_input("Email", value=str(row.get("email") or ""), key="sa_edit_email")
             edit_obs = st.text_area("Observaciones", value=str(row.get("observaciones") or ""), key="sa_edit_obs", height=80)
+            current_logo = None
+            try:
+                current_logo = get_company_logo_bytes(str(edit_key))
+            except Exception:
+                current_logo = None
+            if current_logo:
+                st.image(current_logo, width=180)
+            edit_logo = st.file_uploader("Cargar o reemplazar logo", type=['png','jpg','jpeg','webp'], key=f'sa_edit_logo_{edit_key}')
             active_now = int(row.get("activo") or 0) == 1
             active_flag = st.selectbox("Estado", ["ACTIVA", "INACTIVA"], index=0 if active_now else 1, key="sa_edit_activa")
             col_a, col_b = st.columns([1,1])
@@ -164,6 +178,11 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                     )
                     clear_app_caches()
                     sgsst_log("SuperAdmin / Empresas", "Modificar empresa", edit_key)
+                    if edit_logo is not None:
+                        try:
+                            save_company_logo_for_cliente(edit_key, edit_logo)
+                        except Exception as exc:
+                            st.warning(f'La empresa se actualizó, pero no se pudo guardar el logo: {exc}')
                     st.success("Empresa actualizada.")
                     st.rerun()
             with col_b:

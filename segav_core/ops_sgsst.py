@@ -51,6 +51,9 @@ def page_sgsst(
     DS594_CHECKLIST_ITEMS=None,
     EPP_TIPOS=None,
     ROLES_EMPRESA=None,
+    is_company_admin_for_active_tenant=None,
+    save_company_logo_for_cliente=None,
+    get_company_logo_bytes=None,
 ):
     ui_header("Mi Empresa / SGSST", "Núcleo comercializable de SEGAV ERP: configurable para cualquier empresa, sin reemplazar lo ya existente.")
     ensure_sgsst_seed_data()
