@@ -4735,9 +4735,10 @@ html,body{
                 "Usuario", key="_lgu",
                 placeholder="12.345.678-5",
                 label_visibility="collapsed",
-                on_change=_format_session_rut_key,
-                args=("_lgu",),
             )
+            _uname_fmt = normalize_login_rut(uname)
+            if str(uname or '').strip() and _uname_fmt and _uname_fmt != str(uname or '').strip():
+                st.caption(f"Se usará como RUT: {_uname_fmt}")
             # Label Contraseña
             st.markdown(
                 '<div style="font-size:14px;font-weight:700;color:#1e293b;margin:10px 0 6px 0;">Contraseña</div>',
@@ -7038,202 +7039,205 @@ def page_admin_usuarios():
                 """
             )
         if df.empty:
-            st.info("No hay usuarios.")
-            return
-        st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
+            st.info("No hay usuarios aún. Puedes crear el primero en la pestaña 'Crear usuario'.")
+            uid = None
+            row = {}
+        else:
+            st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
 
-        st.divider()
-        uid = st.selectbox(
-            "Selecciona usuario",
-            df["id"].tolist(),
-            format_func=lambda x: df[df["id"]==x].iloc[0]["username"],
-            key="adm_user_sel",
-        )
-        _row_df = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),))
-        if _row_df is None or _row_df.empty:
-            st.error("Usuario no encontrado.")
-            st.stop()
-        row = _row_df.iloc[0].to_dict()
-        if scoped_mode:
-            _allowed_target = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), tenant_key), default=0)
-            if int(_allowed_target or 0) <= 0:
-                st.error("Ese usuario no pertenece a la empresa activa.")
-                st.stop()
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            role_options = ['OPERADOR', 'LECTOR'] if scoped_mode else list(USER_ROLE_OPTIONS)
-            current_role = (row.get("role") or "OPERADOR").upper()
-            if current_role not in role_options:
-                role_options.append(current_role)
-            new_role = st.selectbox(
-                "Rol",
-                role_options,
-                index=role_options.index(current_role),
-                key="adm_role_sel",
+            st.divider()
+            uid = st.selectbox(
+                "Selecciona usuario",
+                df["id"].tolist(),
+                format_func=lambda x: df[df["id"]==x].iloc[0]["username"],
+                key="adm_user_sel",
             )
-            active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key="adm_active")
-        with c2:
-            st.markdown("**Empresa fija**")
-            _fixed_current = str(row.get("fixed_cliente_key") or "").strip()
-            _fix_options = ['']
-            _fix_map = {'': '— Sin empresa fija —'}
+            _row_df = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),))
+            if _row_df is None or _row_df.empty:
+                st.error("Usuario no encontrado.")
+                st.stop()
+            row = _row_df.iloc[0].to_dict()
             if scoped_mode:
-                _tenant_view = str(tenant_key or '').strip()
-                if _tenant_view:
-                    _fix_options.append(_tenant_view)
-                    _fix_map[_tenant_view] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_tenant_view,), default=_tenant_view) or _tenant_view)
-            else:
-                _clients_df = visible_clientes_df()
-                if _clients_df is None or _clients_df.empty:
-                    _clients_df = fetch_df("SELECT cliente_key, COALESCE(cliente_nombre, cliente_key) AS cliente_nombre FROM segav_erp_clientes WHERE activo=1 ORDER BY COALESCE(cliente_nombre, cliente_key)")
-                if _clients_df is not None and not _clients_df.empty:
-                    for _, _rr in _clients_df.iterrows():
-                        _ck = str(_rr.get('cliente_key') or '').strip()
-                        if _ck and _ck not in _fix_map:
-                            _fix_options.append(_ck)
-                            _fix_map[_ck] = str(_rr.get('cliente_nombre') or _ck)
-            if _fixed_current and _fixed_current not in _fix_map:
-                _fix_options.append(_fixed_current)
-                _fix_map[_fixed_current] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_fixed_current,), default=_fixed_current) or _fixed_current)
-            if scoped_mode:
-                new_fixed_company = _fixed_current if _fixed_current else str(tenant_key or '').strip()
-                st.selectbox(
-                    "Empresa fija",
-                    _fix_options,
-                    index=_fix_options.index(new_fixed_company) if new_fixed_company in _fix_options else 0,
-                    format_func=lambda x: _fix_map.get(str(x), str(x)),
-                    disabled=True,
-                    key="adm_fixed_company_view",
-                )
-                fixed_enabled = bool(new_fixed_company)
-                st.caption("Como admin de empresa solo puedes dejarlo fijo en la empresa activa.")
-            else:
-                new_fixed_company = st.selectbox(
-                    "Empresa fija",
-                    _fix_options,
-                    index=_fix_options.index(_fixed_current) if _fixed_current in _fix_options else 0,
-                    format_func=lambda x: _fix_map.get(str(x), str(x)),
-                    key="adm_fixed_company_sel",
-                )
-                fixed_enabled = bool(str(new_fixed_company).strip())
-        with c3:
-            st.markdown("**Reset contraseña**")
-            pw1 = st.text_input("Nueva contraseña", type="password", key="adm_pw1")
-            pw2 = st.text_input("Repetir", type="password", key="adm_pw2")
-            st.markdown("**Eliminar**")
-            del_confirm = st.checkbox("Confirmo eliminar usuario", key="adm_del_confirm")
-            del_btn = st.button("Eliminar usuario", use_container_width=True, key="adm_del_btn")
-
-        st.divider()
-        st.text_input("Usuario (RUT)", value=str(row.get("username") or ""), disabled=True, key="adm_user_rut_view")
-        st.markdown("### Poderes")
-        current_perms = perms_from_row(new_role, row.get("perms_json"))
-        cols = st.columns(3)
-        keys = list(DEFAULT_PERMS.keys())
-        new_perms = {}
-        super_mode = (new_role or "").upper() == "SUPERADMIN"
-        if super_mode:
-            st.info("El rol SUPERADMIN ve todas las funciones del ERP por defecto.")
-        for i, k in enumerate(keys):
-            with cols[i % 3]:
-                new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}", disabled=super_mode)
-
-        if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
-            try:
-                # Seguridad: SUPERADMIN y ADMIN conservan acceso de administración
-                if scoped_mode:
-                    if (new_role or '').upper() not in {'OPERADOR', 'LECTOR'}:
-                        st.error('En modo empresa solo puedes asignar roles OPERADOR o LECTOR.')
-                        st.stop()
-                    new_perms = ROLE_TEMPLATES.get((new_role or 'OPERADOR').upper(), ROLE_TEMPLATES['OPERADOR']).copy()
-                    new_perms['manage_users'] = False
-                elif (new_role or "").upper() == "SUPERADMIN":
-                    new_perms = SUPERADMIN_PERMS.copy()
-                elif (new_role or "").upper() == "ADMIN":
-                    new_perms["manage_users"] = True
-
-                # Evita desactivar al último SUPERADMIN activo
-                if (row.get("role") or "").upper() == "SUPERADMIN" and (not active) and superadmins_count(active_only=True) <= 1:
-                    st.error("No puedes desactivar al último SUPERADMIN activo.")
+                _allowed_target = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), tenant_key), default=0)
+                if int(_allowed_target or 0) <= 0:
+                    st.error("Ese usuario no pertenece a la empresa activa.")
                     st.stop()
 
-                # Evita desactivar al último ADMIN activo cuando no es SUPERADMIN
-                if (row.get("role") or "").upper() == "ADMIN" and (new_role or "").upper() == "ADMIN" and (not active) and admins_count(active_only=True) <= 1:
-                    st.error("No puedes desactivar al último ADMIN activo.")
-                    st.stop()
-
-                _fixed_to_save = str(new_fixed_company or '').strip()
-                if scoped_mode:
-                    _fixed_to_save = str(tenant_key or '').strip()
-                if _fixed_to_save:
-                    _has_access = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), _fixed_to_save), default=0)
-                    if int(_has_access or 0) <= 0:
-                        _now_assign = datetime.now().isoformat(timespec='seconds')
-                        execute(
-                            "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                            (int(uid), _fixed_to_save, 0, new_role, _now_assign, _now_assign),
-                        )
-                execute(
-                    "UPDATE users SET role=?, perms_json=?, is_active=?, fixed_cliente_key=?, updated_at=datetime('now') WHERE id=?",
-                    (new_role, json.dumps(new_perms), 1 if active else 0, (_fixed_to_save or None), int(uid)),
+        if uid is None:
+            st.caption("Todavía no hay usuarios para editar o eliminar en esta pestaña.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                role_options = ['OPERADOR', 'LECTOR'] if scoped_mode else list(USER_ROLE_OPTIONS)
+                current_role = (row.get("role") or "OPERADOR").upper()
+                if current_role not in role_options:
+                    role_options.append(current_role)
+                new_role = st.selectbox(
+                    "Rol",
+                    role_options,
+                    index=role_options.index(current_role),
+                    key="adm_role_sel",
                 )
-                if pw1 or pw2:
-                    if not pw1 or pw1 != pw2:
-                        st.error("Contraseñas no coinciden o están vacías.")
-                        st.stop()
-                    if len(pw1) < 8:
-                        st.error("La contraseña debe tener al menos 8 caracteres.")
-                        st.stop()
-                    salt_b64, h_b64 = hash_password(pw1)
-                    execute(
-                        "UPDATE users SET salt_b64=?, pass_hash_b64=?, updated_at=datetime('now') WHERE id=?",
-                        (salt_b64, h_b64, int(uid)),
+                active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key="adm_active")
+            with c2:
+                st.markdown("**Empresa fija**")
+                _fixed_current = str(row.get("fixed_cliente_key") or "").strip()
+                _fix_options = ['']
+                _fix_map = {'': '— Sin empresa fija —'}
+                if scoped_mode:
+                    _tenant_view = str(tenant_key or '').strip()
+                    if _tenant_view:
+                        _fix_options.append(_tenant_view)
+                        _fix_map[_tenant_view] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_tenant_view,), default=_tenant_view) or _tenant_view)
+                else:
+                    _clients_df = visible_clientes_df()
+                    if _clients_df is None or _clients_df.empty:
+                        _clients_df = fetch_df("SELECT cliente_key, COALESCE(cliente_nombre, cliente_key) AS cliente_nombre FROM segav_erp_clientes WHERE activo=1 ORDER BY COALESCE(cliente_nombre, cliente_key)")
+                    if _clients_df is not None and not _clients_df.empty:
+                        for _, _rr in _clients_df.iterrows():
+                            _ck = str(_rr.get('cliente_key') or '').strip()
+                            if _ck and _ck not in _fix_map:
+                                _fix_options.append(_ck)
+                                _fix_map[_ck] = str(_rr.get('cliente_nombre') or _ck)
+                if _fixed_current and _fixed_current not in _fix_map:
+                    _fix_options.append(_fixed_current)
+                    _fix_map[_fixed_current] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_fixed_current,), default=_fixed_current) or _fixed_current)
+                if scoped_mode:
+                    new_fixed_company = _fixed_current if _fixed_current else str(tenant_key or '').strip()
+                    st.selectbox(
+                        "Empresa fija",
+                        _fix_options,
+                        index=_fix_options.index(new_fixed_company) if new_fixed_company in _fix_options else 0,
+                        format_func=lambda x: _fix_map.get(str(x), str(x)),
+                        disabled=True,
+                        key="adm_fixed_company_view",
                     )
-                auto_backup_db("users_update")
-                try:
-                    audit_log("EDITAR_USUARIO", "users", f"Usuario modificado: {row.get('username','?')} → rol={new_role} fijo={_fixed_to_save or '(sin fijo)'}")
-                except Exception as _exc:
-                    _record_soft_error("update.audit", _exc)
-                st.success("Cambios guardados.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar: {e}")
+                    fixed_enabled = bool(new_fixed_company)
+                    st.caption("Como admin de empresa solo puedes dejarlo fijo en la empresa activa.")
+                else:
+                    new_fixed_company = st.selectbox(
+                        "Empresa fija",
+                        _fix_options,
+                        index=_fix_options.index(_fixed_current) if _fixed_current in _fix_options else 0,
+                        format_func=lambda x: _fix_map.get(str(x), str(x)),
+                        key="adm_fixed_company_sel",
+                    )
+                    fixed_enabled = bool(str(new_fixed_company).strip())
+            with c3:
+                st.markdown("**Reset contraseña**")
+                pw1 = st.text_input("Nueva contraseña", type="password", key="adm_pw1")
+                pw2 = st.text_input("Repetir", type="password", key="adm_pw2")
+                st.markdown("**Eliminar**")
+                del_confirm = st.checkbox("Confirmo eliminar usuario", key="adm_del_confirm")
+                del_btn = st.button("Eliminar usuario", use_container_width=True, key="adm_del_btn")
 
-        if del_btn:
-            if not del_confirm:
-                st.error("Debes confirmar antes de eliminar.")
-                st.stop()
-            cu = current_user()
-            if cu and int(cu["id"]) == int(uid):
-                st.error("No puedes eliminar tu propio usuario.")
-                st.stop()
-            # Evita eliminar al último SUPERADMIN activo
-            if (row.get("role") or "").upper() == "SUPERADMIN" and superadmins_count(active_only=True) <= 1:
-                st.error("No puedes eliminar al último SUPERADMIN activo.")
-                st.stop()
-            # Evita eliminar al último ADMIN activo
-            if (row.get("role") or "").upper() == "ADMIN" and admins_count(active_only=True) <= 1:
-                st.error("No puedes eliminar al último ADMIN activo.")
-                st.stop()
-            try:
-                _uid_del = int(uid)
-                execute("DELETE FROM user_client_module_perms WHERE user_id=?", (_uid_del,))
-                execute("DELETE FROM user_client_access WHERE user_id=?", (_uid_del,))
-                execute("DELETE FROM legal_doc_approvals WHERE requested_by_user_id=? OR reviewed_by_user_id=?", (_uid_del, _uid_del))
-                execute("DELETE FROM users WHERE id=?", (_uid_del,))
-                _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0)
-                if int(_still_exists or 0) > 0:
-                    raise RuntimeError("El usuario sigue existiendo después del borrado.")
-                auto_backup_db("users_delete")
+            st.divider()
+            st.text_input("Usuario (RUT)", value=str(row.get("username") or ""), disabled=True, key="adm_user_rut_view")
+            st.markdown("### Poderes")
+            current_perms = perms_from_row(new_role, row.get("perms_json"))
+            cols = st.columns(3)
+            keys = list(DEFAULT_PERMS.keys())
+            new_perms = {}
+            super_mode = (new_role or "").upper() == "SUPERADMIN"
+            if super_mode:
+                st.info("El rol SUPERADMIN ve todas las funciones del ERP por defecto.")
+            for i, k in enumerate(keys):
+                with cols[i % 3]:
+                    new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}", disabled=super_mode)
+
+            if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
                 try:
-                    audit_log("ELIMINAR_USUARIO", "users", f"Usuario eliminado: {row.get('username','?')}")
-                except Exception as _exc:
-                    _record_soft_error("delete.audit", _exc)
-                st.success("Usuario eliminado correctamente.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo eliminar: {e}")
+                    # Seguridad: SUPERADMIN y ADMIN conservan acceso de administración
+                    if scoped_mode:
+                        if (new_role or '').upper() not in {'OPERADOR', 'LECTOR'}:
+                            st.error('En modo empresa solo puedes asignar roles OPERADOR o LECTOR.')
+                            st.stop()
+                        new_perms = ROLE_TEMPLATES.get((new_role or 'OPERADOR').upper(), ROLE_TEMPLATES['OPERADOR']).copy()
+                        new_perms['manage_users'] = False
+                    elif (new_role or "").upper() == "SUPERADMIN":
+                        new_perms = SUPERADMIN_PERMS.copy()
+                    elif (new_role or "").upper() == "ADMIN":
+                        new_perms["manage_users"] = True
+
+                    # Evita desactivar al último SUPERADMIN activo
+                    if (row.get("role") or "").upper() == "SUPERADMIN" and (not active) and superadmins_count(active_only=True) <= 1:
+                        st.error("No puedes desactivar al último SUPERADMIN activo.")
+                        st.stop()
+
+                    # Evita desactivar al último ADMIN activo cuando no es SUPERADMIN
+                    if (row.get("role") or "").upper() == "ADMIN" and (new_role or "").upper() != "SUPERADMIN" and (not active) and admins_count(active_only=True) <= 1:
+                        st.error("No puedes desactivar al último ADMIN activo.")
+                        st.stop()
+
+                    fixed_value = str(new_fixed_company or '').strip() if (not scoped_mode) else (str(new_fixed_company or '').strip() if fixed_enabled else '')
+                    if scoped_mode:
+                        fixed_value = str(tenant_key or '').strip() if fixed_enabled else ''
+                    if fixed_enabled and fixed_value:
+                        _exists_link = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), fixed_value), default=0)
+                        if int(_exists_link or 0) <= 0:
+                            now_assign = datetime.now().isoformat(timespec='seconds')
+                            role_empresa_assign = 'ADMIN' if scoped_mode else (str(new_role or row.get('role') or 'OPERADOR').upper())
+                            execute(
+                                "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                                (int(uid), fixed_value, 1 if scoped_mode else 0, role_empresa_assign, now_assign, now_assign),
+                            )
+
+                    execute(
+                        "UPDATE users SET role=?, perms_json=?, is_active=?, fixed_cliente_key=?, updated_at=datetime('now') WHERE id=?",
+                        (new_role, json.dumps(new_perms), 1 if active else 0, fixed_value or None, int(uid)),
+                    )
+                    if scoped_mode:
+                        execute(
+                            "UPDATE user_client_access SET role_empresa=?, is_company_admin=?, updated_at=? WHERE user_id=? AND cliente_key=?",
+                            (('ADMIN' if company_caps.get('role_empresa') == 'ADMIN' else new_role), 1 if company_caps.get('role_empresa') == 'ADMIN' else 0, datetime.now().isoformat(timespec='seconds'), int(uid), tenant_key),
+                        )
+                    if pw1 or pw2:
+                        if pw1 != pw2 or len(pw1) < 8:
+                            st.error("La nueva contraseña no coincide o es muy corta (mínimo 8).")
+                            st.stop()
+                        salt_b64, h_b64 = hash_password(pw1)
+                        execute("UPDATE users SET salt_b64=?, pass_hash_b64=?, password_must_change=1, updated_at=datetime('now') WHERE id=?", (salt_b64, h_b64, int(uid)))
+                    auto_backup_db("users_update")
+                    audit_log("EDITAR_USUARIO", "users", f"Usuario actualizado: {row.get('username','?')}")
+                    st.success("Usuario actualizado correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo guardar: {e}")
+
+            if del_btn:
+                if not del_confirm:
+                    st.warning("Marca la confirmación para eliminar.")
+                    st.stop()
+                cu = current_user()
+                if cu and int(cu["id"]) == int(uid):
+                    st.error("No puedes eliminar tu propio usuario.")
+                    st.stop()
+                # Evita eliminar al último SUPERADMIN activo
+                if (row.get("role") or "").upper() == "SUPERADMIN" and superadmins_count(active_only=True) <= 1:
+                    st.error("No puedes eliminar al último SUPERADMIN activo.")
+                    st.stop()
+                # Evita eliminar al último ADMIN activo
+                if (row.get("role") or "").upper() == "ADMIN" and admins_count(active_only=True) <= 1:
+                    st.error("No puedes eliminar al último ADMIN activo.")
+                    st.stop()
+                try:
+                    _uid_del = int(uid)
+                    execute("DELETE FROM user_client_module_perms WHERE user_id=?", (_uid_del,))
+                    execute("DELETE FROM user_client_access WHERE user_id=?", (_uid_del,))
+                    execute("DELETE FROM legal_doc_approvals WHERE requested_by_user_id=? OR reviewed_by_user_id=?", (_uid_del, _uid_del))
+                    execute("DELETE FROM users WHERE id=?", (_uid_del,))
+                    _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0)
+                    if int(_still_exists or 0) > 0:
+                        raise RuntimeError("El usuario sigue existiendo después del borrado.")
+                    auto_backup_db("users_delete")
+                    try:
+                        audit_log("ELIMINAR_USUARIO", "users", f"Usuario eliminado: {row.get('username','?')}")
+                    except Exception as _exc:
+                        _record_soft_error("delete.audit", _exc)
+                    st.success("Usuario eliminado correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo eliminar: {e}")
 
     with tab_perm:
         st.caption("Permisos por módulo para la empresa activa. Estos permisos sobrescriben lo base del usuario solo dentro de esta empresa.")
@@ -7267,7 +7271,7 @@ def page_admin_usuarios():
         fixed_to_company = True if scoped_mode else False
         target_company_admin = False
         with st.form("form_create_user", clear_on_submit=True):
-            username = st.text_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut", on_change=_format_session_rut_key, args=("create_user_rut",))
+            username = st.text_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut")
             role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
             if scoped_mode:
                 st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True)
@@ -7306,6 +7310,8 @@ def page_admin_usuarios():
             ok = st.form_submit_button("Crear usuario", type="primary", use_container_width=True)
 
         if ok:
+            username = format_rut(username)
+            st.session_state["create_user_rut"] = username
             # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
             if scoped_mode:
                 if (role or '').upper() not in {'OPERADOR', 'LECTOR'}:
