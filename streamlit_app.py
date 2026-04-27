@@ -207,7 +207,19 @@ def clear_app_caches():
     try:
         _cached_fetch_df.clear()
     except Exception as exc:
-        _record_soft_error("clear_app_caches", exc)
+        _record_soft_error("clear_app_caches.fetch_df", exc)
+    for _cache_fn, _label in [
+        (globals().get('get_segav_clientes_df'), 'segav_clientes_df'),
+        (globals().get('get_brand_logo_bytes'), 'brand_logo_bytes'),
+        (globals().get('get_login_logo_b64'), 'login_logo_b64'),
+        (globals().get('get_sidebar_kpis'), 'sidebar_kpis'),
+        (globals().get('get_sidebar_faena_context_df'), 'sidebar_faena_context'),
+    ]:
+        try:
+            if _cache_fn is not None and hasattr(_cache_fn, 'clear'):
+                _cache_fn.clear()
+        except Exception as exc:
+            _record_soft_error(f"clear_app_caches.{_label}", exc)
 
 
 def _df_with_columns(df, defaults: dict[str, object]):
@@ -3187,11 +3199,19 @@ def get_company_logo_bytes(cliente_key: str | None = None) -> bytes | None:
     try:
         row = current_client_row() if not cliente_key else {}
         if cliente_key and (not row or str(row.get('cliente_key') or '') != str(cliente_key)):
-            df = segav_clientes_df()
-            if df is not None and not df.empty:
-                hit = df[df['cliente_key'].astype(str) == str(cliente_key)]
-                if not hit.empty:
+            try:
+                hit = fetch_df(
+                    "SELECT cliente_key, logo_local_path, logo_bucket, logo_object_path FROM segav_erp_clientes WHERE cliente_key=? LIMIT 1",
+                    (str(cliente_key),),
+                )
+                if hit is not None and not hit.empty:
                     row = hit.iloc[0].to_dict()
+            except Exception:
+                df = segav_clientes_df()
+                if df is not None and not df.empty:
+                    hit = df[df['cliente_key'].astype(str) == str(cliente_key)]
+                    if not hit.empty:
+                        row = hit.iloc[0].to_dict()
         if row:
             lp = row.get('logo_local_path')
             bk = row.get('logo_bucket')
@@ -5170,8 +5190,7 @@ with st.sidebar:
     except Exception as _exc:
         _record_soft_error("select", _exc)
 
-    st.markdown('<div class="segav-sidebar-center" style="font-weight:700; margin:0.35rem 0 0.1rem 0;">Navegación</div>', unsafe_allow_html=True)
-    st.markdown('<div class="segav-sidehint">Accesos rápidos y secciones principales</div>', unsafe_allow_html=True)
+    st.markdown('<div class="segav-sidebar-center" style="font-weight:700; margin:0.35rem 0 0.1rem 0;">Secciones</div>', unsafe_allow_html=True)
 
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
@@ -5202,17 +5221,6 @@ with st.sidebar:
         if st.button(_label, key=f"sidebar_nav_{key_suffix}", use_container_width=True, disabled=_disabled):
             st.session_state["nav_page"] = page_name
             st.rerun()
-
-    with st.expander("⚡ Accesos rápidos", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            _sidebar_nav_button("Dashboard", "quick_dashboard")
-            _sidebar_nav_button("Faenas", "quick_faenas")
-            _sidebar_nav_button("Trabajadores", "quick_trabajadores")
-        with c2:
-            _sidebar_nav_button("Cumplimiento / Alertas", "quick_cumplimiento")
-            _sidebar_nav_button("Documentos Empresa", "quick_docs_emp")
-            _sidebar_nav_button("Export (ZIP)", "quick_export")
 
     with st.expander("🧭 Operación", expanded=st.session_state.get("nav_page") in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]):
         for _page in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]:

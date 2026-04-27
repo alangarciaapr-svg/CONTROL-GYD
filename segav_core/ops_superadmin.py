@@ -143,21 +143,49 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         st.markdown("### Modificar o desactivar empresa")
         cli_keys = cli_df["cliente_key"].astype(str).tolist() if cli_df is not None and not cli_df.empty else []
         if cli_keys:
-            edit_key = st.selectbox("Empresa a modificar", cli_keys, key="sa_edit_empresa", format_func=lambda x: str(cli_df[cli_df['cliente_key'].astype(str)==str(x)].iloc[0]['cliente_nombre']))
+            def _load_selected_company_for_edit():
+                _ek = str(st.session_state.get("sa_edit_empresa") or "")
+                if not _ek:
+                    return
+                _hit = cli_df[cli_df["cliente_key"].astype(str) == _ek]
+                if _hit is None or _hit.empty:
+                    return
+                _row = _hit.iloc[0].to_dict()
+                st.session_state["sa_edit_loaded_empresa"] = _ek
+                st.session_state["sa_edit_nombre"] = str(_row.get("cliente_nombre") or "")
+                st.session_state["sa_edit_rut"] = str(_row.get("rut") or "")
+                st.session_state["sa_edit_vertical"] = str(_row.get("vertical") or "")
+                st.session_state["sa_edit_contacto"] = str(_row.get("contacto") or "")
+                st.session_state["sa_edit_email"] = str(_row.get("email") or "")
+                st.session_state["sa_edit_obs"] = str(_row.get("observaciones") or "")
+                st.session_state["sa_edit_activa"] = "ACTIVA" if int(_row.get("activo") or 0) == 1 else "INACTIVA"
+                st.session_state["sa_edit_impl"] = str(_row.get("modo_implementacion") or "CONFIGURABLE")
+
+            edit_key = st.selectbox(
+                "Empresa a modificar",
+                cli_keys,
+                key="sa_edit_empresa",
+                format_func=lambda x: str(cli_df[cli_df['cliente_key'].astype(str)==str(x)].iloc[0]['cliente_nombre']),
+                on_change=_load_selected_company_for_edit,
+            )
             row = cli_df[cli_df["cliente_key"].astype(str) == str(edit_key)].iloc[0].to_dict()
+            loaded_key = str(st.session_state.get("sa_edit_loaded_empresa") or "")
+            if loaded_key != str(edit_key):
+                _load_selected_company_for_edit()
+                row = cli_df[cli_df["cliente_key"].astype(str) == str(edit_key)].iloc[0].to_dict()
             e1, e2, e3 = st.columns(3)
-            edit_name = e1.text_input("Nombre empresa", value=str(row.get("cliente_nombre") or ""), key="sa_edit_nombre")
-            edit_rut = e2.text_input("RUT", value=str(row.get("rut") or ""), key="sa_edit_rut")
-            edit_vertical = e3.text_input("Rubro", value=str(row.get("vertical") or ""), key="sa_edit_vertical", help="Rubro o tipo de empresa.")
+            edit_name = e1.text_input("Nombre empresa", key="sa_edit_nombre")
+            edit_rut = e2.text_input("RUT", key="sa_edit_rut")
+            edit_vertical = e3.text_input("Rubro", key="sa_edit_vertical", help="Rubro o tipo de empresa.")
             e4, e5, e6 = st.columns(3)
             impl_options = IMPLEMENTATION_OPTIONS.copy()
-            current_impl = str(row.get("modo_implementacion") or "CONFIGURABLE")
+            current_impl = str(st.session_state.get("sa_edit_impl") or row.get("modo_implementacion") or "CONFIGURABLE")
             if current_impl not in impl_options:
                 impl_options.append(current_impl)
             edit_impl = e4.selectbox("Tipo de inicio", impl_options, index=impl_options.index(current_impl), key="sa_edit_impl", format_func=impl_label, help="Define si la empresa parte desde cero, con configuración base o en modo demo.")
-            edit_contact = e5.text_input("Contacto", value=str(row.get("contacto") or ""), key="sa_edit_contacto")
-            edit_email = e6.text_input("Email", value=str(row.get("email") or ""), key="sa_edit_email")
-            edit_obs = st.text_area("Observaciones", value=str(row.get("observaciones") or ""), key="sa_edit_obs", height=80)
+            edit_contact = e5.text_input("Contacto", key="sa_edit_contacto")
+            edit_email = e6.text_input("Email", key="sa_edit_email")
+            edit_obs = st.text_area("Observaciones", key="sa_edit_obs", height=80)
             current_logo = None
             try:
                 current_logo = get_company_logo_bytes(str(edit_key))
@@ -166,8 +194,8 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             if current_logo:
                 st.image(current_logo, width=180)
             edit_logo = st.file_uploader("Cargar o reemplazar logo", type=['png','jpg','jpeg','webp'], key=f'sa_edit_logo_{edit_key}')
-            active_now = int(row.get("activo") or 0) == 1
-            active_flag = st.selectbox("Estado", ["ACTIVA", "INACTIVA"], index=0 if active_now else 1, key="sa_edit_activa")
+            active_now = str(st.session_state.get("sa_edit_activa") or ("ACTIVA" if int(row.get("activo") or 0) == 1 else "INACTIVA"))
+            active_flag = st.selectbox("Estado", ["ACTIVA", "INACTIVA"], index=0 if active_now == "ACTIVA" else 1, key="sa_edit_activa")
             col_a, col_b = st.columns([1,1])
             with col_a:
                 if st.button("Guardar cambios de la empresa", key="sa_btn_guardar_empresa"):
