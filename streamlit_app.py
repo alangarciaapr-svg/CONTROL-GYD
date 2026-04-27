@@ -3760,11 +3760,16 @@ def ensure_users_table():
                 role TEXT NOT NULL DEFAULT 'OPERADOR',
                 perms_json TEXT,
                 is_active BIGINT NOT NULL DEFAULT 1,
+                fixed_cliente_key TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
             """
         )
+        try:
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS fixed_cliente_key TEXT")
+        except Exception as _exc:
+            _record_soft_error("users.fixed_cliente_key.pg", _exc)
         execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         return
 
@@ -3778,11 +3783,17 @@ def ensure_users_table():
             role TEXT NOT NULL DEFAULT 'OPERADOR',
             perms_json TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
+            fixed_cliente_key TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """
     )
+    try:
+        with conn() as c:
+            migrate_add_columns_if_missing(c, 'users', {'fixed_cliente_key': 'TEXT'})
+    except Exception as _exc:
+        _record_soft_error("users.fixed_cliente_key.sqlite", _exc)
     execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
 def ensure_storage_columns_postgres():
@@ -3975,6 +3986,7 @@ def auth_set_session(user_row: dict):
         "id": int(user_row["id"]),
         "username": str(user_row["username"]),
         "role": str(user_row.get("role") or "OPERADOR"),
+        "fixed_cliente_key": str(user_row.get("fixed_cliente_key") or "").strip(),
         "perms": perms_from_row(str(user_row.get("role") or "OPERADOR"), user_row.get("perms_json")),
     }
 
@@ -4451,12 +4463,18 @@ def visible_clientes_df():
     if is_superadmin():
         return df
     u = current_user() or {}
+    fixed_client = str(u.get("fixed_cliente_key") or "").strip()
+    if fixed_client:
+        return filter_visible_clientes_df_core(df, [fixed_client], is_superadmin=False)
     allowed = allowed_client_keys_for_user_core(fetch_df, int(u.get("id") or 0), str(u.get("role") or "OPERADOR"))
     return filter_visible_clientes_df_core(df, allowed, is_superadmin=False)
 
 
 def current_user_allowed_client_keys() -> list[str] | None:
     u = current_user() or {}
+    fixed_client = str(u.get("fixed_cliente_key") or "").strip()
+    if fixed_client:
+        return [fixed_client]
     return allowed_client_keys_for_user_core(fetch_df, int(u.get("id") or 0), str(u.get("role") or "OPERADOR"))
 
 
@@ -4911,17 +4929,23 @@ with st.sidebar:
                     _current_cli = _cli_keys[0]
                 _cli_name_map = {str(r["cliente_key"]): str(r["cliente_nombre"]) for _, r in _cli_df.iterrows()}
                 _cli_row_map = {str(r["cliente_key"]): r for _, r in _cli_df.iterrows()}
-                _cli_selected = st.selectbox(
-                    "Empresa activa",
-                    _cli_keys,
-                    index=_cli_keys.index(_current_cli),
-                    key="sidebar_cliente_activo",
-                    format_func=lambda x: _cli_name_map.get(str(x), str(x)),
-                )
-                if _cli_selected != _current_cli:
+                _fixed_cli = str((current_user() or {}).get('fixed_cliente_key') or '').strip()
+                if len(_cli_keys) == 1 or (_fixed_cli and _fixed_cli in _cli_keys):
+                    _cli_selected = _fixed_cli if (_fixed_cli and _fixed_cli in _cli_keys) else _current_cli
                     st.session_state['active_cliente_key'] = _cli_selected
-                    clear_app_caches()
-                    st.rerun()
+                    st.caption("Empresa fija para este usuario")
+                else:
+                    _cli_selected = st.selectbox(
+                        "Empresa activa",
+                        _cli_keys,
+                        index=_cli_keys.index(_current_cli),
+                        key="sidebar_cliente_activo",
+                        format_func=lambda x: _cli_name_map.get(str(x), str(x)),
+                    )
+                    if _cli_selected != _current_cli:
+                        st.session_state['active_cliente_key'] = _cli_selected
+                        clear_app_caches()
+                        st.rerun()
                 _current_row = _cli_row_map.get(str(_cli_selected), _cli_df.iloc[0])
                 _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
                 st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
@@ -6865,9 +6889,16 @@ def page_admin_usuarios():
         if scoped_mode:
             df = fetch_df(
                 """
-                SELECT DISTINCT u.id, u.username, u.role, u.is_active, u.created_at, u.updated_at
+                SELECT DISTINCT u.id,
+                       u.username,
+                       u.role,
+                       u.is_active,
+                       COALESCE(cf.cliente_nombre, u.fixed_cliente_key, '') AS empresa_fija,
+                       u.created_at,
+                       u.updated_at
                   FROM users u
                   JOIN user_client_access a ON a.user_id=u.id
+             LEFT JOIN segav_erp_clientes cf ON cf.cliente_key=u.fixed_cliente_key
                  WHERE a.cliente_key=?
                  ORDER BY u.id DESC
                 """,
@@ -6875,7 +6906,20 @@ def page_admin_usuarios():
             )
             st.caption(f"Gestión acotada a la empresa activa: {tenant_key}")
         else:
-            df = fetch_df("SELECT id, username, role, is_active, created_at, updated_at FROM users ORDER BY id DESC")
+            df = fetch_df(
+                """
+                SELECT u.id,
+                       u.username,
+                       u.role,
+                       u.is_active,
+                       COALESCE(cf.cliente_nombre, u.fixed_cliente_key, '') AS empresa_fija,
+                       u.created_at,
+                       u.updated_at
+                  FROM users u
+             LEFT JOIN segav_erp_clientes cf ON cf.cliente_key=u.fixed_cliente_key
+                 ORDER BY u.id DESC
+                """
+            )
         if df.empty:
             st.info("No hay usuarios.")
             return
@@ -6913,10 +6957,63 @@ def page_admin_usuarios():
             )
             active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key="adm_active")
         with c2:
+            st.markdown("**Empresa fija**")
+            _fixed_current = str(row.get("fixed_cliente_key") or "").strip()
+            _user_clients_df = fetch_df(
+                """
+                SELECT a.cliente_key,
+                       COALESCE(c.cliente_nombre, a.cliente_key) AS cliente_nombre
+                  FROM user_client_access a
+             LEFT JOIN segav_erp_clientes c ON c.cliente_key=a.cliente_key
+                 WHERE a.user_id=?
+                 ORDER BY COALESCE(c.cliente_nombre, a.cliente_key)
+                """,
+                (int(uid),),
+            )
+            _fix_options = ['']
+            _fix_map = {'': '— Sin empresa fija —'}
+            if _user_clients_df is not None and not _user_clients_df.empty:
+                for _, _rr in _user_clients_df.iterrows():
+                    _ck = str(_rr.get('cliente_key') or '').strip()
+                    if _ck and _ck not in _fix_map:
+                        _fix_options.append(_ck)
+                        _fix_map[_ck] = str(_rr.get('cliente_nombre') or _ck)
+            elif scoped_mode and str(tenant_key or '').strip():
+                _fix_options.append(str(tenant_key))
+                _fix_map[str(tenant_key)] = str(tenant_key)
+            if _fixed_current and _fixed_current not in _fix_map:
+                _fix_options.append(_fixed_current)
+                _fix_map[_fixed_current] = _fixed_current
+            _fix_disabled = False
+            if scoped_mode:
+                _fix_disabled = True
+                if str(tenant_key or '').strip() and str(tenant_key) not in _fix_map:
+                    _fix_options.append(str(tenant_key))
+                    _fix_map[str(tenant_key)] = str(tenant_key)
+                new_fixed_company = _fixed_current if _fixed_current else str(tenant_key or '').strip()
+                st.selectbox(
+                    "Empresa fija",
+                    _fix_options,
+                    index=_fix_options.index(new_fixed_company) if new_fixed_company in _fix_options else 0,
+                    format_func=lambda x: _fix_map.get(str(x), str(x)),
+                    disabled=True,
+                    key="adm_fixed_company_view",
+                )
+                fixed_enabled = bool(new_fixed_company)
+                st.caption("Como admin de empresa solo puedes dejarlo fijo en la empresa activa.")
+            else:
+                new_fixed_company = st.selectbox(
+                    "Empresa fija",
+                    _fix_options,
+                    index=_fix_options.index(_fixed_current) if _fixed_current in _fix_options else 0,
+                    format_func=lambda x: _fix_map.get(str(x), str(x)),
+                    key="adm_fixed_company_sel",
+                )
+                fixed_enabled = bool(str(new_fixed_company).strip())
+        with c3:
             st.markdown("**Reset contraseña**")
             pw1 = st.text_input("Nueva contraseña", type="password", key="adm_pw1")
             pw2 = st.text_input("Repetir", type="password", key="adm_pw2")
-        with c3:
             st.markdown("**Eliminar**")
             del_confirm = st.checkbox("Confirmo eliminar usuario", key="adm_del_confirm")
             del_btn = st.button("Eliminar usuario", use_container_width=True, key="adm_del_btn")
@@ -6958,9 +7055,20 @@ def page_admin_usuarios():
                     st.error("No puedes desactivar al último ADMIN activo.")
                     st.stop()
 
+                _fixed_to_save = str(new_fixed_company or '').strip()
+                if scoped_mode:
+                    _fixed_to_save = str(tenant_key or '').strip()
+                if _fixed_to_save:
+                    _has_access = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), _fixed_to_save), default=0)
+                    if int(_has_access or 0) <= 0:
+                        _now_assign = datetime.now().isoformat(timespec='seconds')
+                        execute(
+                            "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                            (int(uid), _fixed_to_save, 0, new_role, _now_assign, _now_assign),
+                        )
                 execute(
-                    "UPDATE users SET role=?, perms_json=?, is_active=?, updated_at=datetime('now') WHERE id=?",
-                    (new_role, json.dumps(new_perms), 1 if active else 0, int(uid)),
+                    "UPDATE users SET role=?, perms_json=?, is_active=?, fixed_cliente_key=?, updated_at=datetime('now') WHERE id=?",
+                    (new_role, json.dumps(new_perms), 1 if active else 0, (_fixed_to_save or None), int(uid)),
                 )
                 if pw1 or pw2:
                     if not pw1 or pw1 != pw2:
@@ -6976,7 +7084,7 @@ def page_admin_usuarios():
                     )
                 auto_backup_db("users_update")
                 try:
-                    audit_log("EDITAR_USUARIO", "users", f"Usuario modificado: {row.get('username','?')} → rol={new_role}")
+                    audit_log("EDITAR_USUARIO", "users", f"Usuario modificado: {row.get('username','?')} → rol={new_role} fijo={_fixed_to_save or '(sin fijo)'}")
                 except Exception as _exc:
                     _record_soft_error("update.audit", _exc)
                 st.success("Cambios guardados.")
@@ -7039,9 +7147,37 @@ def page_admin_usuarios():
                     st.rerun()
 
     with tab2:
+        target_company_key = tenant_key if scoped_mode else ''
+        target_company_name = tenant_key if scoped_mode else ''
+        fixed_to_company = True if scoped_mode else False
+        target_company_admin = False
         with st.form("form_create_user", clear_on_submit=True):
             username = st.text_input("Usuario", placeholder="ej: operador1")
             role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
+            if scoped_mode:
+                st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True)
+                st.caption("Este usuario quedará asociado solo a la empresa activa.")
+            else:
+                _cli_df_create = visible_clientes_df() if is_superadmin() else pd.DataFrame()
+                if _cli_df_create is not None and not _cli_df_create.empty:
+                    _create_keys = _cli_df_create['cliente_key'].astype(str).tolist()
+                    _create_name_map = {str(r['cliente_key']): str(r['cliente_nombre']) for _, r in _cli_df_create.iterrows()}
+                    target_company_key = st.selectbox(
+                        "Empresa a asignar",
+                        [''] + _create_keys,
+                        index=0,
+                        format_func=lambda x: '— Sin asignar ahora —' if not str(x).strip() else _create_name_map.get(str(x), str(x)),
+                        key='create_user_company_key',
+                    )
+                    target_company_name = _create_name_map.get(str(target_company_key), str(target_company_key)) if str(target_company_key).strip() else ''
+                fixed_to_company = st.checkbox(
+                    "Dejar usuario fijo solo a esa empresa",
+                    value=bool(str(target_company_key).strip()),
+                    key='create_user_fixed_company',
+                    help='Si está activo, el usuario solo podrá entrar y ver la información de esa empresa.',
+                )
+                if str(target_company_key).strip():
+                    target_company_admin = st.checkbox('Administrar esa empresa', value=False, key='create_user_company_admin')
             pw1 = st.text_input("Contraseña", type="password")
             pw2 = st.text_input("Repetir contraseña", type="password")
             st.markdown("#### Poderes")
@@ -7078,28 +7214,38 @@ def page_admin_usuarios():
                 st.error("La contraseña debe tener al menos 8 caracteres.")
                 st.stop()
             try:
+                assign_company_key = str(target_company_key or '').strip() if not scoped_mode else str(tenant_key or '').strip()
+                user_fixed_company_key = assign_company_key if (scoped_mode or fixed_to_company) else ''
+                if (scoped_mode or fixed_to_company) and not assign_company_key:
+                    st.error('Debes seleccionar una empresa para dejar fijo el usuario.')
+                    st.stop()
                 salt_b64, h_b64 = hash_password(pw1)
                 execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active) VALUES(?,?,?,?,?,1)",
-                    (u, salt_b64, h_b64, role, json.dumps(perms)),
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key) VALUES(?,?,?,?,?,?,?)",
+                    (u, salt_b64, h_b64, role, json.dumps(perms), 1, user_fixed_company_key or None),
                 )
-                if scoped_mode:
+                if scoped_mode or assign_company_key:
                     new_user_id = int(fetch_value("SELECT id FROM users WHERE username=?", (u,), default=0) or 0)
                     now_assign = datetime.now().isoformat(timespec='seconds')
                     execute(
                         "DELETE FROM user_client_access WHERE user_id=? AND cliente_key=?",
-                        (new_user_id, tenant_key),
+                        (new_user_id, assign_company_key),
                     )
                     execute(
                         "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                        (new_user_id, tenant_key, 0, role, now_assign, now_assign),
+                        (new_user_id, assign_company_key, 1 if (not scoped_mode and bool(target_company_admin)) else 0, ('ADMIN' if (not scoped_mode and bool(target_company_admin)) else role), now_assign, now_assign),
                     )
                 auto_backup_db("users_create")
                 try:
-                    audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role}")
+                    audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role} empresa={assign_company_key or '(sin asignar)'} fijo={'SI' if user_fixed_company_key else 'NO'}")
                 except Exception as _exc:
                     _record_soft_error("backup.audit", _exc)
-                st.success("Usuario creado.")
+                if user_fixed_company_key:
+                    st.success(f"Usuario creado y fijado a la empresa {target_company_name or user_fixed_company_key}.")
+                elif assign_company_key:
+                    st.success(f"Usuario creado y asociado a la empresa {target_company_name or assign_company_key}.")
+                else:
+                    st.success("Usuario creado.")
                 st.rerun()
             except Exception as e:
                 msg = str(e).upper()
