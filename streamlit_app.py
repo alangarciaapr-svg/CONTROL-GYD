@@ -27,6 +27,7 @@ from urllib.parse import quote
 import json
 import secrets
 import unicodedata
+import uuid
 
 from segav_core.compliance_logic import pendientes_empresa_faena_logic, pendientes_obligatorios_logic
 from segav_core.error_handling import get_soft_errors as _get_soft_errors, record_soft_error as _record_soft_error
@@ -148,6 +149,12 @@ elif PG_DSN and psycopg is not None:
     DB_BACKEND = "postgres"
 else:
     DB_BACKEND = "sqlite"
+
+SEGAV_ENV = str(_get_cfg("SEGAV_ENV", _get_cfg("APP_ENV", "development")) or "development").strip().lower()
+SEGAV_REQUIRE_POSTGRES_IN_PRODUCTION = str(_get_cfg("SEGAV_REQUIRE_POSTGRES_IN_PRODUCTION", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+if SEGAV_ENV in {"prod", "production", "produccion"} and SEGAV_REQUIRE_POSTGRES_IN_PRODUCTION and DB_BACKEND != "postgres":
+    st.error("Modo producción requiere PostgreSQL. Configura SEGAV_DB_BACKEND=postgres y un DSN válido antes de usar la app.")
+    st.stop()
 
 @st.cache_resource(show_spinner=False)
 def get_http_session():
@@ -3227,9 +3234,21 @@ def render_current_company_logo(width: int = 180):
     row = current_client_row()
     logo = get_company_logo_bytes(str(row.get('cliente_key') or '')) if row else None
     if logo:
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            st.image(logo, width=width)
+        b64 = base64.b64encode(logo).decode('ascii')
+        st.markdown(
+            f'<div class="segav-sidebar-center" style="margin:0 0 8px 0;">'
+            f'<img src="data:image/png;base64,{b64}" style="width:{int(width)}px;height:auto;display:block;margin:0 auto;" alt="Logo empresa activa">'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        return True
+    return False
+
+
+def render_sidebar_top_logo(width: int = 170):
+    if render_current_company_logo(width=width):
+        return
+    render_brand_logo(width=width)
 
 
 def current_segav_client_key() -> str:
@@ -4145,6 +4164,106 @@ def ensure_superadmin_exists():
         _record_soft_error("execute.update", _exc)
 
 
+def ensure_user_sessions_table():
+    if DB_BACKEND == "postgres":
+        execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            cliente_key TEXT NULL,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            app_env TEXT NULL
+        )
+        """)
+    else:
+        execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            cliente_key TEXT NULL,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            app_env TEXT NULL
+        )
+        """)
+    try:
+        execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id)")
+        execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_tenant ON user_sessions(cliente_key, is_active, last_seen_at)")
+    except Exception as _exc:
+        _record_soft_error("user_sessions.indexes", _exc)
+
+
+def _current_session_id() -> str:
+    sid = str(st.session_state.get("_segav_session_id") or "").strip()
+    if not sid:
+        sid = uuid.uuid4().hex
+        st.session_state["_segav_session_id"] = sid
+    return sid
+
+
+def touch_user_session(cliente_key: str | None = None):
+    u = current_user()
+    if not u:
+        return
+    ensure_user_sessions_table()
+    sid = _current_session_id()
+    ck = str(cliente_key or current_tenant_key() or st.session_state.get('active_cliente_key') or '').strip() or None
+    params_select = (sid,)
+    exists = int(fetch_value("SELECT COUNT(*) FROM user_sessions WHERE session_id=?", params_select, default=0) or 0)
+    if exists > 0:
+        execute(
+            "UPDATE user_sessions SET user_id=?, username=?, cliente_key=?, last_seen_at=CURRENT_TIMESTAMP, is_active=1, app_env=? WHERE session_id=?",
+            (int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV, sid),
+        )
+    else:
+        execute(
+            "INSERT INTO user_sessions(session_id, user_id, username, cliente_key, started_at, last_seen_at, is_active, app_env) VALUES(?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,1,?)",
+            (sid, int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV),
+        )
+
+
+def close_user_session():
+    sid = str(st.session_state.get("_segav_session_id") or "").strip()
+    if not sid:
+        return
+    try:
+        ensure_user_sessions_table()
+        execute("UPDATE user_sessions SET is_active=0, last_seen_at=CURRENT_TIMESTAMP WHERE session_id=?", (sid,))
+    except Exception as _exc:
+        _record_soft_error("user_sessions.close", _exc)
+
+
+def get_active_sessions_summary(cliente_key: str | None = None, minutes: int = 20):
+    ensure_user_sessions_table()
+    ck = str(cliente_key or '').strip()
+    mins = max(1, int(minutes or 20))
+    if DB_BACKEND == 'postgres':
+        if ck:
+            total = int(fetch_value(f"SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes')", (ck,), default=0) or 0)
+            users = int(fetch_value(f"SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes')", (ck,), default=0) or 0)
+            rows = fetch_df(f"SELECT username, MAX(last_seen_at) AS last_seen_at, COUNT(DISTINCT session_id) AS sesiones FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes') GROUP BY username ORDER BY MAX(last_seen_at) DESC LIMIT 10", (ck,))
+        else:
+            total = int(fetch_value(f"SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE is_active=1 AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes')", (), default=0) or 0)
+            users = int(fetch_value(f"SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE is_active=1 AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes')", (), default=0) or 0)
+            rows = fetch_df(f"SELECT username, MAX(last_seen_at) AS last_seen_at, COUNT(DISTINCT session_id) AS sesiones FROM user_sessions WHERE is_active=1 AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes') GROUP BY username ORDER BY MAX(last_seen_at) DESC LIMIT 10")
+    else:
+        interval_sql = f"-{mins} minutes"
+        if ck:
+            total = int(fetch_value("SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= datetime('now', ?)", (ck, interval_sql), default=0) or 0)
+            users = int(fetch_value("SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= datetime('now', ?)", (ck, interval_sql), default=0) or 0)
+            rows = fetch_df("SELECT username, MAX(last_seen_at) AS last_seen_at, COUNT(DISTINCT session_id) AS sesiones FROM user_sessions WHERE is_active=1 AND cliente_key=? AND last_seen_at >= datetime('now', ?) GROUP BY username ORDER BY MAX(last_seen_at) DESC LIMIT 10", (ck, interval_sql))
+        else:
+            total = int(fetch_value("SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE is_active=1 AND last_seen_at >= datetime('now', ?)", (interval_sql,), default=0) or 0)
+            users = int(fetch_value("SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE is_active=1 AND last_seen_at >= datetime('now', ?)", (interval_sql,), default=0) or 0)
+            rows = fetch_df("SELECT username, MAX(last_seen_at) AS last_seen_at, COUNT(DISTINCT session_id) AS sesiones FROM user_sessions WHERE is_active=1 AND last_seen_at >= datetime('now', ?) GROUP BY username ORDER BY MAX(last_seen_at) DESC LIMIT 10", (interval_sql,))
+    return {"sessions": total, "users": users, "rows": rows}
+
+
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
         "id": int(user_row["id"]),
@@ -4157,8 +4276,13 @@ def auth_set_session(user_row: dict):
         "cargo": str(user_row.get("cargo") or "").strip(),
         "perms": perms_from_row(str(user_row.get("role") or "OPERADOR"), user_row.get("perms_json")),
     }
+    try:
+        touch_user_session(str(user_row.get("fixed_cliente_key") or '').strip())
+    except Exception as _exc:
+        _record_soft_error("user_sessions.touch_login", _exc)
 
 def auth_logout():
+    close_user_session()
     st.session_state.pop("auth_user", None)
     st.rerun()
 
@@ -5132,12 +5256,18 @@ if st.session_state.get("nav_page") not in VISIBLE_PAGES:
     st.session_state["nav_page"] = VISIBLE_PAGES[0] if VISIBLE_PAGES else "Dashboard"
 ensure_ui_tenant_access()
 
+try:
+    if current_user():
+        touch_user_session(current_tenant_key())
+except Exception as _exc:
+    _record_soft_error("user_sessions.touch", _exc)
+
 with st.sidebar:
-    # Branding compacto
+    # Branding compacto: usa logo de empresa activa si existe; si no, usa marca SEGAV
     try:
-        render_brand_logo(width=170)
+        render_sidebar_top_logo(width=170)
     except Exception as exc:
-        _record_soft_error("sidebar.render_brand_logo", exc)
+        _record_soft_error("sidebar.render_top_logo", exc)
     st.markdown('<div class="segav-sidebar-center"><h3 style="margin:0;">SEGAV ERP</h3></div>', unsafe_allow_html=True)
     u = current_user()
     if u:
@@ -5185,6 +5315,9 @@ with st.sidebar:
                         with st.expander('Últimas faenas', expanded=False):
                             for _lbl in _faenas_recent['Etiqueta'].tolist():
                                 st.caption(_lbl)
+                    if is_superadmin():
+                        _sess = get_active_sessions_summary(str(_cli_selected), minutes=20)
+                        st.markdown(f"""<div class="segav-sidecard segav-sidebar-center"><div style="font-weight:700; margin-bottom:0.15rem;">Usuarios conectados</div><div class="segav-sidegrid"><div class="segav-sidepill"><strong>{int(_sess.get('users', 0))}</strong><span>Usuarios</span></div><div class="segav-sidepill"><strong>{int(_sess.get('sessions', 0))}</strong><span>Sesiones</span></div></div></div>""", unsafe_allow_html=True)
                 except Exception as _exc2:
                     _record_soft_error("sidebar.kpis", _exc2)
     except Exception as _exc:
@@ -5697,8 +5830,26 @@ def _page_asignar_trabajadores_impl():
                 st.rerun()
 
     # ---------------------------------
-    # Tab 2: importar Excel y asignar
+    # Sesiones (solo SUPERADMIN)
     # ---------------------------------
+    if tab_sessions is not None:
+        with tab_sessions:
+            try:
+                sess_summary = get_active_sessions_summary(tenant_key if scoped_mode else str(current_tenant_key() or tenant_key or '').strip(), minutes=20)
+                st.metric("Usuarios conectados (20 min)", int(sess_summary.get("users", 0)))
+                st.metric("Sesiones activas (20 min)", int(sess_summary.get("sessions", 0)))
+                sess_df = sess_summary.get("rows")
+                if sess_df is not None and not sess_df.empty:
+                    st.dataframe(sess_df.rename(columns={"username":"rut_usuario","last_seen_at":"ultima_actividad","sesiones":"sesiones"}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No hay sesiones activas recientes para la empresa visible.")
+                if DB_BACKEND == 'sqlite':
+                    st.warning("Backend actual: SQLite. Recomendado solo para pocos usuarios simultáneos por empresa.")
+                else:
+                    st.success("Backend actual: PostgreSQL. Apto para operación multiusuario real.")
+            except Exception as e:
+                st.error(f"No fue posible cargar las sesiones activas: {e}")
+
     if tab3 is not None:
         with tab3:
             st.caption(f"Bitácora visible para la empresa activa: {tenant_key}")
@@ -7204,11 +7355,17 @@ def page_admin_usuarios():
         st.stop()
 
     tab_labels = ["👥 Usuarios", "➕ Crear usuario", "🧩 Permisos empresa"]
+    if is_superadmin():
+        tab_labels.append("🟢 Sesiones")
     if company_caps.get('can_view_audit'):
         tab_labels.append("🧾 Auditoría empresa")
     _tabs = st.tabs(tab_labels)
     tab1, tab2, tab_perm = _tabs[0], _tabs[1], _tabs[2]
-    tab3 = _tabs[3] if len(_tabs) > 3 else None
+    _tab_idx = 3
+    tab_sessions = _tabs[_tab_idx] if is_superadmin() else None
+    if is_superadmin():
+        _tab_idx += 1
+    tab3 = _tabs[_tab_idx] if len(_tabs) > _tab_idx else None
 
     with tab1:
         if scoped_mode:
