@@ -4164,6 +4164,53 @@ def ensure_superadmin_exists():
         _record_soft_error("execute.update", _exc)
 
 
+def _safe_table_columns(table: str) -> set:
+    """Devuelve columnas existentes de una tabla sin romper si la tabla/columna no existe."""
+    table = str(table or '').strip()
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', table):
+        return set()
+    try:
+        if DB_BACKEND == 'postgres':
+            df_cols = fetch_df(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name=?",
+                (table,),
+            )
+            if df_cols is None or df_cols.empty or 'column_name' not in df_cols.columns:
+                return set()
+            return {str(x) for x in df_cols['column_name'].dropna().tolist()}
+        with conn() as c:
+            rows = c.execute(f"PRAGMA table_info({table});").fetchall()
+        return {str(row[1]) for row in rows}
+    except Exception as _exc:
+        _record_soft_error(f"columns.{table}", _exc)
+        return set()
+
+
+def _cleanup_user_references_before_delete(user_id: int):
+    """Limpia vínculos del usuario antes de borrarlo, compatible con esquemas antiguos.
+
+    En legal_doc_approvals preserva el historial legal y solo desasocia IDs de usuario
+    si esas columnas existen. Evita errores por columnas inexistentes en bases migradas.
+    """
+    uid = int(user_id)
+
+    for table_name in ('user_client_module_perms', 'user_client_access', 'user_sessions'):
+        cols = _safe_table_columns(table_name)
+        if 'user_id' in cols:
+            execute(f"DELETE FROM {table_name} WHERE user_id=?", (uid,))
+
+    legal_cols = _safe_table_columns('legal_doc_approvals')
+    for col in ('requested_by', 'reviewed_by', 'requested_by_user_id', 'reviewed_by_user_id'):
+        if col in legal_cols:
+            try:
+                if 'updated_at' in legal_cols:
+                    execute(f"UPDATE legal_doc_approvals SET {col}=NULL, updated_at=datetime('now') WHERE {col}=?", (uid,))
+                else:
+                    execute(f"UPDATE legal_doc_approvals SET {col}=NULL WHERE {col}=?", (uid,))
+            except Exception as _exc:
+                _record_soft_error(f"delete_user.legal_cleanup.{col}", _exc)
+
+
 def ensure_user_sessions_table():
     if DB_BACKEND == "postgres":
         execute("""
@@ -7593,9 +7640,7 @@ def page_admin_usuarios():
                     st.stop()
                 try:
                     _uid_del = int(uid)
-                    execute("DELETE FROM user_client_module_perms WHERE user_id=?", (_uid_del,))
-                    execute("DELETE FROM user_client_access WHERE user_id=?", (_uid_del,))
-                    execute("DELETE FROM legal_doc_approvals WHERE requested_by_user_id=? OR reviewed_by_user_id=?", (_uid_del, _uid_del))
+                    _cleanup_user_references_before_delete(_uid_del)
                     execute("DELETE FROM users WHERE id=?", (_uid_del,))
                     _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0)
                     if int(_still_exists or 0) > 0:
