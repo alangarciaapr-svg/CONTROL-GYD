@@ -1088,6 +1088,20 @@ div.stButton > button {
 }
 /* Sidebar spacing */
 section[data-testid="stSidebar"] .block-container {padding-top: 1rem;}
+section[data-testid="stSidebar"] .block-container {display:flex; flex-direction:column; align-items:stretch; padding-left:0.7rem; padding-right:0.7rem;}
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] .stCaption,
+section[data-testid="stSidebar"] label {text-align:center !important;}
+section[data-testid="stSidebar"] .segav-sidebar-center {text-align:center !important; justify-content:center !important;}
+section[data-testid="stSidebar"] .segav-sidecard {border:1px solid rgba(49,51,63,0.10); border-radius:18px; padding:12px 14px; background:linear-gradient(180deg, rgba(255,255,255,0.86), rgba(248,250,252,0.92)); box-shadow:0 10px 26px rgba(15,23,42,0.07); margin:0.25rem 0 0.70rem 0;}
+section[data-testid="stSidebar"] .segav-sidegrid {display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:0.55rem; margin-top:0.4rem;}
+section[data-testid="stSidebar"] .segav-sidepill {border-radius:14px; padding:0.55rem 0.35rem; border:1px solid rgba(49,51,63,0.08); background:rgba(248,250,252,0.96); text-align:center;}
+section[data-testid="stSidebar"] .segav-sidepill strong {display:block; font-size:1rem;}
+section[data-testid="stSidebar"] [data-testid="stExpander"] {border:1px solid rgba(49,51,63,0.08); border-radius:16px; background:rgba(255,255,255,0.72); margin-bottom:0.55rem; overflow:hidden;}
+section[data-testid="stSidebar"] [data-testid="stExpander"] details summary p {font-weight:700 !important;}
+section[data-testid="stSidebar"] .stButton > button {border-radius:14px; min-height:42px; font-weight:600;}
+section[data-testid="stSidebar"] .segav-quick-title {text-align:center; font-weight:700; margin:0.2rem 0 0.45rem 0;}
+section[data-testid="stSidebar"] .segav-sidehint {text-align:center; font-size:0.83rem; opacity:0.78; margin-top:-0.15rem; margin-bottom:0.35rem;}
 
         
 /* iOS-like look & feel */
@@ -4465,6 +4479,30 @@ def ensure_active_tenant_scaffold_once(_db_backend: str, _dsn_fingerprint: str, 
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def get_sidebar_kpis(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    tkey = str(tenant_key or '').strip()
+    try:
+        faenas_df = get_sidebar_faena_context_df(_db_backend, _dsn_fingerprint, tkey)
+        faenas_total = int(len(faenas_df.index)) if faenas_df is not None else 0
+        faenas_activas = 0
+        if faenas_df is not None and not faenas_df.empty and 'estado' in faenas_df.columns:
+            faenas_activas = int(faenas_df['estado'].astype(str).str.upper().isin(['ACTIVA','EN CURSO','VIGENTE']).sum())
+        if tkey:
+            trabajadores_total = int(fetch_value("SELECT COUNT(*) FROM trabajadores WHERE COALESCE(cliente_key,'')=?", (tkey,), default=0) or 0)
+        else:
+            trabajadores_total = int(fetch_value("SELECT COUNT(*) FROM trabajadores", default=0) or 0)
+        try:
+            if tkey:
+                docs_vencidos = int(fetch_value("SELECT COUNT(*) FROM legal_doc_approvals WHERE COALESCE(cliente_key,'')=? AND UPPER(COALESCE(renewal_status,''))='VENCIDO'", (tkey,), default=0) or 0)
+            else:
+                docs_vencidos = int(fetch_value("SELECT COUNT(*) FROM legal_doc_approvals WHERE UPPER(COALESCE(renewal_status,''))='VENCIDO'", default=0) or 0)
+        except Exception:
+            docs_vencidos = 0
+        return {'faenas_total': faenas_total, 'faenas_activas': faenas_activas, 'trabajadores_total': trabajadores_total, 'docs_vencidos': docs_vencidos}
+    except Exception:
+        return {'faenas_total': 0, 'faenas_activas': 0, 'trabajadores_total': 0, 'docs_vencidos': 0}
+
+@st.cache_data(ttl=120, show_spinner=False)
 def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
     tkey = str(tenant_key or '').strip()
     try:
@@ -4686,15 +4724,14 @@ html,body{
     display:none!important;
 }
 
-/* Icono usuario: fondo SVG en el input */
-[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stTextInput"]:first-of-type input{
+/* Iconos de login por aria-label para evitar que se crucen */
+[data-testid="stHorizontalBlock"]>div:first-child input[aria-label="Usuario"]{
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 20c0-4 3.58-7 8-7s8 3 8 7'/%3E%3C/svg%3E")!important;
     background-repeat:no-repeat!important;
     background-position:13px center!important;
     background-size:18px!important;
 }
-/* Icono candado: segundo input */
-[data-testid="stHorizontalBlock"]>div:first-child [data-testid="stTextInput"]:last-of-type input{
+[data-testid="stHorizontalBlock"]>div:first-child input[aria-label="Contraseña"]{
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Crect x='3' y='11' width='18' height='11' rx='2'/%3E%3Cpath d='M7 11V7a5 5 0 0110 0v4'/%3E%3C/svg%3E")!important;
     background-repeat:no-repeat!important;
     background-position:13px center!important;
@@ -4966,10 +5003,10 @@ with st.sidebar:
         render_brand_logo(width=170)
     except Exception as exc:
         _record_soft_error("sidebar.render_brand_logo", exc)
-    st.markdown("**SEGAV ERP**")
+    st.markdown('<div class="segav-sidebar-center"><h3 style="margin:0;">SEGAV ERP</h3></div>', unsafe_allow_html=True)
     u = current_user()
     if u:
-        st.caption(f"👤 {u.get('full_name') or u['username']} · {u['role']}")
+        st.markdown(f'<div class="segav-sidecard segav-sidebar-center"><strong>{u.get("full_name") or u["username"]}</strong><br><span class="segav-muted">{u["role"]}</span></div>', unsafe_allow_html=True)
 
     try:
         ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
@@ -5002,11 +5039,25 @@ with st.sidebar:
                         st.rerun()
                 _current_row = _cli_row_map.get(str(_cli_selected), _cli_df.iloc[0])
                 _vertical = str(_current_row.get("vertical") or segav_erp_value("erp_vertical", "General"))
-                st.caption(f"🏢 {_current_row['cliente_nombre']} · {_vertical}")
+                st.markdown(f'<div class="segav-sidecard segav-sidebar-center"><div style="font-weight:700;">🏢 {_current_row["cliente_nombre"]}</div><div class="segav-muted">{_vertical}</div></div>', unsafe_allow_html=True)
+                try:
+                    _side_kpis = get_sidebar_kpis(DB_BACKEND, PG_DSN_FINGERPRINT, str(_cli_selected))
+                    st.markdown(f"""<div class="segav-sidecard segav-sidebar-center"><div style="font-weight:700; margin-bottom:0.15rem;">Resumen rápido</div><div class="segav-sidegrid"><div class="segav-sidepill"><strong>{int(_side_kpis.get('faenas_total', 0))}</strong><span>Faenas</span></div><div class="segav-sidepill"><strong>{int(_side_kpis.get('faenas_activas', 0))}</strong><span>Activas</span></div><div class="segav-sidepill"><strong>{int(_side_kpis.get('trabajadores_total', 0))}</strong><span>Trabajadores</span></div><div class="segav-sidepill"><strong>{int(_side_kpis.get('docs_vencidos', 0))}</strong><span>Docs vencidos</span></div></div></div>""", unsafe_allow_html=True)
+                    _faenas_recent = get_sidebar_faena_context_df(DB_BACKEND, PG_DSN_FINGERPRINT, str(_cli_selected))
+                    if _faenas_recent is not None and not _faenas_recent.empty:
+                        _faenas_recent = _faenas_recent.head(5).copy()
+                        _faenas_recent['Etiqueta'] = _faenas_recent['nombre'].astype(str) + ' · ' + _faenas_recent['estado'].astype(str)
+                        with st.expander('Últimas faenas', expanded=False):
+                            for _lbl in _faenas_recent['Etiqueta'].tolist():
+                                st.caption(_lbl)
+                except Exception as _exc2:
+                    _record_soft_error("sidebar.kpis", _exc2)
     except Exception as _exc:
         _record_soft_error("select", _exc)
 
-    # Navegación (simple)
+    st.markdown('<div class="segav-sidebar-center" style="font-weight:700; margin:0.35rem 0 0.1rem 0;">Navegación</div>', unsafe_allow_html=True)
+    st.markdown('<div class="segav-sidehint">Accesos rápidos y secciones principales</div>', unsafe_allow_html=True)
+
     PAGE_LABELS = {
         "Dashboard": "📊 Dashboard",
         "Cumplimiento / Alertas": "🚨 Cumplimiento / Alertas",
@@ -5027,20 +5078,50 @@ with st.sidebar:
         "Admin Usuarios": "🔐 Usuarios",
     }
 
-    st.radio(
-        "Secciones",
-        VISIBLE_PAGES,
-        key="nav_page",
-        format_func=lambda x: PAGE_LABELS.get(x, x),
-        label_visibility="collapsed",
-    )
+    def _sidebar_nav_button(page_name: str, key_suffix: str):
+        _disabled = page_name not in VISIBLE_PAGES
+        _active = st.session_state.get("nav_page") == page_name
+        _label = PAGE_LABELS.get(page_name, page_name)
+        if _active:
+            _label = f"• {_label}"
+        if st.button(_label, key=f"sidebar_nav_{key_suffix}", use_container_width=True, disabled=_disabled):
+            st.session_state["nav_page"] = page_name
+            st.rerun()
 
-    # Cerrar sesión al final (limpio)
-    if u and st.button("Cerrar sesión", use_container_width=True):
+    with st.expander("⚡ Accesos rápidos", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            _sidebar_nav_button("Dashboard", "quick_dashboard")
+            _sidebar_nav_button("Faenas", "quick_faenas")
+            _sidebar_nav_button("Trabajadores", "quick_trabajadores")
+        with c2:
+            _sidebar_nav_button("Cumplimiento / Alertas", "quick_cumplimiento")
+            _sidebar_nav_button("Documentos Empresa", "quick_docs_emp")
+            _sidebar_nav_button("Export (ZIP)", "quick_export")
+
+    with st.expander("🧭 Operación", expanded=st.session_state.get("nav_page") in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]):
+        for _page in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]:
+            _sidebar_nav_button(_page, f"ops_{_page}")
+
+    with st.expander("🗂️ Documentación", expanded=st.session_state.get("nav_page") in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Export (ZIP)", "Backup / Restore"]):
+        for _page in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Export (ZIP)", "Backup / Restore"]:
+            _sidebar_nav_button(_page, f"docs_{_page}")
+
+    with st.expander("📈 Gestión y control", expanded=st.session_state.get("nav_page") in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Arquitectura / Escalabilidad", "Mi Perfil"]):
+        for _page in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Arquitectura / Escalabilidad", "Mi Perfil"]:
+            _sidebar_nav_button(_page, f"ctrl_{_page}")
+
+    if is_superadmin() or has_perm("manage_users"):
+        with st.expander("🔐 Administración", expanded=st.session_state.get("nav_page") in ["Admin Usuarios", "SuperAdmin / Empresas"]):
+            for _page in ["Admin Usuarios", "SuperAdmin / Empresas"]:
+                if _page in VISIBLE_PAGES:
+                    _sidebar_nav_button(_page, f"admin_{_page}")
+
+    if u and st.button("Cerrar sesión", use_container_width=True, key="sidebar_logout_main"):
         auth_logout()
 
 current_section = st.session_state.get("nav_page", "Dashboard")
-st.title(f"{erp_brand_name()} — {current_section}")
+st.title(str(current_section))
 try:
     _clientes_top = segav_clientes_df()
     _cli_key_top = current_segav_client_key()
@@ -6927,19 +7008,17 @@ def page_mi_perfil():
     if uid <= 0:
         st.error('No hay sesión activa.')
         st.stop()
-    row_df = fetch_df("SELECT id, username, role, fixed_cliente_key, full_name, email, phone, cargo FROM users WHERE id=?", (uid,))
+    row_df = fetch_df("SELECT id, username, role, fixed_cliente_key, full_name, email, phone, cargo, perms_json FROM users WHERE id=?", (uid,))
     if row_df is None or row_df.empty:
         st.error('No se encontró tu usuario.')
         st.stop()
     row = row_df.iloc[0].to_dict()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.text_input('Usuario (RUT)', value=str(row.get('username') or ''), disabled=True)
-        st.text_input('Rol', value=str(row.get('role') or ''), disabled=True)
-        st.text_input('Empresa fija', value=str(row.get('fixed_cliente_key') or ''), disabled=True)
-    with c2:
-        st.caption('Estos datos pertenecen al dueño de la cuenta y solo los puede editar el propio usuario.')
+    st.caption('Aquí puedes editar tus datos personales y tu usuario de acceso en formato RUT chileno.')
     with st.form('mi_perfil_form', clear_on_submit=False):
+        username_rut = st.text_input('Usuario (RUT)', value=str(row.get('username') or ''), placeholder='12.345.678-5')
+        _perfil_rut_fmt = normalize_login_rut(username_rut)
+        if str(username_rut or '').strip() and _perfil_rut_fmt and _perfil_rut_fmt != str(username_rut or '').strip():
+            st.caption(f'Formato sugerido: {_perfil_rut_fmt}')
         full_name = st.text_input('Nombre completo', value=str(row.get('full_name') or ''))
         email = st.text_input('Correo', value=str(row.get('email') or ''))
         phone = st.text_input('Teléfono', value=str(row.get('phone') or ''))
@@ -6950,37 +7029,38 @@ def page_mi_perfil():
         ok = st.form_submit_button('Guardar mi perfil', type='primary', use_container_width=True)
     if ok:
         try:
+            username_norm = normalize_user_rut_for_storage(username_rut)
+            if not username_norm:
+                st.error('Debes ingresar un RUT de usuario.')
+                st.stop()
+            if not validate_rut_dv_core(username_norm):
+                st.error('El RUT ingresado no es válido.')
+                st.stop()
+            exists = fetch_value("SELECT COUNT(*) FROM users WHERE username=? AND id<>?", (username_norm, uid), default=0)
+            if int(exists or 0) > 0:
+                st.error('Ese RUT ya está siendo usado por otro usuario.')
+                st.stop()
             if email and '@' not in email:
                 st.error('Ingresa un correo válido.')
                 st.stop()
             execute(
-                "UPDATE users SET full_name=?, email=?, phone=?, cargo=?, updated_at=datetime('now') WHERE id=?",
-                (str(full_name or '').strip(), str(email or '').strip(), str(phone or '').strip(), str(cargo or '').strip(), uid),
+                "UPDATE users SET username=?, full_name=?, email=?, phone=?, cargo=?, updated_at=datetime('now') WHERE id=?",
+                (username_norm, full_name.strip(), email.strip(), phone.strip(), cargo.strip(), uid),
             )
             if pw1 or pw2:
-                if not pw1 or pw1 != pw2:
-                    st.error('Las contraseñas no coinciden.')
-                    st.stop()
-                if len(pw1) < 8:
-                    st.error('La contraseña debe tener al menos 8 caracteres.')
+                if pw1 != pw2 or len(pw1) < 8:
+                    st.error('La nueva contraseña no coincide o es muy corta (mínimo 8).')
                     st.stop()
                 salt_b64, h_b64 = hash_password(pw1)
-                execute(
-                    "UPDATE users SET salt_b64=?, pass_hash_b64=?, updated_at=datetime('now') WHERE id=?",
-                    (salt_b64, h_b64, uid),
-                )
-            fresh_df = fetch_df("SELECT * FROM users WHERE id=?", (uid,))
-            if fresh_df is not None and not fresh_df.empty:
-                auth_set_session(fresh_df.iloc[0].to_dict())
-            try:
-                audit_log('EDITAR_MI_PERFIL', 'users', f'Perfil actualizado: {row.get("username","?")}')
-            except Exception as _exc:
-                _record_soft_error('perfil.audit', _exc)
+                execute("UPDATE users SET salt_b64=?, pass_hash_b64=?, password_must_change=0, updated_at=datetime('now') WHERE id=?", (salt_b64, h_b64, uid))
+            updated_df = fetch_df("SELECT * FROM users WHERE id=?", (uid,))
+            if updated_df is not None and not updated_df.empty:
+                auth_set_session(updated_df.iloc[0].to_dict())
+            audit_log('MI_PERFIL', 'users', f"Usuario actualizó su perfil: {row.get('username','?')} -> {username_norm}")
             st.success('Perfil actualizado correctamente.')
             st.rerun()
         except Exception as e:
-            st.error(f'No se pudo guardar el perfil: {e}')
-
+            st.error(f"No se pudo actualizar el perfil: {e}")
 
 def page_admin_usuarios():
     ui_header("Administración de Usuarios", "Como SUPERADMIN puedes ver y gestionar todas las funciones. Más adelante podrás decidir qué ve cada usuario.")
