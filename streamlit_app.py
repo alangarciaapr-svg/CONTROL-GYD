@@ -4238,8 +4238,8 @@ def close_user_session():
         _record_soft_error("user_sessions.close", _exc)
 
 
-def get_active_sessions_summary(cliente_key: str | None = None, minutes: int = 20):
-    ensure_user_sessions_table()
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_active_sessions_summary_cached(_db_backend: str, _dsn_fingerprint: str, cliente_key: str, minutes: int):
     ck = str(cliente_key or '').strip()
     mins = max(1, int(minutes or 20))
     if DB_BACKEND == 'postgres':
@@ -4262,6 +4262,11 @@ def get_active_sessions_summary(cliente_key: str | None = None, minutes: int = 2
             users = int(fetch_value("SELECT COUNT(DISTINCT user_id) FROM user_sessions WHERE is_active=1 AND last_seen_at >= datetime('now', ?)", (interval_sql,), default=0) or 0)
             rows = fetch_df("SELECT username, MAX(last_seen_at) AS last_seen_at, COUNT(DISTINCT session_id) AS sesiones FROM user_sessions WHERE is_active=1 AND last_seen_at >= datetime('now', ?) GROUP BY username ORDER BY MAX(last_seen_at) DESC LIMIT 10", (interval_sql,))
     return {"sessions": total, "users": users, "rows": rows}
+
+
+def get_active_sessions_summary(cliente_key: str | None = None, minutes: int = 20):
+    ensure_user_sessions_table()
+    return _get_active_sessions_summary_cached(DB_BACKEND, PG_DSN_FINGERPRINT, str(cliente_key or '').strip(), int(minutes or 20))
 
 
 def auth_set_session(user_row: dict):
@@ -4740,7 +4745,7 @@ def get_sidebar_kpis(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
     except Exception:
         return {'faenas_total': 0, 'faenas_activas': 0, 'trabajadores_total': 0, 'docs_vencidos': 0}
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
     tkey = str(tenant_key or '').strip()
     try:
@@ -4752,6 +4757,7 @@ def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant
                 JOIN mandantes m ON m.id=f.mandante_id
                 WHERE COALESCE(f.cliente_key,'')=?
                 ORDER BY f.id DESC
+                LIMIT 6
                 """,
                 (tkey,),
             )
@@ -4760,6 +4766,7 @@ def get_sidebar_faena_context_df(_db_backend: str, _dsn_fingerprint: str, tenant
             SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
             FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
             ORDER BY f.id DESC
+            LIMIT 6
             """
         )
     except Exception:
@@ -7847,35 +7854,24 @@ def page_architecture_scalability():
     )
 
 
+@st.cache_resource(show_spinner=False)
+def _ensure_page_runtime_health_once(_db_backend: str, _dsn_fingerprint: str, tenant_key: str):
+    ensure_dirs()
+    ensure_segav_erp_tables()
+    ensure_users_table()
+    ensure_user_client_access_table()
+    ensure_user_client_module_perms_table_once(_db_backend, _dsn_fingerprint)
+    ensure_legal_workflow_tables_once(_db_backend, _dsn_fingerprint)
+    ensure_multiempresa_compliance_schema_once(_db_backend, _dsn_fingerprint, tenant_key, execute, conn)
+    return True
+
+
 def _ensure_page_runtime_health(page_name: str):
+    tenant_key = str(current_segav_client_key() or '')
     try:
-        ensure_dirs()
+        _ensure_page_runtime_health_once(DB_BACKEND, PG_DSN_FINGERPRINT, tenant_key)
     except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.dirs", exc)
-    try:
-        ensure_segav_erp_tables()
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.erp_tables", exc)
-    try:
-        ensure_users_table()
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.users", exc)
-    try:
-        ensure_user_client_access_table()
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.user_client_access", exc)
-    try:
-        ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.module_perms", exc)
-    try:
-        ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.legal", exc)
-    try:
-        ensure_multiempresa_compliance_schema_once(DB_BACKEND, PG_DSN_FINGERPRINT, current_segav_client_key(), execute, conn)
-    except Exception as exc:
-        _record_soft_error(f"page_health.{page_name}.compliance", exc)
+        _record_soft_error(f"page_health.{page_name}", exc)
 
 
 def _render_page_safely(page_name: str, page_callable):
