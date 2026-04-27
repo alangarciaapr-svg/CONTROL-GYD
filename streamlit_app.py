@@ -58,6 +58,30 @@ UPLOAD_HELP_TEXT = (
 )
 
 
+def normalize_login_rut(value: str) -> str:
+    txt = str(value or '').strip()
+    if not txt:
+        return ''
+    formatted = clean_rut_core(txt)
+    return formatted or txt
+
+
+def _format_session_rut_key(state_key: str):
+    try:
+        current = str(st.session_state.get(state_key) or '').strip()
+        if not current:
+            return
+        formatted = normalize_login_rut(current)
+        if formatted and formatted != current:
+            st.session_state[state_key] = formatted
+    except Exception as _exc:
+        _record_soft_error(f'rut.format.{state_key}', _exc)
+
+
+def normalize_user_rut_for_storage(value: str) -> str:
+    return normalize_login_rut(value)
+
+
 # Fingerprints/cache helpers
 def _fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
@@ -3761,6 +3785,10 @@ def ensure_users_table():
                 perms_json TEXT,
                 is_active BIGINT NOT NULL DEFAULT 1,
                 fixed_cliente_key TEXT,
+                full_name TEXT,
+                email TEXT,
+                phone TEXT,
+                cargo TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
@@ -3768,6 +3796,10 @@ def ensure_users_table():
         )
         try:
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS fixed_cliente_key TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS full_name TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS email TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS phone TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS cargo TEXT")
         except Exception as _exc:
             _record_soft_error("users.fixed_cliente_key.pg", _exc)
         execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -3784,6 +3816,10 @@ def ensure_users_table():
             perms_json TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             fixed_cliente_key TEXT,
+            full_name TEXT,
+            email TEXT,
+            phone TEXT,
+            cargo TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -3791,7 +3827,7 @@ def ensure_users_table():
     )
     try:
         with conn() as c:
-            migrate_add_columns_if_missing(c, 'users', {'fixed_cliente_key': 'TEXT'})
+            migrate_add_columns_if_missing(c, 'users', {'fixed_cliente_key': 'TEXT', 'full_name': 'TEXT', 'email': 'TEXT', 'phone': 'TEXT', 'cargo': 'TEXT'})
     except Exception as _exc:
         _record_soft_error("users.fixed_cliente_key.sqlite", _exc)
     execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -3987,6 +4023,10 @@ def auth_set_session(user_row: dict):
         "username": str(user_row["username"]),
         "role": str(user_row.get("role") or "OPERADOR"),
         "fixed_cliente_key": str(user_row.get("fixed_cliente_key") or "").strip(),
+        "full_name": str(user_row.get("full_name") or "").strip(),
+        "email": str(user_row.get("email") or "").strip(),
+        "phone": str(user_row.get("phone") or "").strip(),
+        "cargo": str(user_row.get("cargo") or "").strip(),
         "perms": perms_from_row(str(user_row.get("role") or "OPERADOR"), user_row.get("perms_json")),
     }
 
@@ -4686,15 +4726,17 @@ html,body{
 
         # Label Usuario
         st.markdown(
-            '<div style="font-size:14px;font-weight:700;color:#1e293b;margin-bottom:6px;">Usuario</div>',
+            '<div style="font-size:14px;font-weight:700;color:#1e293b;margin-bottom:6px;">Usuario (RUT)</div>',
             unsafe_allow_html=True,
         )
 
         with st.form("_login_form", clear_on_submit=False):
             uname = st.text_input(
                 "Usuario", key="_lgu",
-                placeholder="Ingrese su usuario",
+                placeholder="12.345.678-5",
                 label_visibility="collapsed",
+                on_change=_format_session_rut_key,
+                args=("_lgu",),
             )
             # Label Contraseña
             st.markdown(
@@ -4736,12 +4778,22 @@ html,body{
 
         # Auth logic
         if submitted:
-            u = (uname or "").strip()
+            u = normalize_login_rut(uname)
+            if u != (uname or '').strip():
+                st.session_state['_lgu'] = u
             if not u or not passw:
                 st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
                 st.rerun()
             else:
-                df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (u,))
+                login_candidates = [u]
+                raw_u = str(uname or '').strip()
+                if raw_u and raw_u not in login_candidates:
+                    login_candidates.append(raw_u)
+                df = pd.DataFrame()
+                for _cand in login_candidates:
+                    df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (_cand,))
+                    if df is not None and not df.empty:
+                        break
                 if df is None or df.empty:
                     st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
                     st.rerun()
@@ -4875,6 +4927,7 @@ PAGES = [
     "Aprobaciones / Auditoría legal",
     "Backup / Restore",
     "Arquitectura / Escalabilidad",
+    "Mi Perfil",
 ]
 
 VISIBLE_PAGES = list(PAGES)
@@ -4915,7 +4968,7 @@ with st.sidebar:
     st.markdown("**SEGAV ERP**")
     u = current_user()
     if u:
-        st.caption(f"👤 {u['username']} · {u['role']}")
+        st.caption(f"👤 {u.get('full_name') or u['username']} · {u['role']}")
 
     try:
         ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
@@ -4968,6 +5021,7 @@ with st.sidebar:
         "Export (ZIP)": "📦 Export",
         "Backup / Restore": "💾 Backup",
         "Arquitectura / Escalabilidad": "🧱 Arquitectura / Escalabilidad",
+        "Mi Perfil": "👤 Mi perfil",
         "SuperAdmin / Empresas": "🌐 SuperAdmin / Empresas",
         "Admin Usuarios": "🔐 Usuarios",
     }
@@ -6864,6 +6918,69 @@ def page_backup_restore():
             except Exception as e:
                 st.error(f"No se pudo restaurar: {e}")
 
+def page_mi_perfil():
+    ui_header("Mi perfil", "Edita los datos personales de tu cuenta.")
+    ensure_users_table()
+    u = current_user() or {}
+    uid = int(u.get('id') or 0)
+    if uid <= 0:
+        st.error('No hay sesión activa.')
+        st.stop()
+    row_df = fetch_df("SELECT id, username, role, fixed_cliente_key, full_name, email, phone, cargo FROM users WHERE id=?", (uid,))
+    if row_df is None or row_df.empty:
+        st.error('No se encontró tu usuario.')
+        st.stop()
+    row = row_df.iloc[0].to_dict()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.text_input('Usuario (RUT)', value=str(row.get('username') or ''), disabled=True)
+        st.text_input('Rol', value=str(row.get('role') or ''), disabled=True)
+        st.text_input('Empresa fija', value=str(row.get('fixed_cliente_key') or ''), disabled=True)
+    with c2:
+        st.caption('Estos datos pertenecen al dueño de la cuenta y solo los puede editar el propio usuario.')
+    with st.form('mi_perfil_form', clear_on_submit=False):
+        full_name = st.text_input('Nombre completo', value=str(row.get('full_name') or ''))
+        email = st.text_input('Correo', value=str(row.get('email') or ''))
+        phone = st.text_input('Teléfono', value=str(row.get('phone') or ''))
+        cargo = st.text_input('Cargo', value=str(row.get('cargo') or ''))
+        st.markdown('#### Cambiar contraseña')
+        pw1 = st.text_input('Nueva contraseña', type='password', key='perfil_pw1')
+        pw2 = st.text_input('Repetir nueva contraseña', type='password', key='perfil_pw2')
+        ok = st.form_submit_button('Guardar mi perfil', type='primary', use_container_width=True)
+    if ok:
+        try:
+            if email and '@' not in email:
+                st.error('Ingresa un correo válido.')
+                st.stop()
+            execute(
+                "UPDATE users SET full_name=?, email=?, phone=?, cargo=?, updated_at=datetime('now') WHERE id=?",
+                (str(full_name or '').strip(), str(email or '').strip(), str(phone or '').strip(), str(cargo or '').strip(), uid),
+            )
+            if pw1 or pw2:
+                if not pw1 or pw1 != pw2:
+                    st.error('Las contraseñas no coinciden.')
+                    st.stop()
+                if len(pw1) < 8:
+                    st.error('La contraseña debe tener al menos 8 caracteres.')
+                    st.stop()
+                salt_b64, h_b64 = hash_password(pw1)
+                execute(
+                    "UPDATE users SET salt_b64=?, pass_hash_b64=?, updated_at=datetime('now') WHERE id=?",
+                    (salt_b64, h_b64, uid),
+                )
+            fresh_df = fetch_df("SELECT * FROM users WHERE id=?", (uid,))
+            if fresh_df is not None and not fresh_df.empty:
+                auth_set_session(fresh_df.iloc[0].to_dict())
+            try:
+                audit_log('EDITAR_MI_PERFIL', 'users', f'Perfil actualizado: {row.get("username","?")}')
+            except Exception as _exc:
+                _record_soft_error('perfil.audit', _exc)
+            st.success('Perfil actualizado correctamente.')
+            st.rerun()
+        except Exception as e:
+            st.error(f'No se pudo guardar el perfil: {e}')
+
+
 def page_admin_usuarios():
     ui_header("Administración de Usuarios", "Como SUPERADMIN puedes ver y gestionar todas las funciones. Más adelante podrás decidir qué ve cada usuario.")
     require_perm("manage_users")
@@ -6923,7 +7040,7 @@ def page_admin_usuarios():
         if df.empty:
             st.info("No hay usuarios.")
             return
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
 
         st.divider()
         uid = st.selectbox(
@@ -7009,6 +7126,7 @@ def page_admin_usuarios():
             del_btn = st.button("Eliminar usuario", use_container_width=True, key="adm_del_btn")
 
         st.divider()
+        st.text_input("Usuario (RUT)", value=str(row.get("username") or ""), disabled=True, key="adm_user_rut_view")
         st.markdown("### Poderes")
         current_perms = perms_from_row(new_role, row.get("perms_json"))
         cols = st.columns(3)
@@ -7149,7 +7267,7 @@ def page_admin_usuarios():
         fixed_to_company = True if scoped_mode else False
         target_company_admin = False
         with st.form("form_create_user", clear_on_submit=True):
-            username = st.text_input("Usuario", placeholder="ej: operador1")
+            username = st.text_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut", on_change=_format_session_rut_key, args=("create_user_rut",))
             role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
             if scoped_mode:
                 st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True)
@@ -7200,9 +7318,12 @@ def page_admin_usuarios():
             elif (role or "").upper() == "ADMIN":
                 perms["manage_users"] = True
 
-            u = (username or "").strip()
+            u = normalize_user_rut_for_storage(username)
             if not u:
-                st.error("Usuario requerido.")
+                st.error("RUT de usuario requerido.")
+                st.stop()
+            if not validate_rut_dv_core(u):
+                st.error("Debes ingresar un RUT chileno válido para el usuario.")
                 st.stop()
             if not pw1 or pw1 != pw2:
                 st.error("Contraseñas no coinciden o están vacías.")
@@ -7218,8 +7339,8 @@ def page_admin_usuarios():
                     st.stop()
                 salt_b64, h_b64 = hash_password(pw1)
                 execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key) VALUES(?,?,?,?,?,?,?)",
-                    (u, salt_b64, h_b64, role, json.dumps(perms), 1, user_fixed_company_key or None),
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key, full_name) VALUES(?,?,?,?,?,?,?,?)",
+                    (u, salt_b64, h_b64, role, json.dumps(perms), 1, user_fixed_company_key or None, u),
                 )
                 if scoped_mode or assign_company_key:
                     new_user_id = int(fetch_value("SELECT id FROM users WHERE username=?", (u,), default=0) or 0)
@@ -7424,8 +7545,9 @@ PAGE_PERM_ROUTE = {
     "Backup / Restore": "view_backup",
     "Arquitectura / Escalabilidad": "manage_users",
     "Admin Usuarios": "manage_users",
+    "Mi Perfil": None,
 }
-if p in PAGE_PERM_ROUTE:
+if p in PAGE_PERM_ROUTE and PAGE_PERM_ROUTE[p]:
     require_perm(PAGE_PERM_ROUTE[p])
 
 _PAGE_RENDERERS = {
@@ -7444,6 +7566,7 @@ _PAGE_RENDERERS = {
     "Aprobaciones / Auditoría legal": page_aprobaciones_legal,
     "Backup / Restore": page_backup_restore,
     "Arquitectura / Escalabilidad": page_architecture_scalability,
+    "Mi Perfil": page_mi_perfil,
     "SuperAdmin / Empresas": page_superadmin_empresas,
     "Admin Usuarios": page_admin_usuarios,
 }
