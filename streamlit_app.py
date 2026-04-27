@@ -6959,37 +6959,27 @@ def page_admin_usuarios():
         with c2:
             st.markdown("**Empresa fija**")
             _fixed_current = str(row.get("fixed_cliente_key") or "").strip()
-            _user_clients_df = fetch_df(
-                """
-                SELECT a.cliente_key,
-                       COALESCE(c.cliente_nombre, a.cliente_key) AS cliente_nombre
-                  FROM user_client_access a
-             LEFT JOIN segav_erp_clientes c ON c.cliente_key=a.cliente_key
-                 WHERE a.user_id=?
-                 ORDER BY COALESCE(c.cliente_nombre, a.cliente_key)
-                """,
-                (int(uid),),
-            )
             _fix_options = ['']
             _fix_map = {'': '— Sin empresa fija —'}
-            if _user_clients_df is not None and not _user_clients_df.empty:
-                for _, _rr in _user_clients_df.iterrows():
-                    _ck = str(_rr.get('cliente_key') or '').strip()
-                    if _ck and _ck not in _fix_map:
-                        _fix_options.append(_ck)
-                        _fix_map[_ck] = str(_rr.get('cliente_nombre') or _ck)
-            elif scoped_mode and str(tenant_key or '').strip():
-                _fix_options.append(str(tenant_key))
-                _fix_map[str(tenant_key)] = str(tenant_key)
+            if scoped_mode:
+                _tenant_view = str(tenant_key or '').strip()
+                if _tenant_view:
+                    _fix_options.append(_tenant_view)
+                    _fix_map[_tenant_view] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_tenant_view,), default=_tenant_view) or _tenant_view)
+            else:
+                _clients_df = visible_clientes_df()
+                if _clients_df is None or _clients_df.empty:
+                    _clients_df = fetch_df("SELECT cliente_key, COALESCE(cliente_nombre, cliente_key) AS cliente_nombre FROM segav_erp_clientes WHERE activo=1 ORDER BY COALESCE(cliente_nombre, cliente_key)")
+                if _clients_df is not None and not _clients_df.empty:
+                    for _, _rr in _clients_df.iterrows():
+                        _ck = str(_rr.get('cliente_key') or '').strip()
+                        if _ck and _ck not in _fix_map:
+                            _fix_options.append(_ck)
+                            _fix_map[_ck] = str(_rr.get('cliente_nombre') or _ck)
             if _fixed_current and _fixed_current not in _fix_map:
                 _fix_options.append(_fixed_current)
-                _fix_map[_fixed_current] = _fixed_current
-            _fix_disabled = False
+                _fix_map[_fixed_current] = str(fetch_value("SELECT COALESCE(cliente_nombre, cliente_key) FROM segav_erp_clientes WHERE cliente_key=?", (_fixed_current,), default=_fixed_current) or _fixed_current)
             if scoped_mode:
-                _fix_disabled = True
-                if str(tenant_key or '').strip() and str(tenant_key) not in _fix_map:
-                    _fix_options.append(str(tenant_key))
-                    _fix_map[str(tenant_key)] = str(tenant_key)
                 new_fixed_company = _fixed_current if _fixed_current else str(tenant_key or '').strip()
                 st.selectbox(
                     "Empresa fija",
@@ -7109,13 +7099,20 @@ def page_admin_usuarios():
                 st.error("No puedes eliminar al último ADMIN activo.")
                 st.stop()
             try:
-                execute("DELETE FROM users WHERE id=?", (int(uid),))
+                _uid_del = int(uid)
+                execute("DELETE FROM user_client_module_perms WHERE user_id=?", (_uid_del,))
+                execute("DELETE FROM user_client_access WHERE user_id=?", (_uid_del,))
+                execute("DELETE FROM legal_doc_approvals WHERE requested_by_user_id=? OR reviewed_by_user_id=?", (_uid_del, _uid_del))
+                execute("DELETE FROM users WHERE id=?", (_uid_del,))
+                _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0)
+                if int(_still_exists or 0) > 0:
+                    raise RuntimeError("El usuario sigue existiendo después del borrado.")
                 auto_backup_db("users_delete")
                 try:
                     audit_log("ELIMINAR_USUARIO", "users", f"Usuario eliminado: {row.get('username','?')}")
                 except Exception as _exc:
                     _record_soft_error("delete.audit", _exc)
-                st.success("Usuario eliminado.")
+                st.success("Usuario eliminado correctamente.")
                 st.rerun()
             except Exception as e:
                 st.error(f"No se pudo eliminar: {e}")
