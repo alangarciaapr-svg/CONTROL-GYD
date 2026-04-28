@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from segav_core.kpi_ui import kpi_card, kpi_grid, kpi_section, tone_for_count, tone_for_percentage
+from segav_core.kpi_ui import kpi_card, kpi_grid, kpi_section, professional_bar_chart, tone_for_count, tone_for_percentage
 
 IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
 IMPLEMENTATION_LABELS = {
@@ -118,8 +118,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             st.dataframe(rows_df, use_container_width=True, hide_index=True)
             if "Rubro" in rows_df.columns and not rows_df.empty:
                 rubro_df = rows_df.groupby("Rubro", dropna=False).size().reset_index(name="Empresas")
-                st.markdown("#### Distribución por rubro")
-                st.bar_chart(rubro_df.set_index("Rubro"))
+                professional_bar_chart(rubro_df, x="Rubro", y="Empresas", title="Distribución por rubro", horizontal=True, height=300)
         else:
             st.info("Aún no hay empresas registradas en el catálogo multiempresa.")
 
@@ -229,7 +228,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             except Exception:
                 current_logo = None
             if current_logo:
-                st.image(current_logo, width=180)
+                st.caption("Logo cargado para esta empresa. Se mostrará solo en el lateral izquierdo cuando sea la empresa activa.")
             edit_logo = st.file_uploader("Cargar o reemplazar logo", type=['png','jpg','jpeg','webp'], key=f'sa_edit_logo_{edit_key}')
             active_now = str(st.session_state.get("sa_edit_activa") or ("ACTIVA" if int(row.get("activo") or 0) == 1 else "INACTIVA"))
             active_flag = st.selectbox("Estado", ["ACTIVA", "INACTIVA"], index=0 if active_now == "ACTIVA" else 1, key="sa_edit_activa")

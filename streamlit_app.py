@@ -1174,6 +1174,32 @@ button[data-baseweb="tab"] {
     padding: 10px 12px;
 }
 
+/* SEGAV ERP estilo dinámico/profesional */
+.stApp {
+    background: linear-gradient(135deg, #f8fafc 0%, #eef4ff 44%, #f8fafc 100%);
+}
+.block-container {
+    max-width: 1500px;
+}
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(241,245,249,.98));
+    border-right: 1px solid rgba(15,23,42,.10);
+}
+section[data-testid="stSidebar"] img {
+    display:block !important;
+    margin-left:auto !important;
+    margin-right:auto !important;
+}
+[data-testid="stTabs"] button[data-baseweb="tab"] {
+    font-weight: 750;
+}
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    box-shadow: 0 10px 22px rgba(15,23,42,.045);
+}
+div[data-testid="stAlert"] {
+    border-radius: 16px;
+}
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -5433,10 +5459,6 @@ with st.sidebar:
 
 current_section = st.session_state.get("nav_page", "Dashboard")
 st.title(str(current_section))
-try:
-    render_current_company_logo(width=170)
-except Exception as exc:
-    _record_soft_error('topbar.company_logo', exc)
 try:
     _clientes_top = segav_clientes_df()
     _cli_key_top = current_segav_client_key()

@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once, legal_docs_status_summary
-from segav_core.kpi_ui import kpi_grid, kpi_section, tone_for_count, tone_for_percentage
+from segav_core.kpi_ui import kpi_grid, kpi_section, professional_bar_chart, tone_for_count, tone_for_percentage
 
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
@@ -325,13 +325,11 @@ def page_dashboard(
                         "Estado": ["Habilitados", "No habilitados"],
                         "Cantidad": [trabajadores_ok, trabajadores_activos - trabajadores_ok],
                     })
-                    st.markdown("#### Habilitación trabajadores")
-                    st.bar_chart(hab_df.set_index("Estado"))
+                    professional_bar_chart(hab_df, x="Estado", y="Cantidad", title="Habilitación trabajadores", horizontal=False, height=260)
             with chart_col2:
                 if faena_risk is not None and not faena_risk.empty:
-                    sem = faena_risk.groupby("semaforo")["faena_id"].count().rename("Faenas")
-                    st.markdown("#### Semáforo faenas")
-                    st.bar_chart(sem)
+                    sem = faena_risk.groupby("semaforo")["faena_id"].count().rename("Faenas").reset_index()
+                    professional_bar_chart(sem, x="semaforo", y="Faenas", title="Semáforo faenas", horizontal=False, height=260)
         with right:
             st.markdown("### Prioridades ejecutivas")
             if auto_alerts is None or auto_alerts.empty:
@@ -358,9 +356,8 @@ def page_dashboard(
                     use_container_width=True,
                     hide_index=True,
                 )
-                chart_df = ranking[["faena", "cobertura_docs_pct"]].head(8).set_index("faena")
-                st.markdown("#### Cobertura documental por faena")
-                st.bar_chart(chart_df)
+                chart_df = ranking[["faena", "cobertura_docs_pct"]].head(8)
+                professional_bar_chart(chart_df, x="faena", y="cobertura_docs_pct", title="Cobertura documental por faena", horizontal=True, height=320)
         with op2:
             st.markdown("### Agenda de vencimientos")
             if cap["agenda"].empty and program["vencidas"].empty:
@@ -418,8 +415,7 @@ def page_dashboard(
                 ], columns=4)
                 st.markdown("#### Portafolio multiempresa")
                 st.dataframe(port, use_container_width=True, hide_index=True)
-                st.markdown("#### Ranking comercial de salud por cliente")
-                st.bar_chart(port.set_index("Cliente")["Score"])
+                professional_bar_chart(port[["Cliente", "Score"]], x="Cliente", y="Score", title="Ranking comercial de salud por cliente", horizontal=True, height=340)
         else:
             st.info("La vista comparativa multiempresa aparece cuando el usuario tiene perfil administrativo y existen varias empresas activas.")
 
