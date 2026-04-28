@@ -84,6 +84,40 @@ def normalize_user_rut_for_storage(value: str) -> str:
     return normalize_login_rut(value)
 
 
+def rut_login_candidates(value: str) -> list[str]:
+    """Variantes para login/recuperación: RUT formateado y usuarios legados sin formato."""
+    raw = str(value or '').strip()
+    formatted = normalize_login_rut(raw)
+    compact = clean_rut_core(raw).replace('.', '').replace('-', '') if raw else ''
+    candidates = []
+    for item in (formatted, raw, compact, compact.upper()):
+        item = str(item or '').strip()
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def fetch_active_user_by_rut(value: str) -> dict | None:
+    for cand in rut_login_candidates(value):
+        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (cand,))
+        if df is not None and not df.empty:
+            return df.iloc[0].to_dict()
+    return None
+
+
+def username_exists_for_rut(value: str, exclude_id: int | None = None) -> bool:
+    candidates = rut_login_candidates(value)
+    if not candidates:
+        return False
+    placeholders = ",".join(["?"] * len(candidates))
+    params = list(candidates)
+    sql = f"SELECT COUNT(*) FROM users WHERE username IN ({placeholders})"
+    if exclude_id is not None:
+        sql += " AND id<>?"
+        params.append(int(exclude_id))
+    return int(fetch_value(sql, tuple(params), default=0) or 0) > 0
+
+
 # Fingerprints/cache helpers
 def _fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:12]
@@ -5126,17 +5160,15 @@ html,body{
                 elif rec_pw1 != rec_pw2 or len(rec_pw1) < 8:
                     st.error("La nueva contraseña no coincide o es muy corta (mínimo 8).")
                 else:
-                    udf = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (rrut,))
-                    if udf is None or udf.empty:
+                    urow = fetch_active_user_by_rut(rrut)
+                    if not urow:
                         st.error("No existe un usuario activo con ese RUT.")
+                    elif str(urow.get('email') or '').strip().lower() != rec_email.strip().lower():
+                        st.error("El correo no coincide con el registrado para ese usuario.")
                     else:
-                        urow = udf.iloc[0].to_dict()
-                        if str(urow.get('email') or '').strip().lower() != rec_email.strip().lower():
-                            st.error("El correo no coincide con el registrado para ese usuario.")
-                        else:
-                            salt_b64, h_b64 = hash_password(rec_pw1)
-                            execute("UPDATE users SET salt_b64=?, pass_hash_b64=?, password_must_change=0, updated_at=? WHERE id=?", (salt_b64, h_b64, datetime.now().isoformat(timespec='seconds'), int(urow.get('id') or 0)))
-                            st.success("Contraseña restablecida correctamente. Ya puedes iniciar sesión.")
+                        salt_b64, h_b64 = hash_password(rec_pw1)
+                        execute("UPDATE users SET salt_b64=?, pass_hash_b64=?, password_must_change=0, updated_at=? WHERE id=?", (salt_b64, h_b64, datetime.now().isoformat(timespec='seconds'), int(urow.get('id') or 0)))
+                        st.success("Contraseña restablecida correctamente. Ya puedes iniciar sesión.")
 
         # Logo + marca
         logo_tag = (
@@ -5163,20 +5195,11 @@ html,body{
                 st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
                 st.rerun()
             else:
-                login_candidates = [u]
-                raw_u = str(uname or '').strip()
-                if raw_u and raw_u not in login_candidates:
-                    login_candidates.append(raw_u)
-                df = pd.DataFrame()
-                for _cand in login_candidates:
-                    df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (_cand,))
-                    if df is not None and not df.empty:
-                        break
-                if df is None or df.empty:
+                row = fetch_active_user_by_rut(u)
+                if not row:
                     st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
                     st.rerun()
                 else:
-                    row = df.iloc[0].to_dict()
                     if not verify_password(passw, row["salt_b64"], row["pass_hash_b64"]):
                         st.session_state["_lg_err"] = "Contraseña incorrecta."
                         st.rerun()
@@ -7394,8 +7417,7 @@ def page_mi_perfil():
             if not validate_rut_dv_core(username_norm):
                 st.error('El RUT ingresado no es válido.')
                 st.stop()
-            exists = fetch_value("SELECT COUNT(*) FROM users WHERE username=? AND id<>?", (username_norm, uid), default=0)
-            if int(exists or 0) > 0:
+            if username_exists_for_rut(username_norm, exclude_id=uid):
                 st.error('Ese RUT ya está siendo usado por otro usuario.')
                 st.stop()
             if email and '@' not in email:
@@ -7752,7 +7774,7 @@ def page_admin_usuarios():
             ok = st.form_submit_button("Crear usuario", type="primary", use_container_width=True)
 
         if ok:
-            username = format_rut(username)
+            username = normalize_user_rut_for_storage(username)
             st.session_state["create_user_rut"] = username
             # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
             if scoped_mode:
@@ -7779,8 +7801,14 @@ def page_admin_usuarios():
             if len(pw1) < 8:
                 st.error("La contraseña debe tener al menos 8 caracteres.")
                 st.stop()
+            if username_exists_for_rut(u):
+                st.error("Ya existe una cuenta con ese RUT. Usa otro RUT o edita el usuario existente.")
+                st.stop()
             try:
                 assign_company_key = str(target_company_key or '').strip() if not scoped_mode else str(tenant_key or '').strip()
+                if (role or '').upper() != 'SUPERADMIN' and not assign_company_key:
+                    st.error('Debes asignar una empresa para que el usuario pueda iniciar sesión y ver información.')
+                    st.stop()
                 user_fixed_company_key = assign_company_key if (scoped_mode or fixed_to_company) else ''
                 if (scoped_mode or fixed_to_company) and not assign_company_key:
                     st.error('Debes seleccionar una empresa para dejar fijo el usuario.')
