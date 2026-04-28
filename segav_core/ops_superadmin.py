@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from segav_core.kpi_ui import kpi_card
+
 IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
 IMPLEMENTATION_LABELS = {
     "DESDE_CERO": "Desde cero (recomendado)",
@@ -362,7 +364,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 qq = filtro_txt.strip().lower()
                 view_a = view_a[view_a["detalle"].astype(str).str.lower().str.contains(qq, na=False)]
 
-            st.metric("Registros mostrados", len(view_a))
+            kpi_card("Registros mostrados", len(view_a), subtitle="Eventos visibles con filtros aplicados", icon="🧾", tone="info", status="Auditoría")
             st.dataframe(
                 view_a.rename(columns={
                     "created_at": "Fecha/Hora", "username": "Usuario",

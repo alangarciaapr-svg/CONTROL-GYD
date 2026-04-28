@@ -37,6 +37,7 @@ from segav_core.tenant_scope import inject_tenant_condition_sql as inject_tenant
 from segav_core.ui_tenant import allowed_client_keys_for_user as allowed_client_keys_for_user_core, filter_visible_clientes_df as filter_visible_clientes_df_core, resolve_active_client_key as resolve_active_client_key_core, client_key_is_visible as client_key_is_visible_core, active_company_admin_flag as active_company_admin_flag_core, company_role_for_user as company_role_for_user_core, company_caps_for_user as company_caps_for_user_core, tenant_object_path_allowed as tenant_object_path_allowed_core
 from segav_core.module_perms import ensure_user_client_module_perms_table, effective_company_perms
 from segav_core.db_migrations import apply_runtime_migrations
+from segav_core.kpi_ui import kpi_card, kpi_grid, tone_for_percentage
 
 # ----------------------------
 # Config
@@ -5890,8 +5891,10 @@ def _page_asignar_trabajadores_impl():
         with tab_sessions:
             try:
                 sess_summary = get_active_sessions_summary(tenant_key if scoped_mode else str(current_tenant_key() or tenant_key or '').strip(), minutes=20)
-                st.metric("Usuarios conectados (20 min)", int(sess_summary.get("users", 0)))
-                st.metric("Sesiones activas (20 min)", int(sess_summary.get("sessions", 0)))
+                kpi_grid([
+                    {"label": "Usuarios conectados", "value": int(sess_summary.get("users", 0)), "subtitle": "Actividad últimos 20 minutos", "icon": "👥", "tone": "info", "status": "Online"},
+                    {"label": "Sesiones activas", "value": int(sess_summary.get("sessions", 0)), "subtitle": "Sesiones detectadas en empresa visible", "icon": "🟢", "tone": "success", "status": "Monitor"},
+                ], columns=2)
                 sess_df = sess_summary.get("rows")
                 if sess_df is not None and not sess_df.empty:
                     st.dataframe(sess_df.rename(columns={"username":"rut_usuario","last_seen_at":"ultima_actividad","sesiones":"sesiones"}), use_container_width=True, hide_index=True)
@@ -6494,7 +6497,8 @@ def _page_documentos_trabajador_impl():
             else:
                 ok = sum(1 for v in pend.values() if not v)
                 total = len(pend)
-                st.metric("Trabajadores OK", f"{ok}/{total}")
+                pct_ok = round((ok / total) * 100, 1) if total else 0
+                kpi_card("Trabajadores OK", f"{ok}/{total}", subtitle=f"{pct_ok:.1f}% con documentación completa", icon="👷", tone=tone_for_percentage(pct_ok), status="Faena", progress=pct_ok)
                 for k, missing in pend.items():
                     if missing:
                         st.error(f"{k} — faltan: {doc_tipo_join(missing)}")

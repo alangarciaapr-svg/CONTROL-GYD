@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ui import ui_header, ui_tip
+from segav_core.kpi_ui import kpi_card, tone_for_percentage
 
 def page_trabajadores(
     *,
@@ -865,7 +866,8 @@ def page_documentos_trabajador(
             else:
                 ok = sum(1 for v in pend.values() if not v)
                 total = len(pend)
-                st.metric("Trabajadores OK", f"{ok}/{total}")
+                pct_ok = round((ok / total) * 100, 1) if total else 0
+                kpi_card("Trabajadores OK", f"{ok}/{total}", subtitle=f"{pct_ok:.1f}% con documentación completa", icon="👷", tone=tone_for_percentage(pct_ok), status="Faena", progress=pct_ok)
                 for k, missing in pend.items():
                     if missing:
                         st.error(f"{k} — faltan: {doc_tipo_join(missing)}")

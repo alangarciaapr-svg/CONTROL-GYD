@@ -6,27 +6,29 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ui import ui_header, ui_tip
+from segav_core.kpi_ui import kpi_grid
 
 
 def page_mandantes(*, fetch_df, execute, auto_backup_db):
     ui_header("Mandantes", "Registra mandantes. Cada faena se asocia a un mandante. Aquí puedes crear, editar y revisar su avance.")
 
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        try:
-            st.metric("Mandantes", int(fetch_df("SELECT COUNT(*) AS n FROM mandantes")["n"].iloc[0]))
-        except Exception:
-            st.metric("Mandantes", 0)
-    with k2:
-        try:
-            st.metric("Contratos de faena", int(fetch_df("SELECT COUNT(*) AS n FROM contratos_faena")["n"].iloc[0]))
-        except Exception:
-            st.metric("Contratos de faena", 0)
-    with k3:
-        try:
-            st.metric("Faenas", int(fetch_df("SELECT COUNT(*) AS n FROM faenas")["n"].iloc[0]))
-        except Exception:
-            st.metric("Faenas", 0)
+    try:
+        mandantes_n = int(fetch_df("SELECT COUNT(*) AS n FROM mandantes")["n"].iloc[0])
+    except Exception:
+        mandantes_n = 0
+    try:
+        contratos_n = int(fetch_df("SELECT COUNT(*) AS n FROM contratos_faena")["n"].iloc[0])
+    except Exception:
+        contratos_n = 0
+    try:
+        faenas_n = int(fetch_df("SELECT COUNT(*) AS n FROM faenas")["n"].iloc[0])
+    except Exception:
+        faenas_n = 0
+    kpi_grid([
+        {"label": "Mandantes", "value": mandantes_n, "subtitle": "Clientes o mandantes registrados", "icon": "🏢", "tone": "info", "status": "Base"},
+        {"label": "Contratos de faena", "value": contratos_n, "subtitle": "Vínculos contractuales operativos", "icon": "📝", "tone": "purple", "status": "Contratos"},
+        {"label": "Faenas", "value": faenas_n, "subtitle": "Operaciones registradas", "icon": "🌲", "tone": "success" if faenas_n else "neutral", "status": "Operación"},
+    ], columns=3)
 
     tab_over, tab_create, tab_manage = st.tabs(["📌 Overview", "➕ Crear", "✏️ Editar / 🗑️ Eliminar"])
 
@@ -74,9 +76,11 @@ def page_mandantes(*, fetch_df, execute, auto_backup_db):
                     key="mand_detail_sel",
                 )
                 row = df[df["id"] == mid].iloc[0]
-                st.metric("Contratos", int(row["contratos"]))
-                st.metric("Faenas", int(row["faenas_total"]))
-                st.metric("Faenas activas", int(row["faenas_activas"]))
+                kpi_grid([
+                    {"label": "Contratos", "value": int(row["contratos"]), "subtitle": "Asociados al mandante", "icon": "📝", "tone": "purple", "status": "Contrato"},
+                    {"label": "Faenas", "value": int(row["faenas_total"]), "subtitle": "Total histórico", "icon": "🌲", "tone": "info", "status": "Faena"},
+                    {"label": "Faenas activas", "value": int(row["faenas_activas"]), "subtitle": "Operación vigente", "icon": "✅", "tone": "success" if int(row["faenas_activas"]) else "neutral", "status": "Activas"},
+                ], columns=1)
                 fa = fetch_df(
                     """
                     SELECT id, nombre, estado, fecha_inicio, fecha_termino

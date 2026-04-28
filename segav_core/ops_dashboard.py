@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ops_compliance import build_auto_alerts, ensure_multiempresa_compliance_schema_once, legal_docs_status_summary
+from segav_core.kpi_ui import kpi_grid, kpi_section, tone_for_count, tone_for_percentage
 
 
 def _safe_current_client(clientes_df: pd.DataFrame, current_client_key: str) -> dict:
@@ -280,23 +281,21 @@ def page_dashboard(
     )
     score_label, score_icon = _score_label(score)
 
-    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-    with m1:
-        st.metric("Score ejecutivo", f"{score:.1f}/100", help="Índice compuesto de cobertura documental, habilitación, programa anual, capacitaciones y criticidad.")
-    with m2:
-        st.metric("Faenas críticas", crit_faenas)
-    with m3:
-        st.metric("Habilitación", f"{habilitacion:.1f}%")
-    with m4:
-        st.metric("Cobertura docs", f"{cobertura:.1f}%")
-    with m5:
-        st.metric("Programa anual", f"{float(program['cerradas_pct']):.1f}%")
-    with m6:
-        st.metric("Alertas / planes", int(auto_high + actions["abiertas"]))
-    with m7:
-        st.metric("Docs críticos vencidos", int(legal.get("criticos_vencidos", 0)))
-
-    st.caption(f"Estado gerencial: **{score_icon} {score_label}** · Cliente activo: **{current_name}** · Vertical: **{current_client.get('vertical') or 'General'}** · Modo: **{current_client.get('modo_implementacion') or 'CONFIGURABLE'}**")
+    legal_vencidos = int(legal.get("criticos_vencidos", 0))
+    alertas_planes = int(auto_high + actions["abiertas"])
+    kpi_section(
+        "Sala de control ejecutivo",
+        f"Estado gerencial: {score_icon} {score_label} · Cliente activo: {current_name} · Vertical: {current_client.get('vertical') or 'General'} · Modo: {current_client.get('modo_implementacion') or 'CONFIGURABLE'}",
+    )
+    kpi_grid([
+        {"label": "Score ejecutivo", "value": f"{score:.1f}/100", "subtitle": "Índice integral de salud operacional", "icon": "🏆", "tone": tone_for_percentage(score, danger_below=55, warning_below=75), "status": score_label, "progress": score, "help_text": "Cobertura documental, habilitación, programa anual, capacitaciones y criticidad."},
+        {"label": "Faenas críticas", "value": crit_faenas, "subtitle": "Requieren intervención inmediata", "icon": "🚨", "tone": tone_for_count(crit_faenas, danger_at=2), "status": "CRÍTICO" if crit_faenas else "OK"},
+        {"label": "Habilitación", "value": f"{habilitacion:.1f}%", "subtitle": f"{trabajadores_ok}/{trabajadores_activos} trabajadores OK", "icon": "👷", "tone": tone_for_percentage(habilitacion), "status": "Personal", "progress": habilitacion},
+        {"label": "Cobertura documental", "value": f"{cobertura:.1f}%", "subtitle": "Promedio de cumplimiento por faena", "icon": "📁", "tone": tone_for_percentage(cobertura), "status": "Documental", "progress": cobertura},
+        {"label": "Programa anual", "value": f"{float(program['cerradas_pct']):.1f}%", "subtitle": f"{int(program['cerradas'])}/{int(program['total'])} actividades cerradas", "icon": "📅", "tone": tone_for_percentage(float(program['cerradas_pct'])), "status": "SGSST", "progress": float(program['cerradas_pct'])},
+        {"label": "Alertas / planes", "value": alertas_planes, "subtitle": f"{auto_high} altas · {int(actions['abiertas'])} planes abiertos", "icon": "⚡", "tone": tone_for_count(alertas_planes, danger_at=5), "status": "Acción" if alertas_planes else "OK"},
+        {"label": "Docs críticos vencidos", "value": legal_vencidos, "subtitle": "Bloquean operaciones sensibles", "icon": "⚖️", "tone": tone_for_count(legal_vencidos, danger_at=1), "status": "Legal" if legal_vencidos else "OK"},
+    ], columns=4)
 
     tabs = st.tabs(["🏢 Resumen ejecutivo", "🚦 Operación y cumplimiento", "💼 Comercial / multiempresa", "⚡ Acciones"])
 
@@ -408,15 +407,15 @@ def page_dashboard(
             if port.empty:
                 st.info("No hay cartera suficiente para mostrar comparativo multiempresa.")
             else:
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    st.metric("Clientes activos", int(len(port)))
-                with c2:
-                    st.metric("Promedio score", f"{float(port['Score'].mean()):.1f}")
-                with c3:
-                    st.metric("Clientes críticos", int((port["Score"] < 55).sum()))
-                with c4:
-                    st.metric("Clientes controlados", int((port["Score"] >= 70).sum()))
+                avg_score = float(port['Score'].mean())
+                clientes_criticos = int((port["Score"] < 55).sum())
+                clientes_controlados = int((port["Score"] >= 70).sum())
+                kpi_grid([
+                    {"label": "Clientes activos", "value": int(len(port)), "subtitle": "Empresas visibles en cartera", "icon": "🏢", "tone": "info", "status": "Cartera"},
+                    {"label": "Promedio score", "value": f"{avg_score:.1f}", "subtitle": "Salud promedio de clientes", "icon": "📈", "tone": tone_for_percentage(avg_score, danger_below=55, warning_below=70), "status": "Portfolio", "progress": avg_score},
+                    {"label": "Clientes críticos", "value": clientes_criticos, "subtitle": "Score bajo 55 puntos", "icon": "🚩", "tone": tone_for_count(clientes_criticos, danger_at=1), "status": "Riesgo" if clientes_criticos else "OK"},
+                    {"label": "Clientes controlados", "value": clientes_controlados, "subtitle": "Score igual o superior a 70", "icon": "✅", "tone": "success" if clientes_controlados else "neutral", "status": "Control"},
+                ], columns=4)
                 st.markdown("#### Portafolio multiempresa")
                 st.dataframe(port, use_container_width=True, hide_index=True)
                 st.markdown("#### Ranking comercial de salud por cliente")

@@ -6,6 +6,8 @@ from typing import Callable
 import pandas as pd
 import streamlit as st
 
+from segav_core.kpi_ui import kpi_card, kpi_grid, tone_for_count
+
 
 SGSST_SCOPE_TABLES = [
     "sgsst_empresa",
@@ -548,8 +550,8 @@ def build_auto_alerts(*, fetch_df: Callable, fetch_value: Callable, client_key: 
 
 
 
-def _metric_card(label: str, value, help_text: str | None = None):
-    st.metric(label, value, help=help_text)
+def _metric_card(label: str, value, help_text: str | None = None, tone: str = "neutral", icon: str = "📊", status: str = ""):
+    kpi_card(label, value, help_text=help_text, tone=tone, icon=icon, status=status)
 
 
 
@@ -616,19 +618,14 @@ def page_compliance_alerts(
     overdue_manual = int(((open_actions["estado"].fillna("ABIERTA") == "ABIERTA") & (open_actions["fecha_limite"].fillna("") < date.today().isoformat())).sum()) if not open_actions.empty and "fecha_limite" in open_actions.columns else 0
     legal = legal_docs_status_summary(fetch_df=fetch_df, client_key=current_key)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    with m1:
-        _metric_card("Faenas críticas", crit_faenas)
-    with m2:
-        _metric_card("Faenas pendientes", pend_faenas)
-    with m3:
-        _metric_card("Alertas auto altas", crit_auto)
-    with m4:
-        _metric_card("Planes abiertos", open_manual)
-    with m5:
-        _metric_card("Planes vencidos", overdue_manual)
-    with m6:
-        _metric_card("Docs críticos vencidos", int(legal.get("criticos_vencidos", 0)))
+    kpi_grid([
+        {"label": "Faenas críticas", "value": crit_faenas, "subtitle": "Estado CRÍTICO", "icon": "🚨", "tone": tone_for_count(crit_faenas, danger_at=2), "status": "OK" if crit_faenas == 0 else "Urgente"},
+        {"label": "Faenas pendientes", "value": pend_faenas, "subtitle": "Documentación o personal incompleto", "icon": "🟠", "tone": tone_for_count(pend_faenas, danger_at=4), "status": "Pendiente" if pend_faenas else "OK"},
+        {"label": "Alertas auto altas", "value": crit_auto, "subtitle": "Motor automático de cumplimiento", "icon": "🔔", "tone": tone_for_count(crit_auto, danger_at=5), "status": "Acción" if crit_auto else "OK"},
+        {"label": "Planes abiertos", "value": open_manual, "subtitle": "Acciones manuales por cerrar", "icon": "🛠️", "tone": tone_for_count(open_manual, danger_at=6), "status": "Gestión" if open_manual else "OK"},
+        {"label": "Planes vencidos", "value": overdue_manual, "subtitle": "Compromisos fuera de plazo", "icon": "⏰", "tone": tone_for_count(overdue_manual, danger_at=1), "status": "Vencido" if overdue_manual else "OK"},
+        {"label": "Docs críticos vencidos", "value": int(legal.get("criticos_vencidos", 0)), "subtitle": "Riesgo legal/documental", "icon": "⚖️", "tone": tone_for_count(int(legal.get("criticos_vencidos", 0)), danger_at=1), "status": "Legal" if int(legal.get("criticos_vencidos", 0)) else "OK"},
+    ], columns=3)
 
     tabs = st.tabs(["🚦 Semáforo ejecutivo", "🔔 Alertas automáticas", "🛠️ Planes de acción", "📋 Riesgo por faena", "⚖️ Legal crítico"])
 

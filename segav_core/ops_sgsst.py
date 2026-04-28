@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from segav_core.ui import ui_header
+from segav_core.kpi_ui import kpi_card
 
 
 def page_sgsst(
@@ -487,7 +488,9 @@ def page_sgsst(
             prob = st.slider("Probabilidad", 1, 5, 3, key=K("sgsst_miper_prob"))
             sev = st.slider("Severidad", 1, 5, 3, key=K("sgsst_miper_sev"))
             nivel = int(prob) * int(sev)
-            st.metric("Nivel de riesgo", nivel)
+            riesgo_tone = "danger" if nivel >= 16 else ("warning" if nivel >= 9 else "success")
+            riesgo_status = "Alto" if nivel >= 16 else ("Medio" if nivel >= 9 else "Controlado")
+            kpi_card("Nivel de riesgo", nivel, subtitle=f"Probabilidad {int(prob)} × Severidad {int(sev)}", icon="⚠️", tone=riesgo_tone, status=riesgo_status, progress=min(100, (nivel / 25) * 100))
             medidas = st.text_area("Medidas / acciones", key=K("sgsst_miper_medidas"), height=80)
             responsable = st.text_input("Responsable", key=K("sgsst_miper_resp"))
             plazo = st.date_input("Plazo", value=date.today(), key=K("sgsst_miper_plazo"))
