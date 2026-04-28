@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from segav_core.kpi_ui import kpi_card
+from segav_core.kpi_ui import kpi_card, kpi_grid, kpi_section, tone_for_count, tone_for_percentage
 
 IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
 IMPLEMENTATION_LABELS = {
@@ -51,14 +51,24 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
 
     total_empresas = int(len(cli_df)) if cli_df is not None else 0
     activas = int(cli_df["activo"].fillna(1).astype(int).sum()) if cli_df is not None and not cli_df.empty and "activo" in cli_df.columns else total_empresas
+    inactivas = max(0, total_empresas - activas)
     admins_asignados = int(access_df[access_df["is_company_admin"].fillna(0).astype(int) == 1][["cliente_key", "user_id"]].drop_duplicates().shape[0]) if access_df is not None and not access_df.empty else 0
     usuarios_asignados = int(access_df[["cliente_key", "user_id"]].drop_duplicates().shape[0]) if access_df is not None and not access_df.empty else 0
+    active_user_ids = set(users_df[users_df["is_active"].fillna(1).astype(int) == 1]["id"].astype(int).tolist()) if users_df is not None and not users_df.empty else set()
+    assigned_user_ids = set(access_df["user_id"].dropna().astype(int).tolist()) if access_df is not None and not access_df.empty else set()
+    usuarios_sin_empresa = len(active_user_ids - assigned_user_ids)
+    empresas_con_admin = set(access_df[access_df["is_company_admin"].fillna(0).astype(int) == 1]["cliente_key"].dropna().astype(str).tolist()) if access_df is not None and not access_df.empty else set()
+    empresas_activas_keys = set(cli_df[cli_df["activo"].fillna(1).astype(int) == 1]["cliente_key"].astype(str).tolist()) if cli_df is not None and not cli_df.empty and "activo" in cli_df.columns else set(cli_df["cliente_key"].astype(str).tolist()) if cli_df is not None and not cli_df.empty else set()
+    empresas_sin_admin = len(empresas_activas_keys - empresas_con_admin)
+    cobertura_admin = round((len(empresas_activas_keys & empresas_con_admin) / max(len(empresas_activas_keys), 1)) * 100.0, 1) if empresas_activas_keys else 0.0
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Empresas registradas", total_empresas)
-    m2.metric("Empresas activas", activas)
-    m3.metric("Admins asignados", admins_asignados)
-    m4.metric("Usuarios vinculados", usuarios_asignados)
+    kpi_section("Centro de control SuperAdmin", "Vista global de empresas, accesos, adopción y riesgos de administración.")
+    kpi_grid([
+        {"label": "Empresas registradas", "value": total_empresas, "subtitle": f"{activas} activas · {inactivas} inactivas", "icon": "🏢", "tone": "info", "status": "Catálogo"},
+        {"label": "Cobertura admin", "value": f"{cobertura_admin:.1f}%", "subtitle": "Empresas activas con administrador asignado", "icon": "🛡️", "tone": tone_for_percentage(cobertura_admin, danger_below=70, warning_below=90), "status": "Control", "progress": cobertura_admin},
+        {"label": "Sin administrador", "value": empresas_sin_admin, "subtitle": "Empresas activas sin responsable definido", "icon": "⚠️", "tone": tone_for_count(empresas_sin_admin, danger_at=1), "status": "Revisar" if empresas_sin_admin else "OK"},
+        {"label": "Usuarios vinculados", "value": usuarios_asignados, "subtitle": f"{usuarios_sin_empresa} usuarios activos sin empresa", "icon": "👥", "tone": tone_for_count(usuarios_sin_empresa, danger_at=1), "status": "Accesos"},
+    ], columns=4)
 
     tabs = st.tabs(["🌐 Dashboard", "🏢 Empresas", "👥 Administradores", "📋 Audit Log"])
 
@@ -71,20 +81,45 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 admins = 0
                 if access_df is not None and not access_df.empty:
                     admins = int(access_df[(access_df["cliente_key"].astype(str) == ckey) & (access_df["is_company_admin"].fillna(0).astype(int) == 1)]["user_id"].nunique())
+                faenas_n = _dep_count(fetch_value, "faenas", ckey)
+                trab_n = _dep_count(fetch_value, "trabajadores", ckey)
+                docs_emp_n = _dep_count(fetch_value, "empresa_documentos", ckey)
+                docs_trab_n = _dep_count(fetch_value, "trabajador_documentos", ckey)
+                active_txt = "SI" if int(row.get("activo") or 0) == 1 else "NO"
+                estado_admin = "🟢 Con admin" if admins > 0 else "🔴 Sin admin"
+                estado_operativo = "🟢 Activa" if active_txt == "SI" else "⚪ Inactiva"
                 rows.append({
                     "Código": ckey,
                     "Empresa": str(row.get("cliente_nombre") or ""),
                     "RUT": str(row.get("rut") or ""),
                     "Rubro": str(row.get("vertical") or ""),
                     "Tipo de inicio": impl_label(str(row.get("modo_implementacion") or "")),
-                    "Activa": "SI" if int(row.get("activo") or 0) == 1 else "NO",
-                    "Faenas": _dep_count(fetch_value, "faenas", ckey),
-                    "Trabajadores": _dep_count(fetch_value, "trabajadores", ckey),
-                    "Docs Empresa": _dep_count(fetch_value, "empresa_documentos", ckey),
+                    "Estado": estado_operativo,
+                    "Gobernanza": estado_admin,
+                    "Faenas": faenas_n,
+                    "Trabajadores": trab_n,
+                    "Docs Empresa": docs_emp_n,
+                    "Docs Trabajador": docs_trab_n,
                     "Admins": admins,
                 })
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            rows_df = pd.DataFrame(rows)
+            total_faenas = int(rows_df["Faenas"].sum())
+            total_trab = int(rows_df["Trabajadores"].sum())
+            total_docs = int(rows_df["Docs Empresa"].sum() + rows_df["Docs Trabajador"].sum())
+            empresas_con_operacion = int(((rows_df["Faenas"] > 0) | (rows_df["Trabajadores"] > 0)).sum())
+            adopcion = round((empresas_con_operacion / max(total_empresas, 1)) * 100.0, 1) if total_empresas else 0.0
+            kpi_grid([
+                {"label": "Adopción operacional", "value": f"{adopcion:.1f}%", "subtitle": f"{empresas_con_operacion}/{total_empresas} empresas con datos", "icon": "📊", "tone": tone_for_percentage(adopcion, danger_below=40, warning_below=70), "status": "Adopción", "progress": adopcion},
+                {"label": "Faenas totales", "value": total_faenas, "subtitle": "Operaciones registradas en cartera", "icon": "🌲", "tone": "info", "status": "Operación"},
+                {"label": "Trabajadores", "value": total_trab, "subtitle": "Personas registradas globalmente", "icon": "👷", "tone": "purple", "status": "Dotación"},
+                {"label": "Documentos", "value": total_docs, "subtitle": "Empresa + trabajador", "icon": "📁", "tone": "success" if total_docs else "neutral", "status": "Repositorio"},
+            ], columns=4)
+            st.dataframe(rows_df, use_container_width=True, hide_index=True)
+            if "Rubro" in rows_df.columns and not rows_df.empty:
+                rubro_df = rows_df.groupby("Rubro", dropna=False).size().reset_index(name="Empresas")
+                st.markdown("#### Distribución por rubro")
+                st.bar_chart(rubro_df.set_index("Rubro"))
         else:
             st.info("Aún no hay empresas registradas en el catálogo multiempresa.")
 
