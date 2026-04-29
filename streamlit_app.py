@@ -7737,7 +7737,7 @@ def page_admin_usuarios():
         if target_df is None or target_df.empty:
             st.info('No hay usuarios disponibles para configurar.')
         else:
-            uid_perm = st.selectbox('Usuario para permisos empresa', target_df['id'].tolist(), format_func=lambda x: target_df[target_df['id']==x].iloc[0]['username'], key='tenant_perm_uid')
+            uid_perm = st.selectbox('Usuario para permisos empresa', target_df['id'].tolist(), format_func=lambda x: target_df[target_df['id']==x].iloc[0]['username'], key=f'{_adm_ns}_tenant_perm_uid')
             if scoped_mode and int(fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key), default=0) or 0) <= 0:
                 st.warning('Ese usuario no pertenece a la empresa activa.')
             else:
@@ -7749,8 +7749,8 @@ def page_admin_usuarios():
                 over = {}
                 for i,k in enumerate(DEFAULT_PERMS.keys()):
                     with cols[i%3]:
-                        over[k] = st.checkbox(f"{k}", value=bool(eff.get(k, False)), key=f'tenant_modperm_{uid_perm}_{k}')
-                if st.button('Guardar permisos empresa', type='primary', use_container_width=True, key='tenant_perm_save'):
+                        over[k] = st.checkbox(f"{k}", value=bool(eff.get(k, False)), key=f'{_adm_ns}_tenant_modperm_{uid_perm}_{k}')
+                if st.button('Guardar permisos empresa', type='primary', use_container_width=True, key=f'{_adm_ns}_tenant_perm_save'):
                     execute("DELETE FROM user_client_module_perms WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key))
                     execute("INSERT INTO user_client_module_perms(user_id, cliente_key, perms_json, updated_at) VALUES(?,?,?,datetime('now'))", (int(uid_perm), tenant_key, json.dumps(over)))
                     audit_log('PERMISOS_EMPRESA', 'user_client_module_perms', f'Usuario {uid_perm} empresa {tenant_key}')
@@ -7762,11 +7762,11 @@ def page_admin_usuarios():
         target_company_name = tenant_key if scoped_mode else ''
         fixed_to_company = True if scoped_mode else False
         target_company_admin = False
-        with st.form("form_create_user", clear_on_submit=True):
-            username = rut_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut")
-            role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
+        with st.form(f"{_adm_ns}_form_create_user", clear_on_submit=True):
+            username = rut_input("Usuario (RUT)", placeholder="12.345.678-5", key=f"{_adm_ns}_create_user_rut")
+            role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS, key=f"{_adm_ns}_create_user_role")
             if scoped_mode:
-                st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True)
+                st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True, key=f"{_adm_ns}_create_user_empresa_view")
                 st.caption("Este usuario quedará asociado solo a la empresa activa.")
             else:
                 _cli_df_create = visible_clientes_df() if is_superadmin() else pd.DataFrame()
@@ -7778,19 +7778,19 @@ def page_admin_usuarios():
                         [''] + _create_keys,
                         index=0,
                         format_func=lambda x: '— Sin asignar ahora —' if not str(x).strip() else _create_name_map.get(str(x), str(x)),
-                        key='create_user_company_key',
+                        key=f'{_adm_ns}_create_user_company_key',
                     )
                     target_company_name = _create_name_map.get(str(target_company_key), str(target_company_key)) if str(target_company_key).strip() else ''
                 fixed_to_company = st.checkbox(
                     "Dejar usuario fijo solo a esa empresa",
                     value=bool(str(target_company_key).strip()),
-                    key='create_user_fixed_company',
+                    key=f'{_adm_ns}_create_user_fixed_company',
                     help='Si está activo, el usuario solo podrá entrar y ver la información de esa empresa.',
                 )
                 if str(target_company_key).strip():
-                    target_company_admin = st.checkbox('Administrar esa empresa', value=False, key='create_user_company_admin')
-            pw1 = st.text_input("Contraseña", type="password")
-            pw2 = st.text_input("Repetir contraseña", type="password")
+                    target_company_admin = st.checkbox('Administrar esa empresa', value=False, key=f'{_adm_ns}_create_user_company_admin')
+            pw1 = st.text_input("Contraseña", type="password", key=f"{_adm_ns}_create_user_pw1")
+            pw2 = st.text_input("Repetir contraseña", type="password", key=f"{_adm_ns}_create_user_pw2")
             st.markdown("#### Poderes")
             base = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES["OPERADOR"])
             cols = st.columns(3)
@@ -7798,12 +7798,12 @@ def page_admin_usuarios():
             keys = list(DEFAULT_PERMS.keys())
             for i, k in enumerate(keys):
                 with cols[i % 3]:
-                    perms[k] = st.checkbox(k, value=bool(base.get(k, False)), key=f"new_perm_{k}")
+                    perms[k] = st.checkbox(k, value=bool(base.get(k, False)), key=f"{_adm_ns}_new_perm_{k}")
             ok = st.form_submit_button("Crear usuario", type="primary", use_container_width=True)
 
         if ok:
             username = normalize_user_rut_for_storage(username)
-            st.session_state["create_user_rut"] = username
+            st.session_state[f"{_adm_ns}_create_user_rut"] = username
             # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
             if scoped_mode:
                 if (role or '').upper() not in {'OPERADOR', 'LECTOR'}:
