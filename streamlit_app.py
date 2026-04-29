@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 from urllib.parse import quote
 import json
@@ -293,7 +294,7 @@ def _safe_numeric_int(value, default: int = 0) -> int:
             return int(default)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _cached_fetch_df(db_backend: str, dsn_fingerprint: str, q: str, params_cache):
     params = tuple(params_cache) if isinstance(params_cache, tuple) else params_cache
     if db_backend == "postgres":
@@ -1442,30 +1443,38 @@ def clean_rut(rut: str) -> str:
     return clean_rut_core(rut)
 
 
+
 def _format_rut_session_value(key: str):
     st.session_state[key] = format_rut_chileno(st.session_state.get(key, ""))
 
 
-def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None):
+def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None, disabled: bool = False):
+    """Campo estándar para RUT chileno, compatible con formularios Streamlit."""
     current_value = st.session_state.get(key, value)
     formatted_value = format_rut_chileno(current_value)
-    if st.session_state.get(key) != formatted_value:
+    if formatted_value and st.session_state.get(key) != formatted_value:
         st.session_state[key] = formatted_value
     result = st.text_input(
         label,
         key=key,
         placeholder=placeholder,
-        help=help,
-        on_change=_format_rut_session_value,
-        args=(key,),
+        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente.",
+        disabled=disabled,
     )
-    # Validación DV en tiempo real
-    _val = st.session_state.get(key, "")
-    if _val and len(_val) > 3:
-        if not validate_rut_dv(_val):
-            st.caption("⚠️ RUT inválido — verifica el dígito verificador")
+    _val = format_rut_chileno(st.session_state.get(key, result))
+    if _val and _val != str(result or '').strip():
+        st.caption(f"Formato RUT: {_val}")
+    if _val and len(_val) > 3 and not validate_rut_dv(_val):
+        st.caption("⚠️ RUT inválido — verifica el dígito verificador")
     return result
 
+
+def inject_rut_autoformat_script():
+    """Formatea visualmente todos los inputs de RUT sin callbacks pesados."""
+    try:
+        components.html('<script>\n(function(){\n  if (window.__segavRutAutoFormatInstalled) return;\n  window.__segavRutAutoFormatInstalled = true;\n  function formatRut(value){\n    let raw = String(value || \'\').replace(/[^0-9kK]/g,\'\').toUpperCase();\n    if(raw.length <= 1) return raw;\n    let body = raw.slice(0,-1), dv = raw.slice(-1);\n    body = body.replace(/^0+(?=\\d)/,\'\');\n    let out = \'\';\n    while(body.length > 3){ out = \'.\' + body.slice(-3) + out; body = body.slice(0,-3); }\n    return body + out + \'-\' + dv;\n  }\n  function isRutInput(el){\n    if(!el || el.tagName !== \'INPUT\' || el.type === \'password\') return false;\n    const attrs = [el.getAttribute(\'aria-label\'), el.getAttribute(\'placeholder\'), el.name, el.id].join(\' \').toLowerCase();\n    if(attrs.includes(\'rut\')) return true;\n    if((el.getAttribute(\'placeholder\') || \'\').match(/\\d{1,2}\\.\\d{3}\\.\\d{3}-[0-9kK]/)) return true;\n    const container = el.closest(\'[data-testid="stTextInput"]\') || el.parentElement;\n    const labelTxt = (container && container.innerText) ? container.innerText.toLowerCase() : \'\';\n    return labelTxt.includes(\'rut\');\n  }\n  function bind(root){\n    (root || document).querySelectorAll(\'input\').forEach(function(el){\n      if(!isRutInput(el) || el.dataset.segavRutBound === \'1\') return;\n      el.dataset.segavRutBound = \'1\';\n      el.setAttribute(\'inputmode\',\'text\');\n      el.addEventListener(\'input\', function(){\n        const f = formatRut(this.value);\n        if(f && f !== this.value){\n          const atEnd = this.selectionEnd === this.value.length;\n          this.value = f;\n          this.dispatchEvent(new Event(\'input\', {bubbles:true}));\n          this.dispatchEvent(new Event(\'change\', {bubbles:true}));\n          if(atEnd) this.setSelectionRange(this.value.length, this.value.length);\n        }\n      }, {passive:true});\n      if(el.value){\n        const f = formatRut(el.value);\n        if(f && f !== el.value){ el.value = f; el.dispatchEvent(new Event(\'change\', {bubbles:true})); }\n      }\n    });\n  }\n  function run(){\n    try { bind(window.parent.document); } catch(e) { try { bind(document); } catch(_){} }\n  }\n  run();\n  setInterval(run, 1200);\n})();\n</script>', height=0)
+    except Exception as _exc:
+        _record_soft_error('rut_autoformat_script', _exc)
 
 @st.cache_data(show_spinner=False)
 def _reset_trabajador_create_state():
@@ -1685,6 +1694,7 @@ def delete_uploaded_document_record(table_name: str, row_id: int):
 
 # ---------------------------------------------------------------
 
+@st.cache_resource(show_spinner=False)
 def get_pg_pool(dsn: str):
     if not dsn or psycopg is None or ConnectionPool is None:
         return None
@@ -1700,6 +1710,21 @@ def get_pg_pool(dsn: str):
         return pool
     except Exception:
         return None
+
+@st.cache_resource(show_spinner=False)
+def get_sqlite_connection(db_path: str):
+    c = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        c.execute("PRAGMA foreign_keys = ON;")
+        c.execute("PRAGMA journal_mode = WAL;")
+        c.execute("PRAGMA synchronous = NORMAL;")
+        c.execute("PRAGMA temp_store = MEMORY;")
+        c.execute("PRAGMA cache_size = -64000;")
+        c.execute("PRAGMA busy_timeout = 5000;")
+    except Exception as _exc:
+        _record_soft_error("sqlite.pragmas", _exc)
+    return c
+
 
 def conn():
     # Postgres (Supabase) if configured; otherwise SQLite local.
@@ -1720,16 +1745,7 @@ def conn():
                 f"Detalle: {msg}. "
                 "Revisa SUPABASE_DB_URL o usa secretos separados SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_NAME, SUPABASE_DB_USER y SUPABASE_DB_PASSWORD."
             ) from e
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
-    try:
-        c.execute("PRAGMA foreign_keys = ON;")
-        c.execute("PRAGMA journal_mode = WAL;")
-        c.execute("PRAGMA synchronous = NORMAL;")
-        c.execute("PRAGMA temp_store = MEMORY;")
-        c.execute("PRAGMA busy_timeout = 5000;")
-    except Exception as _exc:
-        _record_soft_error("execute", _exc)
-    return c
+    return get_sqlite_connection(DB_PATH)
 
 def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
     if DB_BACKEND == "postgres":
@@ -4318,9 +4334,18 @@ def touch_user_session(cliente_key: str | None = None):
     u = current_user()
     if not u:
         return
+    ck = str(cliente_key or current_tenant_key() or st.session_state.get('active_cliente_key') or '').strip() or None
+    now_ts = datetime.now().timestamp()
+    touch_key = f"_segav_last_session_touch_{ck or 'global'}"
+    try:
+        last_ts = float(st.session_state.get(touch_key) or 0)
+    except Exception:
+        last_ts = 0.0
+    if now_ts - last_ts < 60:
+        return
+    st.session_state[touch_key] = now_ts
     ensure_user_sessions_table()
     sid = _current_session_id()
-    ck = str(cliente_key or current_tenant_key() or st.session_state.get('active_cliente_key') or '').strip() or None
     params_select = (sid,)
     exists = int(fetch_value("SELECT COUNT(*) FROM user_sessions WHERE session_id=?", params_select, default=0) or 0)
     if exists > 0:
@@ -5146,7 +5171,7 @@ html,body{
 
         with st.expander("¿Olvidó su contraseña?", expanded=False):
             st.caption("Recupera tu contraseña validando tu RUT y tu correo registrado.")
-            rec_rut = st.text_input("RUT registrado", key="_recrut", placeholder="12.345.678-5")
+            rec_rut = rut_input("RUT registrado", key="_recrut", placeholder="12.345.678-5")
             _rec_fmt = normalize_login_rut(rec_rut)
             if str(rec_rut or '').strip() and _rec_fmt and _rec_fmt != str(rec_rut or '').strip():
                 st.caption(f"Se usará como RUT: {_rec_fmt}")
@@ -5246,6 +5271,7 @@ html,body{
 bootstrap_app_or_stop()
 
 inject_css()
+inject_rut_autoformat_script()
 
 def _record_soft_error(context: str, exc: Exception | None = None):
     """Wrapper seguro para diagnóstico local."""
@@ -7396,7 +7422,7 @@ def page_mi_perfil():
     row = row_df.iloc[0].to_dict()
     st.caption('Aquí puedes editar tus datos personales y tu usuario de acceso en formato RUT chileno.')
     with st.form('mi_perfil_form', clear_on_submit=False):
-        username_rut = st.text_input('Usuario (RUT)', value=str(row.get('username') or ''), placeholder='12.345.678-5')
+        username_rut = rut_input('Usuario (RUT)', key='perfil_username_rut', value=str(row.get('username') or ''), placeholder='12.345.678-5')
         _perfil_rut_fmt = normalize_login_rut(username_rut)
         if str(username_rut or '').strip() and _perfil_rut_fmt and _perfil_rut_fmt != str(username_rut or '').strip():
             st.caption(f'Formato sugerido: {_perfil_rut_fmt}')
@@ -7735,7 +7761,7 @@ def page_admin_usuarios():
         fixed_to_company = True if scoped_mode else False
         target_company_admin = False
         with st.form("form_create_user", clear_on_submit=True):
-            username = st.text_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut")
+            username = rut_input("Usuario (RUT)", placeholder="12.345.678-5", key="create_user_rut")
             role = st.selectbox("Rol", ['OPERADOR', 'LECTOR'] if scoped_mode else USER_ROLE_OPTIONS)
             if scoped_mode:
                 st.text_input("Empresa asignada", value=str(tenant_key or ''), disabled=True)

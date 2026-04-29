@@ -7,6 +7,7 @@ import streamlit as st
 
 from segav_core.ui import ui_header
 from segav_core.kpi_ui import kpi_card
+from segav_core.personal_utils import rut_input
 
 
 def page_sgsst(
@@ -313,7 +314,7 @@ def page_sgsst(
         e1, e2 = st.columns(2)
         with e1:
             razon_social = st.text_input("Razón social", value=str(company.get("razon_social") or ""), key=K("sgsst_empresa_razon"))
-            rut = st.text_input("RUT empresa", value=clean_rut(company.get("rut") or ""), key=K("sgsst_empresa_rut"))
+            rut = rut_input("RUT empresa", value=clean_rut(company.get("rut") or ""), key=K("sgsst_empresa_rut"))
             direccion = st.text_input("Dirección", value=str(company.get("direccion") or ""), key=K("sgsst_empresa_direccion"))
             actividad = st.text_input("Actividad / rubro", value=str(company.get("actividad") or ""), key=K("sgsst_empresa_actividad"))
             organismo_admin = st.text_input("Organismo administrador", value=str(company.get("organismo_admin") or ""), key=K("sgsst_empresa_oa"))
@@ -976,7 +977,7 @@ def page_sgsst(
             faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
             s1, s2 = st.columns(2)
             with s1:
-                su_rut = st.text_input("RUT empresa subcontratista", key=K("sub_rut"))
+                su_rut = rut_input("RUT empresa subcontratista", key=K("sub_rut"))
                 su_razon = st.text_input("Razón social", key=K("sub_razon"))
                 su_mand = st.selectbox("Mandante", [None] + (mand_df["id"].tolist() if mand_df is not None and not mand_df.empty else []), key=K("sub_mand"),
                     format_func=lambda x: "(Sin mandante)" if x is None else str(mand_df[mand_df['id']==x].iloc[0]['nombre']))

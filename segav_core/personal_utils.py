@@ -13,19 +13,22 @@ def _format_rut_session_value(key: str):
     st.session_state[key] = format_rut_chileno(st.session_state.get(key, ""))
 
 
-def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None):
+def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None, disabled: bool = False):
     current_value = st.session_state.get(key, value)
     formatted_value = format_rut_chileno(current_value)
-    if st.session_state.get(key) != formatted_value:
+    if formatted_value and st.session_state.get(key) != formatted_value:
         st.session_state[key] = formatted_value
-    return st.text_input(
+    result = st.text_input(
         label,
         key=key,
         placeholder=placeholder,
-        help=help,
-        on_change=_format_rut_session_value,
-        args=(key,),
+        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente.",
+        disabled=disabled,
     )
+    fmt = format_rut_chileno(st.session_state.get(key, result))
+    if fmt and fmt != str(result or '').strip():
+        st.caption(f"Formato RUT: {fmt}")
+    return result
 
 
 def _reset_trabajador_create_state():

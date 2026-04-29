@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from segav_core.kpi_ui import kpi_card, kpi_grid, kpi_section, professional_bar_chart, tone_for_count, tone_for_percentage
+from segav_core.personal_utils import rut_input
 
 IMPLEMENTATION_OPTIONS = ["DESDE_CERO", "CONFIGURACION_BASE", "DEMO_PRUEBA"]
 IMPLEMENTATION_LABELS = {
@@ -138,7 +139,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         st.markdown("### Crear empresa")
         c1, c2, c3 = st.columns(3)
         new_name = c1.text_input("Nombre empresa", key="sa_new_empresa_nombre")
-        new_rut = c2.text_input("RUT empresa", key="sa_new_empresa_rut")
+        new_rut = rut_input("RUT empresa", key="sa_new_empresa_rut")
         new_vertical = c3.text_input("Rubro", key="sa_new_empresa_vertical", help="Define el rubro o tipo de empresa: forestal, construcción, transporte, servicios, etc.")
         c4, c5, c6 = st.columns(3)
         new_impl = c4.selectbox("Tipo de inicio", IMPLEMENTATION_OPTIONS, key="sa_new_empresa_impl", format_func=impl_label, help="Define cómo comenzará la empresa dentro del sistema. Desde cero parte completamente vacía.")
@@ -211,7 +212,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 row = cli_df[cli_df["cliente_key"].astype(str) == str(edit_key)].iloc[0].to_dict()
             e1, e2, e3 = st.columns(3)
             edit_name = e1.text_input("Nombre empresa", key="sa_edit_nombre")
-            edit_rut = e2.text_input("RUT", key="sa_edit_rut")
+            edit_rut = rut_input("RUT", key="sa_edit_rut", value=str(row.get("rut") or ""))
             edit_vertical = e3.text_input("Rubro", key="sa_edit_vertical", help="Rubro o tipo de empresa.")
             e4, e5, e6 = st.columns(3)
             impl_options = IMPLEMENTATION_OPTIONS.copy()
