@@ -7476,6 +7476,8 @@ def page_admin_usuarios():
     ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     tenant_key = current_tenant_key()
+    st.session_state["_adm_users_render_seq"] = int(st.session_state.get("_adm_users_render_seq", 0)) + 1
+    _adm_ns = f"adm_users_{st.session_state['_adm_users_render_seq']}_{tenant_key or 'global'}"
     scoped_mode = not is_superadmin()
     company_caps = current_company_caps_for_active_tenant() if scoped_mode else {'role_empresa': 'SUPERADMIN', 'can_manage_users': True}
     if scoped_mode and not company_caps.get('can_manage_users'):
@@ -7542,7 +7544,7 @@ def page_admin_usuarios():
                 "Selecciona usuario",
                 df["id"].tolist(),
                 format_func=lambda x: df[df["id"]==x].iloc[0]["username"],
-                key="adm_user_sel",
+                key=f"{_adm_ns}_user_sel",
             )
             _row_df = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),))
             if _row_df is None or _row_df.empty:
@@ -7568,9 +7570,9 @@ def page_admin_usuarios():
                     "Rol",
                     role_options,
                     index=role_options.index(current_role),
-                    key="adm_role_sel",
+                    key=f"{_adm_ns}_role_sel",
                 )
-                active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key="adm_active")
+                active = st.checkbox("Activo", value=bool(int(row.get("is_active", 1))), key=f"{_adm_ns}_active")
             with c2:
                 st.markdown("**Empresa fija**")
                 _fixed_current = str(row.get("fixed_cliente_key") or "").strip()
@@ -7602,7 +7604,7 @@ def page_admin_usuarios():
                         index=_fix_options.index(new_fixed_company) if new_fixed_company in _fix_options else 0,
                         format_func=lambda x: _fix_map.get(str(x), str(x)),
                         disabled=True,
-                        key="adm_fixed_company_view",
+                        key=f"{_adm_ns}_fixed_company_view",
                     )
                     fixed_enabled = bool(new_fixed_company)
                     st.caption("Como admin de empresa solo puedes dejarlo fijo en la empresa activa.")
@@ -7612,19 +7614,19 @@ def page_admin_usuarios():
                         _fix_options,
                         index=_fix_options.index(_fixed_current) if _fixed_current in _fix_options else 0,
                         format_func=lambda x: _fix_map.get(str(x), str(x)),
-                        key="adm_fixed_company_sel",
+                        key=f"{_adm_ns}_fixed_company_sel",
                     )
                     fixed_enabled = bool(str(new_fixed_company).strip())
             with c3:
                 st.markdown("**Reset contraseña**")
-                pw1 = st.text_input("Nueva contraseña", type="password", key="adm_pw1")
-                pw2 = st.text_input("Repetir", type="password", key="adm_pw2")
+                pw1 = st.text_input("Nueva contraseña", type="password", key=f"{_adm_ns}_pw1")
+                pw2 = st.text_input("Repetir", type="password", key=f"{_adm_ns}_pw2")
                 st.markdown("**Eliminar**")
-                del_confirm = st.checkbox("Confirmo eliminar usuario", key="adm_del_confirm")
-                del_btn = st.button("Eliminar usuario", use_container_width=True, key="adm_del_btn")
+                del_confirm = st.checkbox("Confirmo eliminar usuario", key=f"{_adm_ns}_del_confirm")
+                del_btn = st.button("Eliminar usuario", use_container_width=True, key=f"{_adm_ns}_del_btn")
 
             st.divider()
-            st.text_input("Usuario (RUT)", value=str(row.get("username") or ""), disabled=True, key="adm_user_rut_view")
+            st.text_input("Usuario (RUT)", value=str(row.get("username") or ""), disabled=True, key=f"{_adm_ns}_user_rut_view")
             st.markdown("### Poderes")
             current_perms = perms_from_row(new_role, row.get("perms_json"))
             cols = st.columns(3)
@@ -7635,9 +7637,9 @@ def page_admin_usuarios():
                 st.info("El rol SUPERADMIN ve todas las funciones del ERP por defecto.")
             for i, k in enumerate(keys):
                 with cols[i % 3]:
-                    new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"perm_{uid}_{k}", disabled=super_mode)
+                    new_perms[k] = st.checkbox(k, value=bool(current_perms.get(k, False)), key=f"{_adm_ns}_perm_{uid}_{k}", disabled=super_mode)
 
-            if st.button("Guardar cambios", type="primary", use_container_width=True, key="adm_save_btn"):
+            if st.button("Guardar cambios", type="primary", use_container_width=True, key=f"{_adm_ns}_save_btn"):
                 try:
                     # Seguridad: SUPERADMIN y ADMIN conservan acceso de administración
                     if scoped_mode:
