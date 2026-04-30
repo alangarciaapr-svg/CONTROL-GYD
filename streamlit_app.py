@@ -98,9 +98,17 @@ def rut_login_candidates(value: str) -> list[str]:
     return candidates
 
 
-def fetch_active_user_by_rut(value: str) -> dict | None:
+def fetch_active_user_by_rut(value: str, *, active_only: bool = True, fresh: bool = False) -> dict | None:
+    """Busca un usuario por RUT aceptando formato chileno, compacto y legado.
+
+    `fresh=True` evita cache en flujos sensibles como login, recuperación y
+    validación posterior a crear usuario. Así una cuenta recién creada puede
+    iniciar sesión inmediatamente sin quedar atrapada por lecturas cacheadas.
+    """
+    query = "SELECT * FROM users WHERE username=?" + (" AND is_active=1" if active_only else "")
+    reader = fetch_df_uncached if fresh else fetch_df
     for cand in rut_login_candidates(value):
-        df = fetch_df("SELECT * FROM users WHERE username=? AND is_active=1", (cand,))
+        df = reader(query, (cand,))
         if df is not None and not df.empty:
             return df.iloc[0].to_dict()
     return None
@@ -116,7 +124,7 @@ def username_exists_for_rut(value: str, exclude_id: int | None = None) -> bool:
     if exclude_id is not None:
         sql += " AND id<>?"
         params.append(int(exclude_id))
-    return int(fetch_value(sql, tuple(params), default=0) or 0) > 0
+    return int(fetch_value(sql, tuple(params), default=0, fresh=True) or 0) > 0
 
 
 # Fingerprints/cache helpers
@@ -5185,7 +5193,7 @@ html,body{
                 elif rec_pw1 != rec_pw2 or len(rec_pw1) < 8:
                     st.error("La nueva contraseña no coincide o es muy corta (mínimo 8).")
                 else:
-                    urow = fetch_active_user_by_rut(rrut)
+                    urow = fetch_active_user_by_rut(rrut, fresh=True)
                     if not urow:
                         st.error("No existe un usuario activo con ese RUT.")
                     elif str(urow.get('email') or '').strip().lower() != rec_email.strip().lower():
@@ -5220,7 +5228,7 @@ html,body{
                 st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
                 st.rerun()
             else:
-                row = fetch_active_user_by_rut(u)
+                row = fetch_active_user_by_rut(u, fresh=True)
                 if not row:
                     st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
                     st.rerun()
@@ -7476,8 +7484,9 @@ def page_admin_usuarios():
     ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     tenant_key = current_tenant_key()
-    st.session_state["_adm_users_render_seq"] = int(st.session_state.get("_adm_users_render_seq", 0)) + 1
-    _adm_ns = f"adm_users_{st.session_state['_adm_users_render_seq']}_{tenant_key or 'global'}"
+    # Namespace estable: mantiene valores de formularios entre reruns.
+    # Los duplicados se evitan desactivando el reintento automático de esta página.
+    _adm_ns = f"adm_users_{'super' if is_superadmin() else 'tenant'}_{safe_name(tenant_key or 'global')}"
     scoped_mode = not is_superadmin()
     company_caps = current_company_caps_for_active_tenant() if scoped_mode else {'role_empresa': 'SUPERADMIN', 'can_manage_users': True}
     if scoped_mode and not company_caps.get('can_manage_users'):
@@ -7546,7 +7555,7 @@ def page_admin_usuarios():
                 format_func=lambda x: df[df["id"]==x].iloc[0]["username"],
                 key=f"{_adm_ns}_user_sel",
             )
-            _row_df = fetch_df("SELECT * FROM users WHERE id=?", (int(uid),))
+            _row_df = fetch_df_uncached("SELECT * FROM users WHERE id=?", (int(uid),))
             if _row_df is None or _row_df.empty:
                 st.error("Usuario no encontrado.")
                 st.stop()
@@ -7667,13 +7676,13 @@ def page_admin_usuarios():
                     if scoped_mode:
                         fixed_value = str(tenant_key or '').strip() if fixed_enabled else ''
                     if fixed_enabled and fixed_value:
-                        _exists_link = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), fixed_value), default=0)
+                        _exists_link = fetch_value("SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid), fixed_value), default=0, fresh=True)
                         if int(_exists_link or 0) <= 0:
                             now_assign = datetime.now().isoformat(timespec='seconds')
-                            role_empresa_assign = 'ADMIN' if scoped_mode else (str(new_role or row.get('role') or 'OPERADOR').upper())
+                            role_empresa_assign = 'ADMIN' if (scoped_mode or str(new_role or '').upper() == 'ADMIN') else str(new_role or row.get('role') or 'OPERADOR').upper()
                             execute(
                                 "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                                (int(uid), fixed_value, 1 if scoped_mode else 0, role_empresa_assign, now_assign, now_assign),
+                                (int(uid), fixed_value, 1 if role_empresa_assign == 'ADMIN' else 0, role_empresa_assign, now_assign, now_assign),
                             )
 
                     execute(
@@ -7718,7 +7727,7 @@ def page_admin_usuarios():
                     _uid_del = int(uid)
                     _cleanup_user_references_before_delete(_uid_del)
                     execute("DELETE FROM users WHERE id=?", (_uid_del,))
-                    _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0)
+                    _still_exists = fetch_value("SELECT COUNT(*) FROM users WHERE id=?", (_uid_del,), default=0, fresh=True)
                     if int(_still_exists or 0) > 0:
                         raise RuntimeError("El usuario sigue existiendo después del borrado.")
                     auto_backup_db("users_delete")
@@ -7803,7 +7812,6 @@ def page_admin_usuarios():
 
         if ok:
             username = normalize_user_rut_for_storage(username)
-            st.session_state[f"{_adm_ns}_create_user_rut"] = username
             # Seguridad: si creas un SUPERADMIN o ADMIN, asegúrate de dejar sus poderes correctos
             if scoped_mode:
                 if (role or '').upper() not in {'OPERADOR', 'LECTOR'}:
@@ -7844,7 +7852,7 @@ def page_admin_usuarios():
                 salt_b64, h_b64 = hash_password(pw1)
                 execute(
                     "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key, full_name) VALUES(?,?,?,?,?,?,?,?)",
-                    (u, salt_b64, h_b64, role, json.dumps(perms), 1, user_fixed_company_key or None, u),
+                    (u, salt_b64, h_b64, str(role or 'OPERADOR').upper(), json.dumps(perms), 1, user_fixed_company_key or None, u),
                 )
                 if scoped_mode or assign_company_key:
                     new_user_id = int(fetch_value("SELECT id FROM users WHERE username=?", (u,), default=0) or 0)
@@ -7855,8 +7863,29 @@ def page_admin_usuarios():
                     )
                     execute(
                         "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                        (new_user_id, assign_company_key, 1 if (not scoped_mode and bool(target_company_admin)) else 0, ('ADMIN' if (not scoped_mode and bool(target_company_admin)) else role), now_assign, now_assign),
+                        (
+                            new_user_id,
+                            assign_company_key,
+                            1 if ((not scoped_mode and bool(target_company_admin)) or str(role or '').upper() == 'ADMIN') else 0,
+                            ('ADMIN' if ((not scoped_mode and bool(target_company_admin)) or str(role or '').upper() == 'ADMIN') else str(role or 'OPERADOR').upper()),
+                            now_assign,
+                            now_assign,
+                        ),
                     )
+                # Validación inmediata del ciclo crear -> autenticar -> resolver empresa.
+                # Si esto falla, el usuario no quedará como "creado pero imposible de logear".
+                created_row = fetch_active_user_by_rut(u, fresh=True)
+                if not created_row or not verify_password(pw1, created_row.get('salt_b64'), created_row.get('pass_hash_b64')):
+                    raise RuntimeError('El usuario fue creado, pero falló la validación de login inmediato.')
+                if str(created_row.get('role') or '').upper() != 'SUPERADMIN':
+                    _access_count = int(fetch_value(
+                        "SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?",
+                        (int(created_row.get('id') or 0), assign_company_key),
+                        default=0,
+                        fresh=True,
+                    ) or 0)
+                    if _access_count <= 0:
+                        raise RuntimeError('El usuario fue creado, pero no quedó asociado a la empresa seleccionada.')
                 auto_backup_db("users_create")
                 try:
                     audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role} empresa={assign_company_key or '(sin asignar)'} fijo={'SI' if user_fixed_company_key else 'NO'}")
@@ -8007,6 +8036,16 @@ def _render_page_safely(page_name: str, page_callable):
         return page_callable()
     except Exception as exc:
         _record_soft_error(f"page.{page_name}", exc)
+        # Admin Usuarios tiene muchos widgets y formularios. Re-renderizar esta
+        # página en el mismo ciclo, después de un render parcial, puede duplicar
+        # claves de Streamlit. Aquí se muestra el error exacto y se evita el
+        # segundo render automático.
+        if page_name == "Admin Usuarios":
+            st.error("Ocurrió un problema en Administración de Usuarios.")
+            with st.expander('Detalle técnico', expanded=False):
+                st.code(str(exc))
+            st.info('Se evitó el reintento automático para no duplicar formularios. Recarga la sección si vuelve a ocurrir.')
+            return None
         try:
             clear_app_caches()
         except Exception:
