@@ -14,8 +14,8 @@ def _format_rut_session_value(key: str):
 
 
 def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None, disabled: bool = False):
-    # No pisar session_state en cada render: eso podía dejar el RUT pegado en "1"
-    # cuando Streamlit re-renderizaba mientras el usuario escribía.
+    # Campo RUT estándar. No pisa session_state mientras se escribe; el script
+    # global muestra el formato visual y el guardado normaliza a RUT chileno.
     if key not in st.session_state and value not in (None, ""):
         initial_fmt = format_rut_chileno(value)
         st.session_state[key] = initial_fmt or str(value or "")
@@ -23,7 +23,7 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
         label,
         key=key,
         placeholder=placeholder,
-        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente al salir del campo y al guardar.",
+        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo guarda como XX.XXX.XXX-X.",
         disabled=disabled,
     )
     fmt = format_rut_chileno(str(result or '').strip())

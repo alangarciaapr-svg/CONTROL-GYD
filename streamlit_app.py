@@ -62,6 +62,11 @@ UPLOAD_HELP_TEXT = (
 
 
 def normalize_login_rut(value: str) -> str:
+    """Normaliza cualquier entrada de RUT al formato chileno canónico.
+
+    Regla única del ERP: si el valor parece RUT, se guarda y compara como
+    ``12.345.678-5``. No se trabaja con RUT compactos como valor final.
+    """
     txt = str(value or '').strip()
     if not txt:
         return ''
@@ -82,16 +87,46 @@ def _format_session_rut_key(state_key: str):
 
 
 def normalize_user_rut_for_storage(value: str) -> str:
+    """Formato final para guardar usuarios: siempre RUT chileno."""
     return normalize_login_rut(value)
 
 
+def canonical_rut_for_storage(value):
+    """Devuelve RUT en formato chileno para persistencia.
+
+    Se usa como cinturón de seguridad en inserts/updates para que, aunque un
+    formulario entregue ``167810020``, la base guarde ``16.781.002-0``.
+    """
+    if value is None:
+        return value
+    txt = str(value).strip()
+    if not txt:
+        return ''
+    formatted = clean_rut_core(txt)
+    return formatted or txt
+
+
+def rut_compact_key(value: str) -> str:
+    """RUT comparable sin puntos/guion, robusto para login y duplicados.
+
+    Este helper evita que una cuenta quede inaccesible porque el usuario fue
+    guardado como `16.781.002-0`, `167810020` o `16781002-0`.
+    """
+    return re.sub(r"[^0-9kK]", "", str(value or "")).upper().strip()
+
+
+def _username_compact_sql_expr() -> str:
+    return "UPPER(REPLACE(REPLACE(REPLACE(username,'.',''),'-',''),' ',''))"
+
+
 def rut_login_candidates(value: str) -> list[str]:
-    """Variantes para login/recuperación: RUT formateado y usuarios legados sin formato."""
+    """Variantes para login/recuperación: RUT formateado, compacto y legado."""
     raw = str(value or '').strip()
     formatted = normalize_login_rut(raw)
-    compact = clean_rut_core(raw).replace('.', '').replace('-', '') if raw else ''
+    compact = rut_compact_key(raw)
+    compact_from_formatted = rut_compact_key(formatted)
     candidates = []
-    for item in (formatted, raw, compact, compact.upper()):
+    for item in (formatted, raw, compact, compact_from_formatted, raw.upper(), formatted.upper()):
         item = str(item or '').strip()
         if item and item not in candidates:
             candidates.append(item)
@@ -99,16 +134,30 @@ def rut_login_candidates(value: str) -> list[str]:
 
 
 def fetch_active_user_by_rut(value: str, *, active_only: bool = True, fresh: bool = False) -> dict | None:
-    """Busca un usuario por RUT aceptando formato chileno, compacto y legado.
+    """Busca usuario por RUT aceptando formato chileno, compacto y legado.
 
     `fresh=True` evita cache en flujos sensibles como login, recuperación y
-    validación posterior a crear usuario. Así una cuenta recién creada puede
-    iniciar sesión inmediatamente sin quedar atrapada por lecturas cacheadas.
+    validación posterior a crear usuario. Además, después de probar coincidencia
+    exacta, compara contra el username normalizado sin puntos/guion.
     """
-    query = "SELECT * FROM users WHERE username=?" + (" AND is_active=1" if active_only else "")
     reader = fetch_df_uncached if fresh else fetch_df
+    active_clause = " AND is_active=1" if active_only else ""
+
+    # 1) Coincidencias exactas por variantes conocidas.
+    query = "SELECT * FROM users WHERE username=?" + active_clause
     for cand in rut_login_candidates(value):
         df = reader(query, (cand,))
+        if df is not None and not df.empty:
+            return df.iloc[0].to_dict()
+
+    # 2) Coincidencia robusta: username guardado con/sin puntos o guion.
+    compact = rut_compact_key(value)
+    if compact:
+        norm_expr = _username_compact_sql_expr()
+        df = reader(
+            f"SELECT * FROM users WHERE {norm_expr}=?{active_clause} ORDER BY id DESC LIMIT 1",
+            (compact,),
+        )
         if df is not None and not df.empty:
             return df.iloc[0].to_dict()
     return None
@@ -116,15 +165,42 @@ def fetch_active_user_by_rut(value: str, *, active_only: bool = True, fresh: boo
 
 def username_exists_for_rut(value: str, exclude_id: int | None = None) -> bool:
     candidates = rut_login_candidates(value)
-    if not candidates:
+    compact = rut_compact_key(value)
+    if not candidates and not compact:
         return False
-    placeholders = ",".join(["?"] * len(candidates))
+    placeholders = ",".join(["?"] * len(candidates)) if candidates else "''"
     params = list(candidates)
-    sql = f"SELECT COUNT(*) FROM users WHERE username IN ({placeholders})"
+    norm_expr = _username_compact_sql_expr()
+    sql = f"SELECT COUNT(*) FROM users WHERE (username IN ({placeholders})"
+    if compact:
+        sql += f" OR {norm_expr}=?"
+        params.append(compact)
+    sql += ")"
     if exclude_id is not None:
         sql += " AND id<>?"
         params.append(int(exclude_id))
     return int(fetch_value(sql, tuple(params), default=0, fresh=True) or 0) > 0
+
+
+def canonicalize_user_rut_if_needed(user_row: dict) -> dict:
+    """Normaliza username RUT luego de login/creación sin romper usuarios antiguos."""
+    try:
+        uid = int((user_row or {}).get('id') or 0)
+        old_username = str((user_row or {}).get('username') or '').strip()
+        canonical = normalize_user_rut_for_storage(old_username)
+        if not uid or not canonical or canonical == old_username:
+            return user_row
+        if validate_rut_dv_core(canonical) and not username_exists_for_rut(canonical, exclude_id=uid):
+            execute(
+                "UPDATE users SET username=?, updated_at=datetime('now') WHERE id=?",
+                (canonical, uid),
+            )
+            out = dict(user_row)
+            out['username'] = canonical
+            return out
+    except Exception as _exc:
+        _record_soft_error('users.canonicalize_rut', _exc)
+    return user_row
 
 
 # Fingerprints/cache helpers
@@ -335,7 +411,68 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         ensure_user_client_access_table()
     except Exception as _exc:
         _record_soft_error("bootstrap.ensure_user_client_access", _exc)
+    try:
+        _canonicalize_existing_rut_storage()
+    except Exception as _exc:
+        _record_soft_error("bootstrap.canonicalize_existing_rut", _exc)
     return True
+
+
+def _db_table_columns(table: str) -> set[str]:
+    try:
+        if DB_BACKEND == 'postgres':
+            df = fetch_df_uncached(
+                "SELECT column_name FROM information_schema.columns WHERE table_name=?",
+                (table,),
+            )
+            return {str(x).lower() for x in (df['column_name'].tolist() if df is not None and not df.empty else [])}
+        with conn() as c:
+            rows = c.execute(f"PRAGMA table_info({table});").fetchall()
+        return {str(r[1]).lower() for r in rows}
+    except Exception:
+        return set()
+
+
+def _canonicalize_existing_rut_storage():
+    """Normaliza RUT ya existentes en tablas principales.
+
+    Esto corrige bases antiguas donde quedaron RUT compactos o mixtos. Se ejecuta
+    de forma segura en bootstrap y omite filas conflictivas para no romper únicos.
+    """
+    targets = [
+        ('users', 'username'),
+        ('trabajadores', 'rut'),
+        ('segav_erp_clientes', 'rut'),
+        ('sgsst_empresa', 'rut'),
+        ('sgsst_subcontratistas', 'rut_empresa'),
+    ]
+    for table, col in targets:
+        try:
+            cols = _db_table_columns(table)
+            if 'id' not in cols or col.lower() not in cols:
+                continue
+            df = fetch_df_uncached(f"SELECT id, {col} FROM {table}")
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                rid = int(row.get('id') or 0)
+                old = str(row.get(col) or '').strip()
+                new = canonical_rut_for_storage(old)
+                if not rid or not old or not new or new == old:
+                    continue
+                if table == 'users':
+                    exists = fetch_value(
+                        "SELECT COUNT(*) FROM users WHERE username=? AND id<>?",
+                        (new, rid), default=0, fresh=True,
+                    )
+                    if int(exists or 0) > 0:
+                        continue
+                try:
+                    execute(f"UPDATE {table} SET {col}=? WHERE id=?", (new, rid))
+                except Exception as _row_exc:
+                    _record_soft_error(f'rut.canonicalize_existing.{table}.{rid}', _row_exc)
+        except Exception as _exc:
+            _record_soft_error(f'rut.canonicalize_existing.{table}', _exc)
 
 def bootstrap_app_or_stop():
     """Inicializa la app. Si falla algo crítico, muestra error y detiene Streamlit."""
@@ -1486,19 +1623,19 @@ def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.3
 
 
 def inject_rut_autoformat_script():
-    """Formatea visualmente todos los inputs de RUT sin pelear con el estado de Streamlit.
+    """Formatea visualmente todos los campos RUT del ERP.
 
-    Nota técnica: antes se formateaba en cada evento ``input`` y eso podía hacer
-    que Streamlit conservara solo el primer carácter escrito ("1"). Ahora el
-    formateo visual ocurre al salir del campo (blur) y al pegar texto; el guardado
-    en Python igualmente normaliza el valor final.
+    Importante: el formato visual ocurre mientras se escribe, pero sin disparar
+    eventos artificiales repetitivos. Así evitamos el bug molesto donde el RUT
+    quedaba pegado como "1" y, al mismo tiempo, el usuario ve 16.781.002-0.
+    En Python, todos los guardados vuelven a normalizar antes de persistir.
     """
     try:
         components.html(r"""
 <script>
 (function(){
-  if (window.__segavRutAutoFormatInstalledV2) return;
-  window.__segavRutAutoFormatInstalledV2 = true;
+  if (window.__segavRutAutoFormatInstalledV3) return;
+  window.__segavRutAutoFormatInstalledV3 = true;
 
   function formatRut(value){
     let raw = String(value || '').replace(/[^0-9kK]/g,'').toUpperCase();
@@ -1529,41 +1666,53 @@ def inject_rut_autoformat_script():
     return labelTxt.includes('rut');
   }
 
-  function applyRutFormat(el){
+  function setNativeValue(el, value){
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if(desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+  }
+
+  function applyRutFormat(el, notify){
     if(!el) return;
     const before = String(el.value || '');
     const compact = before.replace(/[^0-9kK]/g,'');
     if(compact.length <= 1) return;
     const formatted = formatRut(before);
     if(formatted && formatted !== before){
-      el.value = formatted;
-      // Un solo aviso a Streamlit, no uno por cada tecla.
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
+      setNativeValue(el, formatted);
       try { el.setSelectionRange(el.value.length, el.value.length); } catch(e) {}
+      // Notificar solo en blur/paste. En input normal NO se dispara un evento
+      // adicional, para no duplicar eventos ni dejar el valor pegado en "1".
+      if(notify){
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+      }
     }
   }
 
   function bind(root){
     (root || document).querySelectorAll('input').forEach(function(el){
-      if(!isRutInput(el) || el.dataset.segavRutBoundV2 === '1') return;
-      el.dataset.segavRutBoundV2 = '1';
+      if(!isRutInput(el) || el.dataset.segavRutBoundV3 === '1') return;
+      el.dataset.segavRutBoundV3 = '1';
       el.setAttribute('inputmode','text');
       el.setAttribute('autocomplete','off');
 
+      el.addEventListener('input', function(){
+        applyRutFormat(this, false);
+      });
+
       el.addEventListener('blur', function(){
-        applyRutFormat(this);
+        applyRutFormat(this, true);
       });
 
       el.addEventListener('paste', function(){
         const target = this;
-        setTimeout(function(){ applyRutFormat(target); }, 0);
+        setTimeout(function(){ applyRutFormat(target, true); }, 0);
       });
 
-      // Si viene precargado desde base de datos, se puede mostrar formateado
-      // sin tocar campos activos.
       if(el.value && document.activeElement !== el){
-        applyRutFormat(el);
+        applyRutFormat(el, false);
       }
     });
   }
@@ -1862,7 +2011,106 @@ def migrate_add_columns_if_missing(c, table: str, cols_sql: dict):
         if col not in existing:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype};")
 
+
+def _sql_table_name(q: str, verb: str) -> str:
+    try:
+        if verb == 'insert':
+            m = re.search(r"insert\s+into\s+([\w\.\"']+)", q or '', flags=re.I)
+        elif verb == 'update':
+            m = re.search(r"update\s+([\w\.\"']+)", q or '', flags=re.I)
+        else:
+            m = None
+        if not m:
+            return ''
+        return m.group(1).replace('"','').replace("'",'').split('.')[-1].strip().lower()
+    except Exception:
+        return ''
+
+
+def _sql_clean_col(col: str) -> str:
+    col = re.sub(r"\s+", " ", str(col or '').strip())
+    col = col.split('.')[-1]
+    col = col.replace('"','').replace("'",'').replace('`','')
+    return col.strip().lower()
+
+
+def _split_sql_csv(txt: str) -> list[str]:
+    out, buf, depth, quote = [], [], 0, None
+    for ch in str(txt or ''):
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch; buf.append(ch); continue
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(''.join(buf).strip()); buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append(''.join(buf).strip())
+    return out
+
+
+def _rut_column_needs_canonical(table: str, col: str) -> bool:
+    col = _sql_clean_col(col)
+    table = str(table or '').lower()
+    if col in {'rut', 'rut_empresa'}:
+        return True
+    if table == 'users' and col == 'username':
+        return True
+    return False
+
+
+def _normalize_rut_params_for_sql(q: str, params=()):
+    """Cinturón de seguridad: normaliza RUT en INSERT/UPDATE antes de guardar.
+
+    Esto asegura la regla global solicitada: la base guarda RUT en formato
+    chileno aunque el input entregue números compactos.
+    """
+    if params is None:
+        return params
+    if isinstance(params, dict):
+        return params
+    if not isinstance(params, (list, tuple)):
+        return params
+    p = list(params)
+    sql = str(q or '')
+    sql_l = sql.lstrip().lower()
+    try:
+        if sql_l.startswith('insert'):
+            table = _sql_table_name(sql, 'insert')
+            m = re.search(r"insert\s+into\s+[\w\.\"']+\s*\((.*?)\)\s*values", sql, flags=re.I|re.S)
+            if m:
+                cols = [_sql_clean_col(c) for c in _split_sql_csv(m.group(1))]
+                for i, col in enumerate(cols[:len(p)]):
+                    if _rut_column_needs_canonical(table, col):
+                        p[i] = canonical_rut_for_storage(p[i])
+        elif sql_l.startswith('update'):
+            table = _sql_table_name(sql, 'update')
+            m = re.search(r"update\s+[\w\.\"']+\s+set\s+(.*?)(\s+where\s+|$)", sql, flags=re.I|re.S)
+            if m:
+                assigns = _split_sql_csv(m.group(1))
+                param_idx = 0
+                for part in assigns:
+                    if '?' not in part:
+                        continue
+                    col = _sql_clean_col(part.split('=')[0])
+                    if param_idx < len(p) and _rut_column_needs_canonical(table, col):
+                        p[param_idx] = canonical_rut_for_storage(p[param_idx])
+                    param_idx += part.count('?')
+    except Exception as _exc:
+        _record_soft_error('rut.normalize_sql_params', _exc)
+        return params
+    return tuple(p) if isinstance(params, tuple) else p
+
 def cursor_execute(cur, q: str, params=()):
+    params = _normalize_rut_params_for_sql(q, params)
     if DB_BACKEND == "postgres":
         q = _qmark_to_pct(q).replace("datetime('now')", "now()")
     return cur.execute(q, params)
@@ -1871,6 +2119,7 @@ def cursor_execute(cur, q: str, params=()):
 def execute(q: str, params=()):
     """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches automáticamente."""
     clear_app_caches()
+    params = _normalize_rut_params_for_sql(q, params)
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1885,6 +2134,7 @@ def execute(q: str, params=()):
 def execute_rowcount(q: str, params=()):
     """Ejecuta DML y devuelve el número de filas afectadas."""
     clear_app_caches()
+    params = _normalize_rut_params_for_sql(q, params)
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -1906,6 +2156,7 @@ def execute_rowcount(q: str, params=()):
 def executemany(q: str, seq_params):
     """Ejecuta DML en lote."""
     clear_app_caches()
+    seq_params = [_normalize_rut_params_for_sql(q, p) for p in (seq_params or [])]
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -5336,6 +5587,7 @@ html,body{
                         st.rerun()
                     else:
                         st.session_state.pop("_lg_err", None)
+                        row = canonicalize_user_rut_if_needed(row)
                         auth_set_session(row)
                         try:
                             _allowed = allowed_client_keys_for_user_core(fetch_df, int(row.get('id') or 0), str(row.get('role') or 'OPERADOR'))
@@ -7973,6 +8225,8 @@ def page_admin_usuarios():
                 # Validación inmediata del ciclo crear -> autenticar -> resolver empresa.
                 # Si esto falla, el usuario no quedará como "creado pero imposible de logear".
                 created_row = fetch_active_user_by_rut(u, fresh=True)
+                if created_row:
+                    created_row = canonicalize_user_rut_if_needed(created_row)
                 if not created_row or not verify_password(pw1, created_row.get('salt_b64'), created_row.get('pass_hash_b64')):
                     raise RuntimeError('El usuario fue creado, pero falló la validación de login inmediato.')
                 if str(created_row.get('role') or '').upper() != 'SUPERADMIN':
