@@ -14,18 +14,19 @@ def _format_rut_session_value(key: str):
 
 
 def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None, disabled: bool = False):
-    current_value = st.session_state.get(key, value)
-    formatted_value = format_rut_chileno(current_value)
-    if formatted_value and st.session_state.get(key) != formatted_value:
-        st.session_state[key] = formatted_value
+    # No pisar session_state en cada render: eso podía dejar el RUT pegado en "1"
+    # cuando Streamlit re-renderizaba mientras el usuario escribía.
+    if key not in st.session_state and value not in (None, ""):
+        initial_fmt = format_rut_chileno(value)
+        st.session_state[key] = initial_fmt or str(value or "")
     result = st.text_input(
         label,
         key=key,
         placeholder=placeholder,
-        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente.",
+        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente al salir del campo y al guardar.",
         disabled=disabled,
     )
-    fmt = format_rut_chileno(st.session_state.get(key, result))
+    fmt = format_rut_chileno(str(result or '').strip())
     if fmt and fmt != str(result or '').strip():
         st.caption(f"Formato RUT: {fmt}")
     return result

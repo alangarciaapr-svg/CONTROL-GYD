@@ -1457,32 +1457,130 @@ def _format_rut_session_value(key: str):
 
 
 def rut_input(label: str, *, key: str, value: str = "", placeholder: str = "12.345.678-9", help: str | None = None, disabled: bool = False):
-    """Campo estándar para RUT chileno, compatible con formularios Streamlit."""
-    current_value = st.session_state.get(key, value)
-    formatted_value = format_rut_chileno(current_value)
-    if formatted_value and st.session_state.get(key) != formatted_value:
-        st.session_state[key] = formatted_value
+    """Campo estándar para RUT chileno, compatible con formularios Streamlit.
+
+    Importante: no reescribimos ``st.session_state[key]`` en cada render.
+    Streamlit trata los inputs como componentes controlados; si se pisa el
+    estado mientras el usuario escribe, el campo puede quedar pegado en el
+    primer carácter (por ejemplo, "1"). Solo inicializamos el valor una vez
+    y normalizamos al guardar/validar.
+    """
+    if key not in st.session_state and value not in (None, ""):
+        initial_fmt = format_rut_chileno(value)
+        st.session_state[key] = initial_fmt or str(value or "")
     result = st.text_input(
         label,
         key=key,
         placeholder=placeholder,
-        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente.",
+        help=help or "Escribe el RUT con o sin puntos/guion. SEGAV lo formatea automáticamente al salir del campo y al guardar.",
         disabled=disabled,
     )
-    _val = format_rut_chileno(st.session_state.get(key, result))
-    if _val and _val != str(result or '').strip():
+    raw_val = str(result or "").strip()
+    _val = format_rut_chileno(raw_val)
+    compact = re.sub(r"[^0-9kK]", "", raw_val)
+    if _val and _val != raw_val:
         st.caption(f"Formato RUT: {_val}")
-    if _val and len(_val) > 3 and not validate_rut_dv(_val):
+    if len(compact) >= 2 and _val and not validate_rut_dv(_val):
         st.caption("⚠️ RUT inválido — verifica el dígito verificador")
     return result
 
 
 def inject_rut_autoformat_script():
-    """Formatea visualmente todos los inputs de RUT sin callbacks pesados."""
+    """Formatea visualmente todos los inputs de RUT sin pelear con el estado de Streamlit.
+
+    Nota técnica: antes se formateaba en cada evento ``input`` y eso podía hacer
+    que Streamlit conservara solo el primer carácter escrito ("1"). Ahora el
+    formateo visual ocurre al salir del campo (blur) y al pegar texto; el guardado
+    en Python igualmente normaliza el valor final.
+    """
     try:
-        components.html('<script>\n(function(){\n  if (window.__segavRutAutoFormatInstalled) return;\n  window.__segavRutAutoFormatInstalled = true;\n  function formatRut(value){\n    let raw = String(value || \'\').replace(/[^0-9kK]/g,\'\').toUpperCase();\n    if(raw.length <= 1) return raw;\n    let body = raw.slice(0,-1), dv = raw.slice(-1);\n    body = body.replace(/^0+(?=\\d)/,\'\');\n    let out = \'\';\n    while(body.length > 3){ out = \'.\' + body.slice(-3) + out; body = body.slice(0,-3); }\n    return body + out + \'-\' + dv;\n  }\n  function isRutInput(el){\n    if(!el || el.tagName !== \'INPUT\' || el.type === \'password\') return false;\n    const attrs = [el.getAttribute(\'aria-label\'), el.getAttribute(\'placeholder\'), el.name, el.id].join(\' \').toLowerCase();\n    if(attrs.includes(\'rut\')) return true;\n    if((el.getAttribute(\'placeholder\') || \'\').match(/\\d{1,2}\\.\\d{3}\\.\\d{3}-[0-9kK]/)) return true;\n    const container = el.closest(\'[data-testid="stTextInput"]\') || el.parentElement;\n    const labelTxt = (container && container.innerText) ? container.innerText.toLowerCase() : \'\';\n    return labelTxt.includes(\'rut\');\n  }\n  function bind(root){\n    (root || document).querySelectorAll(\'input\').forEach(function(el){\n      if(!isRutInput(el) || el.dataset.segavRutBound === \'1\') return;\n      el.dataset.segavRutBound = \'1\';\n      el.setAttribute(\'inputmode\',\'text\');\n      el.addEventListener(\'input\', function(){\n        const f = formatRut(this.value);\n        if(f && f !== this.value){\n          const atEnd = this.selectionEnd === this.value.length;\n          this.value = f;\n          this.dispatchEvent(new Event(\'input\', {bubbles:true}));\n          this.dispatchEvent(new Event(\'change\', {bubbles:true}));\n          if(atEnd) this.setSelectionRange(this.value.length, this.value.length);\n        }\n      }, {passive:true});\n      if(el.value){\n        const f = formatRut(el.value);\n        if(f && f !== el.value){ el.value = f; el.dispatchEvent(new Event(\'change\', {bubbles:true})); }\n      }\n    });\n  }\n  function run(){\n    try { bind(window.parent.document); } catch(e) { try { bind(document); } catch(_){} }\n  }\n  run();\n  setInterval(run, 1200);\n})();\n</script>', height=0)
+        components.html(r"""
+<script>
+(function(){
+  if (window.__segavRutAutoFormatInstalledV2) return;
+  window.__segavRutAutoFormatInstalledV2 = true;
+
+  function formatRut(value){
+    let raw = String(value || '').replace(/[^0-9kK]/g,'').toUpperCase();
+    if(raw.length <= 1) return raw;
+    let body = raw.slice(0,-1), dv = raw.slice(-1);
+    body = body.replace(/^0+(?=\d)/,'');
+    if(!body) return raw;
+    let out = '';
+    while(body.length > 3){
+      out = '.' + body.slice(-3) + out;
+      body = body.slice(0,-3);
+    }
+    return body + out + '-' + dv;
+  }
+
+  function isRutInput(el){
+    if(!el || el.tagName !== 'INPUT' || el.type === 'password') return false;
+    const attrs = [
+      el.getAttribute('aria-label'),
+      el.getAttribute('placeholder'),
+      el.name,
+      el.id
+    ].join(' ').toLowerCase();
+    if(attrs.includes('rut')) return true;
+    if((el.getAttribute('placeholder') || '').match(/\d{1,2}\.\d{3}\.\d{3}-[0-9kK]/)) return true;
+    const container = el.closest('[data-testid="stTextInput"]') || el.parentElement;
+    const labelTxt = (container && container.innerText) ? container.innerText.toLowerCase() : '';
+    return labelTxt.includes('rut');
+  }
+
+  function applyRutFormat(el){
+    if(!el) return;
+    const before = String(el.value || '');
+    const compact = before.replace(/[^0-9kK]/g,'');
+    if(compact.length <= 1) return;
+    const formatted = formatRut(before);
+    if(formatted && formatted !== before){
+      el.value = formatted;
+      // Un solo aviso a Streamlit, no uno por cada tecla.
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      try { el.setSelectionRange(el.value.length, el.value.length); } catch(e) {}
+    }
+  }
+
+  function bind(root){
+    (root || document).querySelectorAll('input').forEach(function(el){
+      if(!isRutInput(el) || el.dataset.segavRutBoundV2 === '1') return;
+      el.dataset.segavRutBoundV2 = '1';
+      el.setAttribute('inputmode','text');
+      el.setAttribute('autocomplete','off');
+
+      el.addEventListener('blur', function(){
+        applyRutFormat(this);
+      });
+
+      el.addEventListener('paste', function(){
+        const target = this;
+        setTimeout(function(){ applyRutFormat(target); }, 0);
+      });
+
+      // Si viene precargado desde base de datos, se puede mostrar formateado
+      // sin tocar campos activos.
+      if(el.value && document.activeElement !== el){
+        applyRutFormat(el);
+      }
+    });
+  }
+
+  function run(){
+    try { bind(window.parent.document); }
+    catch(e) { try { bind(document); } catch(_){} }
+  }
+
+  run();
+  setInterval(run, 1500);
+})();
+</script>
+""", height=0)
     except Exception as _exc:
         _record_soft_error('rut_autoformat_script', _exc)
+
 
 @st.cache_data(show_spinner=False)
 def _reset_trabajador_create_state():
