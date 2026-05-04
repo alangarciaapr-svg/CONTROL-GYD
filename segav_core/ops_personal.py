@@ -800,6 +800,7 @@ def page_documentos_trabajador(
     pendientes_obligatorios,
     delete_uploaded_document_record,
     render_legal_doc_inline=None,
+    allowed_mandante_ids=None,
 ):
     ui_header(
         "Documentos Trabajador",
@@ -807,13 +808,26 @@ def page_documentos_trabajador(
     )
 
     # Lista de faenas para selector local (en este mismo apartado)
-    faenas = fetch_df(
-        '''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-        '''
-    )
+    _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
+    if _allowed_mands:
+        _ph = ','.join(['?'] * len(_allowed_mands))
+        faenas = fetch_df(
+            f'''
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            WHERE f.mandante_id IN ({_ph})
+            ORDER BY f.id DESC
+            ''',
+            tuple(_allowed_mands),
+        )
+    else:
+        faenas = fetch_df(
+            '''
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+            '''
+        )
 
     # Selector de faena dentro del apartado (no genera cajas vacías)
     current = st.session_state.get("selected_faena_id")
@@ -874,7 +888,22 @@ def page_documentos_trabajador(
                     else:
                         st.success(f"{k} — OK")
     else:
-        trab = fetch_df_uncached("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
+        if _allowed_mands:
+            _ph = ','.join(['?'] * len(_allowed_mands))
+            trab = fetch_df_uncached(
+                f'''
+                SELECT DISTINCT t.id, t.rut, t.apellidos, t.nombres, t.cargo
+                FROM trabajadores t
+                JOIN asignaciones a ON a.trabajador_id=t.id
+                JOIN faenas f ON f.id=a.faena_id
+                WHERE f.mandante_id IN ({_ph})
+                  AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
+                ORDER BY t.apellidos, t.nombres
+                ''',
+                tuple(_allowed_mands),
+            )
+        else:
+            trab = fetch_df_uncached("SELECT id, rut, apellidos, nombres, cargo FROM trabajadores ORDER BY apellidos, nombres")
         if trab.empty:
             ui_tip("Crea trabajadores primero.")
             return

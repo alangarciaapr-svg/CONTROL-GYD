@@ -22,11 +22,17 @@ def page_documentos_empresa(
     load_file_anywhere,
     delete_uploaded_document_record,
     render_legal_doc_inline=None,
+    allowed_mandante_ids=None,
 ):
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos requeridos base son liquidaciones de sueldo, F30, F30-1 y certificado de accidentabilidad; además puedes crear tus propios tipos con OTRO.")
 
-    df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
+    _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
+    if _allowed_mands:
+        _ph = ','.join(['?'] * len(_allowed_mands))
+        df = fetch_df(f"SELECT id, mandante_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY id DESC", tuple(_allowed_mands))
+    else:
+        df = fetch_df("SELECT id, mandante_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos ORDER BY id DESC")
     tipos_presentes = set(df["doc_tipo"].astype(str).tolist()) if not df.empty else set()
     faltan = [d for d in get_empresa_required_doc_types() if d not in tipos_presentes]
 
@@ -51,6 +57,22 @@ def page_documentos_empresa(
             tipo = st.selectbox("Tipo", get_empresa_required_doc_types() + ["OTRO"], format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
+        mandante_doc_id = 0
+        mandantes_doc_df = fetch_df("SELECT id, nombre FROM mandantes ORDER BY nombre")
+        if mandantes_doc_df is not None and not mandantes_doc_df.empty:
+            mand_map = {0: 'Global para toda la empresa'}
+            mand_map.update({int(r['id']): str(r['nombre']) for _, r in mandantes_doc_df.iterrows()})
+            mand_opts = list(mand_map.keys())
+            if _allowed_mands:
+                mand_opts = [0] + [mid for mid in mand_opts if mid in _allowed_mands]
+            mandante_doc_id = st.selectbox(
+                'Mandante asociado al documento',
+                mand_opts,
+                index=0,
+                format_func=lambda mid: mand_map.get(int(mid), str(mid)),
+                key='emp_doc_mandante_id',
+                help='Global se ve para toda la empresa. Si eliges Treimun, lectores restringidos a Treimun podrán verlo.'
+            )
 
         up = st.file_uploader("Archivo", key="up_doc_empresa", type=None)
         render_upload_help()
@@ -64,8 +86,8 @@ def page_documentos_empresa(
             file_path, bucket, object_path = save_file_online(folder, payload["file_name"], payload["file_bytes"], content_type=payload["content_type"])
             sha = sha256_bytes(payload["file_bytes"])
             execute(
-                "INSERT INTO empresa_documentos(doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?)",
-                (doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
+                "INSERT INTO empresa_documentos(mandante_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, sha256, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (int(mandante_doc_id or 0) or None, doc_tipo, payload["file_name"], file_path, bucket, object_path, sha, datetime.utcnow().isoformat(timespec="seconds")),
             )
             if payload["compressed"] and payload.get("compression_note"):
                 st.info(payload["compression_note"])
@@ -159,6 +181,7 @@ def page_documentos_empresa_faena(
     pendientes_empresa_faena_periodo=None,
     periodo_folder_segment=None,
     date=None,
+    allowed_mandante_ids=None,
     **_ignored,
 ):
     if ui_tip is None:
@@ -180,13 +203,26 @@ def page_documentos_empresa_faena(
         "Carga documentos de empresa POR FAENA, POR MANDANTE y POR MES. Cada período mensual puede tener varios archivos por tipo.",
     )
 
-    faenas = fetch_df(
-        """
-        SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-        """
-    )
+    _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
+    if _allowed_mands:
+        _ph = ','.join(['?'] * len(_allowed_mands))
+        faenas = fetch_df(
+            f"""
+            SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            WHERE f.mandante_id IN ({_ph})
+            ORDER BY f.id DESC
+            """,
+            tuple(_allowed_mands),
+        )
+    else:
+        faenas = fetch_df(
+            """
+            SELECT f.id, f.mandante_id, m.nombre AS mandante, f.nombre, f.estado, f.fecha_inicio
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+            """
+        )
     if faenas.empty:
         ui_tip("Crea una faena primero.")
         return

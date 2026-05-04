@@ -43,6 +43,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         """
         SELECT a.user_id, a.cliente_key, COALESCE(a.is_company_admin,0) AS is_company_admin,
                COALESCE(a.role_empresa,'OPERADOR') AS role_empresa,
+               COALESCE(a.allowed_mandantes_json,'[]') AS allowed_mandantes_json,
                u.username, u.role, u.is_active
           FROM user_client_access a
           LEFT JOIN users u ON u.id=a.user_id
@@ -71,7 +72,7 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
         {"label": "Usuarios vinculados", "value": usuarios_asignados, "subtitle": f"{usuarios_sin_empresa} usuarios activos sin empresa", "icon": "👥", "tone": tone_for_count(usuarios_sin_empresa, danger_at=1), "status": "Accesos"},
     ], columns=4)
 
-    tabs = st.tabs(["🌐 Dashboard", "🏢 Empresas", "👥 Administradores", "📋 Audit Log"])
+    tabs = st.tabs(["🌐 Dashboard", "🏢 Empresas", "👥 Administradores", "⚙️ Límites de acceso", "📋 Audit Log"])
 
     with tabs[0]:
         st.markdown("### Vista global de empresas")
@@ -296,10 +297,10 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             company_access = access_df[access_df["cliente_key"].astype(str) == str(admin_cli_key)].copy() if access_df is not None and not access_df.empty else pd.DataFrame(columns=["user_id","cliente_key","is_company_admin","username","role","is_active"])
             st.markdown("#### Asignaciones actuales")
             if company_access is not None and not company_access.empty:
-                show = company_access[["username", "role", "is_active", "is_company_admin"]].copy()
+                show = company_access[["username", "role", "role_empresa", "is_active", "is_company_admin"]].copy()
                 show["is_active"] = show["is_active"].fillna(0).astype(int).map({1:"SI", 0:"NO"})
                 show["is_company_admin"] = show["is_company_admin"].fillna(0).astype(int).map({1:"SI", 0:"NO"})
-                st.dataframe(show.rename(columns={"username":"Usuario", "role":"Rol global", "is_active":"Activo", "is_company_admin":"Admin empresa"}), use_container_width=True, hide_index=True)
+                st.dataframe(show.rename(columns={"username":"Usuario", "role":"Rol global", "role_empresa":"Rol empresa", "is_active":"Activo", "is_company_admin":"Admin empresa"}), use_container_width=True, hide_index=True)
             else:
                 st.info("Esta empresa aún no tiene usuarios vinculados.")
 
@@ -342,6 +343,34 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                     ROLES_EMP, index=default_idx,
                     key=f"sa_role_{uid}_{admin_cli_key}",
                 )
+            st.markdown("##### Mandantes permitidos para lectores")
+            st.caption("Solo aplica a usuarios con rol empresa LECTOR. Dejar vacío = sin restricción específica dentro de la empresa.")
+            mandantes_df = fetch_df("SELECT id, nombre FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY nombre", (admin_cli_key,))
+            mand_map = {int(r['id']): str(r['nombre']) for _, r in mandantes_df.iterrows()} if mandantes_df is not None and not mandantes_df.empty else {}
+            user_mandantes = {}
+            if mand_map:
+                for uid in selected_users:
+                    if str(user_roles.get(uid, '')).upper() == 'LECTOR':
+                        current_allowed = []
+                        if access_df is not None and not access_df.empty:
+                            match = access_df[(access_df["cliente_key"].astype(str)==admin_cli_key) & (access_df["user_id"].astype(int)==int(uid))]
+                            if not match.empty:
+                                try:
+                                    import json as _json
+                                    current_allowed = [int(x) for x in (_json.loads(str(match.iloc[0].get('allowed_mandantes_json') or '[]')) or [])]
+                                except Exception:
+                                    current_allowed = []
+                        user_mandantes[uid] = st.multiselect(
+                            f"Mandantes autorizados · {active_users[active_users['id'].astype(int)==int(uid)].iloc[0]['username']}",
+                            list(mand_map.keys()),
+                            default=[mid for mid in current_allowed if mid in mand_map],
+                            format_func=lambda mid: mand_map.get(int(mid), str(mid)),
+                            key=f"sa_mandantes_{uid}_{admin_cli_key}",
+                        )
+                    else:
+                        user_mandantes[uid] = []
+            else:
+                st.info("Esta empresa aún no tiene mandantes cargados.")
 
             if st.button("Guardar asignaciones de empresa", key="sa_save_company_access", type="primary"):
                 now = datetime.now().isoformat(timespec='seconds')
@@ -349,9 +378,10 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
                 for uid in selected_users:
                     role_emp = user_roles.get(uid, "OPERADOR")
                     is_admin = 1 if int(uid) in {int(x) for x in selected_admins} else 0
+                    import json as _json
                     execute(
-                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                        (int(uid), admin_cli_key, is_admin, role_emp, now, now),
+                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, allowed_mandantes_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                        (int(uid), admin_cli_key, is_admin, role_emp, _json.dumps([int(x) for x in (user_mandantes.get(uid, []) or [])]), now, now),
                     )
                 clear_app_caches()
                 sgsst_log("SuperAdmin / Empresas", "Asignar administradores", admin_cli_key)
@@ -361,6 +391,71 @@ def page_superadmin_empresas(*, st, ui_header, fetch_df, fetch_value, execute, c
             st.caption("Tip: usa la sección Admin Usuarios para crear cuentas nuevas y luego vuelve aquí para vincularlas a una empresa.")
 
     with tabs[3]:
+        st.markdown("### Límites de usuarios conectados por empresa")
+        st.caption("Configura los cupos simultáneos por empresa y por rol. Usa 0 para dejar sin límite específico.")
+        try:
+            execute("""
+            CREATE TABLE IF NOT EXISTS empresa_session_limits (
+                cliente_key TEXT PRIMARY KEY,
+                max_total_users INTEGER NOT NULL DEFAULT 2,
+                max_admin_users INTEGER NOT NULL DEFAULT 0,
+                max_operador_users INTEGER NOT NULL DEFAULT 0,
+                max_lector_users INTEGER NOT NULL DEFAULT 0,
+                updated_by BIGINT,
+                updated_at TEXT
+            )
+            """)
+        except Exception:
+            pass
+        if cli_df is None or cli_df.empty:
+            st.info("Primero crea una empresa para configurar sus límites de acceso.")
+        else:
+            cli_keys_lim = cli_df["cliente_key"].astype(str).tolist()
+            lim_key = st.selectbox(
+                "Empresa a configurar",
+                cli_keys_lim,
+                key="sa_limits_empresa",
+                format_func=lambda x: str(cli_df[cli_df['cliente_key'].astype(str)==str(x)].iloc[0]['cliente_nombre']),
+            )
+            lim_df = fetch_df(
+                "SELECT max_total_users, max_admin_users, max_operador_users, max_lector_users FROM empresa_session_limits WHERE cliente_key=?",
+                (lim_key,),
+            )
+            defaults = {"max_total_users": 2, "max_admin_users": 0, "max_operador_users": 0, "max_lector_users": 0}
+            if lim_df is not None and not lim_df.empty:
+                for _k in list(defaults.keys()):
+                    try:
+                        defaults[_k] = int(lim_df.iloc[0].get(_k) or 0)
+                    except Exception:
+                        pass
+            c_lim1, c_lim2, c_lim3, c_lim4 = st.columns(4)
+            max_total = c_lim1.number_input("Máximo total conectado", min_value=0, step=1, value=int(defaults['max_total_users']), help="0 = sin límite total. Recomendado: definir siempre un cupo comercial.")
+            max_admin = c_lim2.number_input("Máximo ADMIN", min_value=0, step=1, value=int(defaults['max_admin_users']), help="0 = sin límite específico para admin.")
+            max_operador = c_lim3.number_input("Máximo OPERADOR", min_value=0, step=1, value=int(defaults['max_operador_users']), help="0 = sin límite específico para operador.")
+            max_lector = c_lim4.number_input("Máximo LECTOR", min_value=0, step=1, value=int(defaults['max_lector_users']), help="0 = sin límite específico para lector.")
+            st.info("Ejemplo: total 4, ADMIN 1, OPERADOR 1, LECTOR 2. Si ya hay 2 lectores conectados, el tercer lector no podrá ingresar.")
+            if st.button("Guardar límites de acceso", type="primary", key="sa_save_session_limits"):
+                cu = current_user() or {}
+                execute(
+                    """
+                    INSERT INTO empresa_session_limits(cliente_key, max_total_users, max_admin_users, max_operador_users, max_lector_users, updated_by, updated_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(cliente_key) DO UPDATE SET
+                        max_total_users=excluded.max_total_users,
+                        max_admin_users=excluded.max_admin_users,
+                        max_operador_users=excluded.max_operador_users,
+                        max_lector_users=excluded.max_lector_users,
+                        updated_by=excluded.updated_by,
+                        updated_at=excluded.updated_at
+                    """,
+                    (str(lim_key), int(max_total), int(max_admin), int(max_operador), int(max_lector), int(cu.get('id') or 0) or None, datetime.now().isoformat(timespec='seconds')),
+                )
+                clear_app_caches()
+                sgsst_log("SuperAdmin / Empresas", "Configurar límites acceso", f"{lim_key}: total={int(max_total)}, admin={int(max_admin)}, operador={int(max_operador)}, lector={int(max_lector)}")
+                st.success("Límites de acceso actualizados.")
+                st.rerun()
+
+    with tabs[4]:
         st.markdown("### 📋 Registro de Auditoría")
         st.caption("Historial de acciones realizadas por usuarios en el sistema. Se conservan los últimos 2.000 registros.")
 

@@ -1,6 +1,18 @@
-# SEGAV ERP (v8.5.00)
+# SEGAV ERP (v9.6.33)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
+
+
+## Entrega v9.6.33 — control comercial de usuarios
+- Aprobación obligatoria por SUPERADMIN para usuarios creados por administradores de empresa.
+- Panel de aprobaciones con opción de aprobar/rechazar solicitudes y motivo de rechazo.
+- Límites configurables por empresa para usuarios conectados simultáneamente.
+- Cupos configurables por rol: ADMIN, OPERADOR y LECTOR. El valor 0 deja el rol sin límite específico.
+- Control de sesiones activas por empresa usando `user_sessions` con ventana de actividad reciente.
+- Usuarios LECTOR con mandantes autorizados por empresa; permite restringir acceso documental a faenas de un mandante específico, por ejemplo Treimun.
+- Documentos empresa pueden quedar globales o asociados a un mandante.
+- Documentos empresa por faena, documentos trabajador y exportaciones ZIP respetan el filtro de mandante para lectores restringidos.
+- Migraciones runtime para `empresa_session_limits`, `users.approval_status`, `user_client_access.allowed_mandantes_json`, `user_sessions.role_empresa` y `empresa_documentos.mandante_id`.
 
 ## Qué incluye esta versión
 - **Dashboard ejecutivo comercial** con score gerencial, semáforo por empresa activa, agenda de vencimientos y vista multiempresa para perfil administrativo.
@@ -74,7 +86,8 @@ Variables soportadas:
 - En Streamlit Cloud no confíes en el filesystem local como almacenamiento permanente.
 
 ## Verificación hecha en esta entrega
-- Compilación Python correcta con `py_compile` para `streamlit_app.py`, `core_db.py` y módulos de `segav_core`.
+- Compilación Python correcta con `py_compile` para `streamlit_app.py`, `api_rest.py` y módulos modificados de `segav_core`.
+- Tests automatizados ejecutados: `38 passed`.
 - Se agregaron archivos de arranque, ejemplo de secretos, verificación de entorno y paquete limpio para GitHub/despliegue.
 
 ## Nota honesta

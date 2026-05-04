@@ -63,6 +63,7 @@ def page_export_zip(
     current_tenant_key,
     current_segav_client_key,
     visible_clientes_df,
+    allowed_mandante_ids=None,
 ):
     ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
     tenant_key = str(current_tenant_key() or current_segav_client_key() or '').strip()
@@ -77,11 +78,21 @@ def page_export_zip(
         pass
     st.caption(f"Empresa activa para esta exportación: {tenant_name} ({tenant_key})")
 
-    faenas = fetch_df('''
-        SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
-        FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
-        ORDER BY f.id DESC
-    ''')
+    _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
+    if _allowed_mands:
+        _ph = ','.join(['?'] * len(_allowed_mands))
+        faenas = fetch_df(f'''
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            WHERE f.mandante_id IN ({_ph})
+            ORDER BY f.id DESC
+        ''', tuple(_allowed_mands))
+    else:
+        faenas = fetch_df('''
+            SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
+            FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
+            ORDER BY f.id DESC
+        ''')
     if faenas.empty:
         ui_tip("Crea una faena primero.")
         return
@@ -149,7 +160,11 @@ def page_export_zip(
         st.divider()
         st.markdown("#### (Opcional) Filtrar por tipo de documento")
 
-        emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
+        if _allowed_mands:
+            _ph = ','.join(['?'] * len(_allowed_mands))
+            emp_global_types = fetch_df(f"SELECT DISTINCT doc_tipo FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY doc_tipo", tuple(_allowed_mands))
+        else:
+            emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
         emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
 
         emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo", (int(faena_id),))

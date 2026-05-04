@@ -412,6 +412,11 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
     except Exception as _exc:
         _record_soft_error("bootstrap.ensure_user_client_access", _exc)
     try:
+        if 'ensure_access_governance_tables' in globals():
+            ensure_access_governance_tables()
+    except Exception as _exc:
+        _record_soft_error("bootstrap.access_governance", _exc)
+    try:
         _canonicalize_existing_rut_storage()
     except Exception as _exc:
         _record_soft_error("bootstrap.canonicalize_existing_rut", _exc)
@@ -1491,8 +1496,14 @@ def fetch_assigned_workers(faena_id: int, fresh: bool = True):
           AND COALESCE(NULLIF(TRIM(UPPER(a.estado)), ''), 'ACTIVA') <> 'CERRADA'
         ORDER BY t.apellidos, t.nombres, t.id
     '''
+    params = [int(faena_id), tenant_key, tenant_key]
+    allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
+    if allowed_mands:
+        ph = _sql_in_placeholders(allowed_mands)
+        q = q.replace('WHERE a.faena_id=?', f'WHERE a.faena_id=? AND EXISTS (SELECT 1 FROM faenas f_scope WHERE f_scope.id=a.faena_id AND f_scope.mandante_id IN ({ph}))')
+        params = [int(faena_id), *allowed_mands, tenant_key, tenant_key]
     reader = fetch_df_uncached if fresh else fetch_df
-    return reader(q, (int(faena_id), tenant_key, tenant_key))
+    return reader(q, tuple(params))
 
 
 def get_global_counts():
@@ -3091,6 +3102,16 @@ def _export_collect_files(faena_id: int,
                           selected_trabajador_doc_ids=None) -> list:
     """Recopila todos los archivos para un ZIP de exportación de faena dentro del tenant activo."""
     entries = []  # list of (arcpath, file_path, bucket, object_path)
+    allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
+    faena_mandante_id = None
+    try:
+        _fm_df = tenant_fetch_df("SELECT mandante_id FROM faenas WHERE id=?", (int(faena_id),))
+        if _fm_df is not None and not _fm_df.empty:
+            faena_mandante_id = int(_fm_df.iloc[0].get('mandante_id') or 0)
+    except Exception:
+        faena_mandante_id = None
+    if allowed_mands and faena_mandante_id not in allowed_mands:
+        return []
 
     # Contrato de faena
     if include_contrato:
@@ -3112,8 +3133,12 @@ def _export_collect_files(faena_id: int,
 
     # Documentos empresa global
     if include_global_empresa_docs:
-        q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
-        emp_docs = tenant_fetch_df(q_emp)
+        if faena_mandante_id:
+            q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id=? ORDER BY doc_tipo, id"
+            emp_docs = tenant_fetch_df(q_emp, (int(faena_mandante_id),))
+        else:
+            q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
+            emp_docs = tenant_fetch_df(q_emp)
         if emp_docs is not None and not emp_docs.empty:
             for _, r in emp_docs.iterrows():
                 if doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
@@ -3165,9 +3190,12 @@ def _export_collect_files(faena_id: int,
 
 def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
     """Genera un ZIP con todos los documentos de una faena dentro del tenant activo."""
-    faena = tenant_fetch_df("SELECT nombre, fecha_inicio FROM faenas WHERE id=?", (int(faena_id),))
+    faena = tenant_fetch_df("SELECT nombre, fecha_inicio, mandante_id FROM faenas WHERE id=?", (int(faena_id),))
     if faena is None or faena.empty:
         raise ValueError("La faena no existe o no pertenece a la empresa activa.")
+    allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
+    if allowed_mands and int(faena.iloc[0].get('mandante_id') or 0) not in allowed_mands:
+        raise ValueError("Tu usuario lector no tiene acceso al mandante de esta faena.")
     faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_name = f"export_{faena_nombre}_{ts}.zip"
@@ -3201,10 +3229,18 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-        ef_docs = tenant_fetch_df(
-            "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
-            (int(year), int(month)),
-        )
+        allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
+        if allowed_mands:
+            ph = ','.join(['?'] * len(allowed_mands))
+            ef_docs = tenant_fetch_df(
+                f"SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? AND mandante_id IN ({ph}) ORDER BY faena_id, doc_tipo, id",
+                (int(year), int(month), *allowed_mands),
+            )
+        else:
+            ef_docs = tenant_fetch_df(
+                "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
+                (int(year), int(month)),
+            )
         if ef_docs is not None and not ef_docs.empty:
             for _, r in ef_docs.iterrows():
                 try:
@@ -3216,7 +3252,11 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
                     continue
 
         if include_global_empresa_docs:
-            emp_docs = tenant_fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
+            if allowed_mands:
+                ph = ','.join(['?'] * len(allowed_mands))
+                emp_docs = tenant_fetch_df(f"SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({ph}) ORDER BY doc_tipo, id", tuple(allowed_mands))
+            else:
+                emp_docs = tenant_fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
             if emp_docs is not None and not emp_docs.empty:
                 for _, r in emp_docs.iterrows():
                     try:
@@ -4370,6 +4410,15 @@ def ensure_users_table():
                 email TEXT,
                 phone TEXT,
                 cargo TEXT,
+                approval_status TEXT NOT NULL DEFAULT 'APROBADO',
+                requested_by BIGINT,
+                requested_by_username TEXT,
+                requested_cliente_key TEXT,
+                approval_requested_at TIMESTAMPTZ,
+                reviewed_by BIGINT,
+                reviewed_by_username TEXT,
+                reviewed_at TIMESTAMPTZ,
+                rejection_reason TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
@@ -4381,6 +4430,15 @@ def ensure_users_table():
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS email TEXT")
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS phone TEXT")
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS cargo TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'APROBADO'")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_by BIGINT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_by_username TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_cliente_key TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS approval_requested_at TIMESTAMPTZ")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_by BIGINT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_by_username TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS rejection_reason TEXT")
         except Exception as _exc:
             _record_soft_error("users.fixed_cliente_key.pg", _exc)
         execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -4401,6 +4459,15 @@ def ensure_users_table():
             email TEXT,
             phone TEXT,
             cargo TEXT,
+            approval_status TEXT NOT NULL DEFAULT 'APROBADO',
+            requested_by INTEGER,
+            requested_by_username TEXT,
+            requested_cliente_key TEXT,
+            approval_requested_at TEXT,
+            reviewed_by INTEGER,
+            reviewed_by_username TEXT,
+            reviewed_at TEXT,
+            rejection_reason TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -4408,7 +4475,12 @@ def ensure_users_table():
     )
     try:
         with conn() as c:
-            migrate_add_columns_if_missing(c, 'users', {'fixed_cliente_key': 'TEXT', 'full_name': 'TEXT', 'email': 'TEXT', 'phone': 'TEXT', 'cargo': 'TEXT'})
+            migrate_add_columns_if_missing(c, 'users', {
+                'fixed_cliente_key': 'TEXT', 'full_name': 'TEXT', 'email': 'TEXT', 'phone': 'TEXT', 'cargo': 'TEXT',
+                'approval_status': "TEXT DEFAULT 'APROBADO'", 'requested_by': 'INTEGER', 'requested_by_username': 'TEXT',
+                'requested_cliente_key': 'TEXT', 'approval_requested_at': 'TEXT', 'reviewed_by': 'INTEGER',
+                'reviewed_by_username': 'TEXT', 'reviewed_at': 'TEXT', 'rejection_reason': 'TEXT'
+            })
     except Exception as _exc:
         _record_soft_error("users.fixed_cliente_key.sqlite", _exc)
     execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -4425,6 +4497,7 @@ def ensure_storage_columns_postgres():
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS vencimiento TEXT;",
         "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS cliente_key TEXT;",
+        "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS mandante_id BIGINT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS bucket TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS object_path TEXT;",
         "ALTER TABLE IF EXISTS faena_empresa_documentos ADD COLUMN IF NOT EXISTS mandante_id BIGINT;",
@@ -4542,7 +4615,7 @@ def ensure_storage_columns_sqlite(c):
         "contratos_faena": {"bucket": "TEXT", "object_path": "TEXT"},
         "faena_anexos": {"bucket": "TEXT", "object_path": "TEXT"},
         "trabajador_documentos": {"bucket": "TEXT", "object_path": "TEXT"},
-        "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "vencimiento": "TEXT", "cliente_key": "TEXT"},
+        "empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "vencimiento": "TEXT", "cliente_key": "TEXT", "mandante_id": "INTEGER"},
         "faena_empresa_documentos": {"bucket": "TEXT", "object_path": "TEXT", "mandante_id": "INTEGER", "periodo_anio": "INTEGER", "periodo_mes": "INTEGER"},
         "export_historial": {"bucket": "TEXT", "object_path": "TEXT"},
         "export_historial_mes": {"bucket": "TEXT", "object_path": "TEXT"},
@@ -4656,7 +4729,9 @@ def ensure_user_sessions_table():
             started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_active INTEGER DEFAULT 1,
-            app_env TEXT NULL
+            app_env TEXT NULL,
+            role_global TEXT NULL,
+            role_empresa TEXT NULL
         )
         """)
     else:
@@ -4669,9 +4744,21 @@ def ensure_user_sessions_table():
             started_at TEXT DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
             is_active INTEGER DEFAULT 1,
-            app_env TEXT NULL
+            app_env TEXT NULL,
+            role_global TEXT NULL,
+            role_empresa TEXT NULL
         )
         """)
+    try:
+        if DB_BACKEND == 'postgres':
+            execute("ALTER TABLE IF EXISTS user_sessions ADD COLUMN IF NOT EXISTS role_global TEXT")
+            execute("ALTER TABLE IF EXISTS user_sessions ADD COLUMN IF NOT EXISTS role_empresa TEXT")
+        else:
+            with conn() as c:
+                migrate_add_columns_if_missing(c, 'user_sessions', {'role_global': 'TEXT', 'role_empresa': 'TEXT'})
+                c.commit()
+    except Exception as _exc:
+        _record_soft_error("user_sessions.role_columns", _exc)
     try:
         execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id)")
         execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_tenant ON user_sessions(cliente_key, is_active, last_seen_at)")
@@ -4705,15 +4792,22 @@ def touch_user_session(cliente_key: str | None = None):
     sid = _current_session_id()
     params_select = (sid,)
     exists = int(fetch_value("SELECT COUNT(*) FROM user_sessions WHERE session_id=?", params_select, default=0) or 0)
+    role_global = str(u.get("role") or "OPERADOR").upper()
+    role_empresa = str(u.get("role_empresa") or "").upper()
+    if not role_empresa and ck:
+        try:
+            role_empresa = str(company_role_for_user_core(fetch_df, int(u.get("id") or 0), ck, role_global) or role_global).upper()
+        except Exception:
+            role_empresa = role_global
     if exists > 0:
         execute(
-            "UPDATE user_sessions SET user_id=?, username=?, cliente_key=?, last_seen_at=CURRENT_TIMESTAMP, is_active=1, app_env=? WHERE session_id=?",
-            (int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV, sid),
+            "UPDATE user_sessions SET user_id=?, username=?, cliente_key=?, last_seen_at=CURRENT_TIMESTAMP, is_active=1, app_env=?, role_global=?, role_empresa=? WHERE session_id=?",
+            (int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV, role_global, role_empresa, sid),
         )
     else:
         execute(
-            "INSERT INTO user_sessions(session_id, user_id, username, cliente_key, started_at, last_seen_at, is_active, app_env) VALUES(?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,1,?)",
-            (sid, int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV),
+            "INSERT INTO user_sessions(session_id, user_id, username, cliente_key, started_at, last_seen_at, is_active, app_env, role_global, role_empresa) VALUES(?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,1,?,?,?)",
+            (sid, int(u.get("id") or 0), str(u.get("username") or ""), ck, SEGAV_ENV, role_global, role_empresa),
         )
 
 
@@ -4759,6 +4853,247 @@ def get_active_sessions_summary(cliente_key: str | None = None, minutes: int = 2
     return _get_active_sessions_summary_cached(DB_BACKEND, PG_DSN_FINGERPRINT, str(cliente_key or '').strip(), int(minutes or 20))
 
 
+
+
+SESSION_LIMIT_WINDOW_MINUTES = 20
+SESSION_ROLE_LIMIT_COLUMNS = {
+    "ADMIN": "max_admin_users",
+    "OPERADOR": "max_operador_users",
+    "LECTOR": "max_lector_users",
+    "SUPERVISOR": "max_operador_users",
+}
+
+
+def _json_int_list(value) -> list[int]:
+    try:
+        raw = json.loads(value or "[]") if isinstance(value, str) else (value or [])
+        if not isinstance(raw, list):
+            return []
+        out = []
+        for item in raw:
+            try:
+                n = int(item)
+                if n > 0 and n not in out:
+                    out.append(n)
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
+
+def ensure_access_governance_tables():
+    """Tablas/columnas para aprobación de usuarios, límites de sesiones y mandantes por lector."""
+    ensure_user_sessions_table()
+    try:
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS empresa_session_limits (
+                cliente_key TEXT PRIMARY KEY,
+                max_total_users INTEGER NOT NULL DEFAULT 2,
+                max_admin_users INTEGER NOT NULL DEFAULT 0,
+                max_operador_users INTEGER NOT NULL DEFAULT 0,
+                max_lector_users INTEGER NOT NULL DEFAULT 0,
+                updated_by BIGINT,
+                updated_at TEXT
+            )
+            """
+        )
+        execute("CREATE INDEX IF NOT EXISTS idx_empresa_session_limits_cliente ON empresa_session_limits(cliente_key)")
+    except Exception as _exc:
+        _record_soft_error("access_limits.create", _exc)
+
+    if DB_BACKEND == "postgres":
+        stmts = [
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'APROBADO'",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_by BIGINT",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_by_username TEXT",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS requested_cliente_key TEXT",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS approval_requested_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_by BIGINT",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_by_username TEXT",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS rejection_reason TEXT",
+            "ALTER TABLE IF EXISTS user_client_access ADD COLUMN IF NOT EXISTS allowed_mandantes_json TEXT",
+            "ALTER TABLE IF EXISTS user_sessions ADD COLUMN IF NOT EXISTS role_global TEXT",
+            "ALTER TABLE IF EXISTS user_sessions ADD COLUMN IF NOT EXISTS role_empresa TEXT",
+            "ALTER TABLE IF EXISTS empresa_documentos ADD COLUMN IF NOT EXISTS mandante_id BIGINT",
+        ]
+        for stmt in stmts:
+            try:
+                execute(stmt)
+            except Exception as _exc:
+                _record_soft_error("access_governance.pg", _exc)
+    else:
+        try:
+            with conn() as c:
+                migrate_add_columns_if_missing(c, 'users', {
+                    'approval_status': "TEXT DEFAULT 'APROBADO'", 'requested_by': 'INTEGER', 'requested_by_username': 'TEXT',
+                    'requested_cliente_key': 'TEXT', 'approval_requested_at': 'TEXT', 'reviewed_by': 'INTEGER',
+                    'reviewed_by_username': 'TEXT', 'reviewed_at': 'TEXT', 'rejection_reason': 'TEXT'
+                })
+                migrate_add_columns_if_missing(c, 'user_client_access', {'allowed_mandantes_json': 'TEXT'})
+                migrate_add_columns_if_missing(c, 'user_sessions', {'role_global': 'TEXT', 'role_empresa': 'TEXT'})
+                migrate_add_columns_if_missing(c, 'empresa_documentos', {'mandante_id': 'INTEGER'})
+                c.commit()
+        except Exception as _exc:
+            _record_soft_error("access_governance.sqlite", _exc)
+    try:
+        execute("UPDATE users SET approval_status='APROBADO' WHERE approval_status IS NULL OR TRIM(approval_status)='' ")
+    except Exception as _exc:
+        _record_soft_error("access_governance.backfill", _exc)
+
+
+def get_company_session_limits(cliente_key: str) -> dict:
+    ensure_access_governance_tables()
+    ck = str(cliente_key or '').strip()
+    defaults = {"max_total_users": 2, "max_admin_users": 0, "max_operador_users": 0, "max_lector_users": 0}
+    if not ck:
+        return defaults
+    try:
+        df = fetch_df_uncached(
+            "SELECT max_total_users, max_admin_users, max_operador_users, max_lector_users FROM empresa_session_limits WHERE cliente_key=?",
+            (ck,),
+        )
+        if df is not None and not df.empty:
+            out = defaults.copy()
+            for k in out:
+                try:
+                    out[k] = int(df.iloc[0].get(k) or 0)
+                except Exception:
+                    pass
+            return out
+    except Exception as _exc:
+        _record_soft_error("access_limits.read", _exc)
+    return defaults
+
+
+def resolve_login_company_context(user_row: dict) -> tuple[str, str]:
+    """Empresa/rol empresa que se usará para validar cupos de sesión al iniciar sesión."""
+    try:
+        if str(user_row.get('role') or '').upper() == 'SUPERADMIN':
+            return '', 'SUPERADMIN'
+        uid = int(user_row.get('id') or 0)
+        fixed = str(user_row.get('fixed_cliente_key') or '').strip()
+        if fixed:
+            role_emp = company_role_for_user_core(fetch_df, uid, fixed, str(user_row.get('role') or 'OPERADOR'))
+            return fixed, str(role_emp or user_row.get('role') or 'OPERADOR').upper()
+        df = fetch_df_uncached(
+            """
+            SELECT a.cliente_key, COALESCE(a.role_empresa, u.role, 'OPERADOR') AS role_empresa
+              FROM user_client_access a
+              JOIN users u ON u.id=a.user_id
+         LEFT JOIN segav_erp_clientes c ON c.cliente_key=a.cliente_key
+             WHERE a.user_id=? AND COALESCE(c.activo,1)=1
+             ORDER BY COALESCE(a.is_company_admin,0) DESC, a.cliente_key ASC
+             LIMIT 1
+            """,
+            (uid,),
+        )
+        if df is not None and not df.empty:
+            return str(df.iloc[0].get('cliente_key') or '').strip(), str(df.iloc[0].get('role_empresa') or user_row.get('role') or 'OPERADOR').upper()
+    except Exception as _exc:
+        _record_soft_error("login.company_context", _exc)
+    return '', str(user_row.get('role') or 'OPERADOR').upper()
+
+
+def _active_session_count_sql(cliente_key: str, role_empresa: str | None = None, exclude_user_id: int | None = None) -> int:
+    ensure_user_sessions_table()
+    ck = str(cliente_key or '').strip()
+    role = str(role_empresa or '').strip().upper()
+    params = [ck]
+    role_clause = ''
+    if role:
+        role_clause = " AND UPPER(COALESCE(role_empresa, role_global, 'OPERADOR'))=?"
+        params.append(role)
+    excl_clause = ''
+    if exclude_user_id:
+        excl_clause = " AND user_id<>?"
+        params.append(int(exclude_user_id))
+    mins = int(SESSION_LIMIT_WINDOW_MINUTES)
+    if DB_BACKEND == 'postgres':
+        sql = f"""
+            SELECT COUNT(DISTINCT user_id) AS n
+              FROM user_sessions
+             WHERE is_active=1
+               AND COALESCE(cliente_key,'')=?
+               AND last_seen_at >= (CURRENT_TIMESTAMP - INTERVAL '{mins} minutes')
+               {role_clause}{excl_clause}
+        """
+        return int(fetch_value(sql, tuple(params), default=0, fresh=True) or 0)
+    interval_sql = f"-{mins} minutes"
+    params.append(interval_sql)
+    sql = f"""
+        SELECT COUNT(DISTINCT user_id) AS n
+          FROM user_sessions
+         WHERE is_active=1
+           AND COALESCE(cliente_key,'')=?
+           AND last_seen_at >= datetime('now', ?)
+           {role_clause}{excl_clause}
+    """
+    # En SQLite el parámetro de intervalo debe ir antes de los parámetros añadidos por role/exclude si el placeholder aparece antes.
+    params_sql = [ck, interval_sql]
+    if role:
+        params_sql.append(role)
+    if exclude_user_id:
+        params_sql.append(int(exclude_user_id))
+    return int(fetch_value(sql, tuple(params_sql), default=0, fresh=True) or 0)
+
+
+def validate_session_quota_for_login(user_row: dict, cliente_key: str, role_empresa: str) -> tuple[bool, str]:
+    if str(user_row.get('role') or '').upper() == 'SUPERADMIN':
+        return True, ''
+    ck = str(cliente_key or '').strip()
+    if not ck:
+        return False, 'Tu usuario no tiene una empresa asignada. Pide al superadmin que te vincule a una empresa.'
+    uid = int(user_row.get('id') or 0)
+    role = str(role_empresa or user_row.get('role') or 'OPERADOR').upper()
+    limits = get_company_session_limits(ck)
+    max_total = int(limits.get('max_total_users') or 0)
+    if max_total > 0:
+        current_total = _active_session_count_sql(ck, exclude_user_id=uid)
+        if current_total >= max_total:
+            return False, f"La empresa ya alcanzó su máximo de {max_total} usuario(s) conectado(s) simultáneamente."
+    role_col = SESSION_ROLE_LIMIT_COLUMNS.get(role)
+    if role_col:
+        max_role = int(limits.get(role_col) or 0)
+        if max_role > 0:
+            current_role = _active_session_count_sql(ck, role_empresa=role, exclude_user_id=uid)
+            if current_role >= max_role:
+                role_label = {'ADMIN': 'administrador(es)', 'OPERADOR': 'operador(es)', 'LECTOR': 'lector(es)'}.get(role, role.lower())
+                return False, f"La empresa ya alcanzó su máximo de {max_role} {role_label} conectado(s) simultáneamente."
+    return True, ''
+
+
+def current_user_mandante_scope_ids() -> list[int] | None:
+    """Devuelve mandantes autorizados para el usuario actual. None = sin restricción específica."""
+    if is_superadmin():
+        return None
+    u = current_user() or {}
+    uid = int(u.get('id') or 0)
+    ck = current_tenant_key()
+    if not uid or not ck:
+        return None
+    try:
+        row = fetch_df_uncached(
+            "SELECT COALESCE(role_empresa, ?) AS role_empresa, allowed_mandantes_json FROM user_client_access WHERE user_id=? AND cliente_key=? LIMIT 1",
+            (str(u.get('role') or 'OPERADOR').upper(), uid, ck),
+        )
+        if row is None or row.empty:
+            return None
+        role_emp = str(row.iloc[0].get('role_empresa') or u.get('role') or '').upper()
+        allowed = _json_int_list(row.iloc[0].get('allowed_mandantes_json'))
+        if role_emp == 'LECTOR' and allowed:
+            return allowed
+        return None
+    except Exception as _exc:
+        _record_soft_error("mandante_scope.current", _exc)
+    return None
+
+
+def _sql_in_placeholders(values: list[int]) -> str:
+    return ','.join(['?'] * len(values))
+
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
         "id": int(user_row["id"]),
@@ -4769,10 +5104,14 @@ def auth_set_session(user_row: dict):
         "email": str(user_row.get("email") or "").strip(),
         "phone": str(user_row.get("phone") or "").strip(),
         "cargo": str(user_row.get("cargo") or "").strip(),
+        "role_empresa": str(user_row.get("_login_role_empresa") or user_row.get("role_empresa") or "").strip().upper(),
         "perms": perms_from_row(str(user_row.get("role") or "OPERADOR"), user_row.get("perms_json")),
     }
+    _login_ck = str(user_row.get("_login_cliente_key") or user_row.get("fixed_cliente_key") or st.session_state.get('active_cliente_key') or '').strip()
+    if _login_ck:
+        st.session_state['active_cliente_key'] = _login_ck
     try:
-        touch_user_session(str(user_row.get("fixed_cliente_key") or '').strip())
+        touch_user_session(_login_ck)
     except Exception as _exc:
         _record_soft_error("user_sessions.touch_login", _exc)
 
@@ -4831,12 +5170,17 @@ def ensure_user_client_access_table():
                 cliente_key TEXT NOT NULL,
                 is_company_admin BIGINT NOT NULL DEFAULT 0,
                 role_empresa TEXT NOT NULL DEFAULT 'OPERADOR',
+                allowed_mandantes_json TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 PRIMARY KEY (user_id, cliente_key)
             );
             """
         )
+        try:
+            execute("ALTER TABLE IF EXISTS user_client_access ADD COLUMN IF NOT EXISTS allowed_mandantes_json TEXT")
+        except Exception as _exc:
+            _record_soft_error('user_client_access.allowed_mandantes.pg', _exc)
         execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
         execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
         return
@@ -4847,12 +5191,19 @@ def ensure_user_client_access_table():
             cliente_key TEXT NOT NULL,
             is_company_admin INTEGER NOT NULL DEFAULT 0,
             role_empresa TEXT NOT NULL DEFAULT 'OPERADOR',
+            allowed_mandantes_json TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, cliente_key)
         );
         """
     )
+    try:
+        with conn() as c:
+            migrate_add_columns_if_missing(c, 'user_client_access', {'allowed_mandantes_json': 'TEXT'})
+            c.commit()
+    except Exception as _exc:
+        _record_soft_error('user_client_access.allowed_mandantes.sqlite', _exc)
     execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_cliente ON user_client_access(cliente_key)")
     execute("CREATE INDEX IF NOT EXISTS idx_user_client_access_user ON user_client_access(user_id)")
 
@@ -5579,15 +5930,45 @@ html,body{
             else:
                 row = fetch_active_user_by_rut(u, fresh=True)
                 if not row:
-                    st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
+                    row_any = fetch_active_user_by_rut(u, active_only=False, fresh=True)
+                    if row_any:
+                        status = str(row_any.get('approval_status') or 'APROBADO').upper()
+                        if status == 'PENDIENTE':
+                            st.session_state["_lg_err"] = "Tu cuenta está pendiente de aprobación por el superadmin."
+                        elif status == 'RECHAZADO':
+                            reason = str(row_any.get('rejection_reason') or '').strip()
+                            st.session_state["_lg_err"] = "Tu solicitud de usuario fue rechazada." + (f" Motivo: {reason}" if reason else "")
+                        else:
+                            st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
+                    else:
+                        st.session_state["_lg_err"] = "Usuario incorrecto o desactivado."
                     st.rerun()
                 else:
+                    status = str(row.get('approval_status') or 'APROBADO').upper()
+                    if status == 'PENDIENTE':
+                        st.session_state["_lg_err"] = "Tu cuenta está pendiente de aprobación por el superadmin."
+                        st.rerun()
+                    if status == 'RECHAZADO':
+                        st.session_state["_lg_err"] = "Tu solicitud de usuario fue rechazada."
+                        st.rerun()
                     if not verify_password(passw, row["salt_b64"], row["pass_hash_b64"]):
                         st.session_state["_lg_err"] = "Contraseña incorrecta."
                         st.rerun()
                     else:
                         st.session_state.pop("_lg_err", None)
                         row = canonicalize_user_rut_if_needed(row)
+                        try:
+                            _login_ck, _login_role_emp = resolve_login_company_context(row)
+                            quota_ok, quota_msg = validate_session_quota_for_login(row, _login_ck, _login_role_emp)
+                            if not quota_ok:
+                                st.session_state["_lg_err"] = quota_msg
+                                st.rerun()
+                            if _login_ck:
+                                st.session_state['active_cliente_key'] = _login_ck
+                            row['_login_cliente_key'] = _login_ck
+                            row['_login_role_empresa'] = _login_role_emp
+                        except Exception as _exc:
+                            _record_soft_error('login.session_quota', _exc)
                         auth_set_session(row)
                         try:
                             _allowed = allowed_client_keys_for_user_core(fetch_df, int(row.get('id') or 0), str(row.get('role') or 'OPERADOR'))
@@ -7833,6 +8214,7 @@ def page_admin_usuarios():
     ensure_user_client_access_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     ensure_user_client_module_perms_table_once(DB_BACKEND, PG_DSN_FINGERPRINT)
     ensure_legal_workflow_tables_once(DB_BACKEND, PG_DSN_FINGERPRINT)
+    ensure_access_governance_tables()
     tenant_key = current_tenant_key()
     # Namespace estable: mantiene valores de formularios entre reruns.
     # Los duplicados se evitan desactivando el reintento automático de esta página.
@@ -7845,12 +8227,16 @@ def page_admin_usuarios():
 
     tab_labels = ["👥 Usuarios", "➕ Crear usuario", "🧩 Permisos empresa"]
     if is_superadmin():
+        tab_labels.append("🛂 Aprobaciones")
         tab_labels.append("🟢 Sesiones")
     if company_caps.get('can_view_audit'):
         tab_labels.append("🧾 Auditoría empresa")
     _tabs = st.tabs(tab_labels)
     tab1, tab2, tab_perm = _tabs[0], _tabs[1], _tabs[2]
     _tab_idx = 3
+    tab_approvals = _tabs[_tab_idx] if is_superadmin() else None
+    if is_superadmin():
+        _tab_idx += 1
     tab_sessions = _tabs[_tab_idx] if is_superadmin() else None
     if is_superadmin():
         _tab_idx += 1
@@ -7864,6 +8250,8 @@ def page_admin_usuarios():
                        u.username,
                        u.role,
                        u.is_active,
+                       COALESCE(u.approval_status,'APROBADO') AS approval_status,
+                       COALESCE(u.approval_status,'APROBADO') AS approval_status,
                        COALESCE(cf.cliente_nombre, u.fixed_cliente_key, '') AS empresa_fija,
                        u.created_at,
                        u.updated_at
@@ -7896,7 +8284,7 @@ def page_admin_usuarios():
             uid = None
             row = {}
         else:
-            st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
+            st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","approval_status":"aprobacion","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
 
             st.divider()
             uid = st.selectbox(
@@ -8109,9 +8497,28 @@ def page_admin_usuarios():
                 for i,k in enumerate(DEFAULT_PERMS.keys()):
                     with cols[i%3]:
                         over[k] = st.checkbox(f"{k}", value=bool(eff.get(k, False)), key=f'{_adm_ns}_tenant_modperm_{uid_perm}_{k}')
+                allowed_mandantes_perm = []
+                if str(role_emp_edit or '').upper() == 'LECTOR':
+                    st.markdown('#### Mandantes autorizados para lector')
+                    mand_df_perm = fetch_df("SELECT id, nombre FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY nombre", (tenant_key,))
+                    if mand_df_perm is not None and not mand_df_perm.empty:
+                        curr_allowed_json = fetch_value("SELECT allowed_mandantes_json FROM user_client_access WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key), default='[]', fresh=True)
+                        curr_allowed = _json_int_list(curr_allowed_json)
+                        mand_map_perm = {int(r['id']): str(r['nombre']) for _, r in mand_df_perm.iterrows()}
+                        allowed_mandantes_perm = st.multiselect(
+                            'Este lector puede ver documentación de estos mandantes',
+                            list(mand_map_perm.keys()),
+                            default=[mid for mid in curr_allowed if mid in mand_map_perm],
+                            format_func=lambda mid: mand_map_perm.get(int(mid), str(mid)),
+                            key=f'{_adm_ns}_tenant_perm_mandantes_{uid_perm}',
+                        )
+                        st.caption('Si queda vacío, el lector no tendrá restricción específica por mandante dentro de esta empresa.')
+                    else:
+                        st.info('No hay mandantes cargados en la empresa activa.')
                 if st.button('Guardar permisos empresa', type='primary', use_container_width=True, key=f'{_adm_ns}_tenant_perm_save'):
                     execute("DELETE FROM user_client_module_perms WHERE user_id=? AND cliente_key=?", (int(uid_perm), tenant_key))
                     execute("INSERT INTO user_client_module_perms(user_id, cliente_key, perms_json, updated_at) VALUES(?,?,?,datetime('now'))", (int(uid_perm), tenant_key, json.dumps(over)))
+                    execute("UPDATE user_client_access SET allowed_mandantes_json=?, updated_at=datetime('now') WHERE user_id=? AND cliente_key=?", (json.dumps([int(x) for x in (allowed_mandantes_perm or [])]), int(uid_perm), tenant_key))
                     audit_log('PERMISOS_EMPRESA', 'user_client_module_perms', f'Usuario {uid_perm} empresa {tenant_key}')
                     st.success('Permisos por empresa actualizados.')
                     st.rerun()
@@ -8148,6 +8555,26 @@ def page_admin_usuarios():
                 )
                 if str(target_company_key).strip():
                     target_company_admin = st.checkbox('Administrar esa empresa', value=False, key=f'{_adm_ns}_create_user_company_admin')
+            reader_allowed_mandante_ids = []
+            _reader_company_for_mandantes = str((tenant_key if scoped_mode else target_company_key) or '').strip()
+            if str(role or '').upper() == 'LECTOR' and _reader_company_for_mandantes:
+                _mandantes_create_df = fetch_df(
+                    "SELECT id, nombre FROM mandantes WHERE COALESCE(cliente_key,'')=? ORDER BY nombre",
+                    (_reader_company_for_mandantes,),
+                )
+                if _mandantes_create_df is not None and not _mandantes_create_df.empty:
+                    _mandante_name_map = {int(r['id']): str(r['nombre']) for _, r in _mandantes_create_df.iterrows()}
+                    reader_allowed_mandante_ids = st.multiselect(
+                        'Mandantes autorizados para este lector',
+                        list(_mandante_name_map.keys()),
+                        default=[],
+                        format_func=lambda mid: _mandante_name_map.get(int(mid), str(mid)),
+                        key=f'{_adm_ns}_create_reader_mandantes',
+                        help='Si seleccionas Treimun, este lector solo verá documentación y faenas asociadas a ese mandante.'
+                    )
+                    st.caption('Deja vacío solo si el lector debe ver todos los mandantes de la empresa.')
+                else:
+                    st.info('Esta empresa aún no tiene mandantes cargados para restringir al lector.')
             pw1 = st.text_input("Contraseña", type="password", key=f"{_adm_ns}_create_user_pw1")
             pw2 = st.text_input("Repetir contraseña", type="password", key=f"{_adm_ns}_create_user_pw2")
             st.markdown("#### Poderes")
@@ -8200,9 +8627,12 @@ def page_admin_usuarios():
                     st.error('Debes seleccionar una empresa para dejar fijo el usuario.')
                     st.stop()
                 salt_b64, h_b64 = hash_password(pw1)
+                cu_req = current_user() or {}
+                approval_status = 'PENDIENTE' if scoped_mode else 'APROBADO'
+                active_flag = 0 if scoped_mode else 1
                 execute(
-                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key, full_name) VALUES(?,?,?,?,?,?,?,?)",
-                    (u, salt_b64, h_b64, str(role or 'OPERADOR').upper(), json.dumps(perms), 1, user_fixed_company_key or None, u),
+                    "INSERT INTO users(username, salt_b64, pass_hash_b64, role, perms_json, is_active, fixed_cliente_key, full_name, approval_status, requested_by, requested_by_username, requested_cliente_key, approval_requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (u, salt_b64, h_b64, str(role or 'OPERADOR').upper(), json.dumps(perms), active_flag, user_fixed_company_key or None, u, approval_status, int(cu_req.get('id') or 0) or None, str(cu_req.get('username') or ''), assign_company_key or None),
                 )
                 if scoped_mode or assign_company_key:
                     new_user_id = int(fetch_value("SELECT id FROM users WHERE username=?", (u,), default=0) or 0)
@@ -8212,23 +8642,26 @@ def page_admin_usuarios():
                         (new_user_id, assign_company_key),
                     )
                     execute(
-                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                        "INSERT INTO user_client_access(user_id, cliente_key, is_company_admin, role_empresa, allowed_mandantes_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
                         (
                             new_user_id,
                             assign_company_key,
                             1 if ((not scoped_mode and bool(target_company_admin)) or str(role or '').upper() == 'ADMIN') else 0,
                             ('ADMIN' if ((not scoped_mode and bool(target_company_admin)) or str(role or '').upper() == 'ADMIN') else str(role or 'OPERADOR').upper()),
+                            json.dumps([int(x) for x in (reader_allowed_mandante_ids or [])]),
                             now_assign,
                             now_assign,
                         ),
                     )
                 # Validación inmediata del ciclo crear -> autenticar -> resolver empresa.
                 # Si esto falla, el usuario no quedará como "creado pero imposible de logear".
-                created_row = fetch_active_user_by_rut(u, fresh=True)
+                created_row = fetch_active_user_by_rut(u, active_only=not scoped_mode, fresh=True)
                 if created_row:
                     created_row = canonicalize_user_rut_if_needed(created_row)
+                if not created_row:
+                    created_row = fetch_active_user_by_rut(u, active_only=False, fresh=True)
                 if not created_row or not verify_password(pw1, created_row.get('salt_b64'), created_row.get('pass_hash_b64')):
-                    raise RuntimeError('El usuario fue creado, pero falló la validación de login inmediato.')
+                    raise RuntimeError('El usuario fue creado, pero falló la validación técnica de credenciales.')
                 if str(created_row.get('role') or '').upper() != 'SUPERADMIN':
                     _access_count = int(fetch_value(
                         "SELECT COUNT(*) FROM user_client_access WHERE user_id=? AND cliente_key=?",
@@ -8243,7 +8676,9 @@ def page_admin_usuarios():
                     audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role} empresa={assign_company_key or '(sin asignar)'} fijo={'SI' if user_fixed_company_key else 'NO'}")
                 except Exception as _exc:
                     _record_soft_error("backup.audit", _exc)
-                if user_fixed_company_key:
+                if scoped_mode:
+                    st.success("Solicitud de usuario enviada al superadmin. La cuenta queda pendiente hasta aprobación.")
+                elif user_fixed_company_key:
                     st.success(f"Usuario creado y fijado a la empresa {target_company_name or user_fixed_company_key}.")
                 elif assign_company_key:
                     st.success(f"Usuario creado y asociado a la empresa {target_company_name or assign_company_key}.")
@@ -8256,6 +8691,94 @@ def page_admin_usuarios():
                     st.error("Ese usuario ya existe.")
                 else:
                     st.error(f"No se pudo crear: {e}")
+
+
+
+    if tab_approvals is not None:
+        with tab_approvals:
+            st.markdown("### Solicitudes de creación de usuarios")
+            st.caption("Las cuentas creadas por administradores de empresa quedan pendientes hasta que el superadmin apruebe o rechace.")
+            try:
+                pend_df = fetch_df_uncached(
+                    """
+                    SELECT u.id, u.username, u.role, COALESCE(c.cliente_nombre, u.requested_cliente_key, '') AS empresa,
+                           u.requested_cliente_key, u.requested_by_username, u.approval_requested_at,
+                           COALESCE(u.approval_status,'APROBADO') AS approval_status, u.rejection_reason
+                      FROM users u
+                 LEFT JOIN segav_erp_clientes c ON c.cliente_key=u.requested_cliente_key
+                     WHERE UPPER(COALESCE(u.approval_status,'APROBADO')) IN ('PENDIENTE','RECHAZADO')
+                     ORDER BY CASE WHEN UPPER(COALESCE(u.approval_status,''))='PENDIENTE' THEN 0 ELSE 1 END, u.approval_requested_at DESC, u.id DESC
+                    """
+                )
+            except Exception as e:
+                st.error(f"No fue posible cargar solicitudes: {e}")
+                pend_df = pd.DataFrame()
+            if pend_df is None or pend_df.empty:
+                st.success("No hay solicitudes pendientes de revisión.")
+            else:
+                st.dataframe(
+                    pend_df.rename(columns={
+                        'id': 'ID', 'username': 'Usuario/RUT', 'role': 'Rol', 'empresa': 'Empresa',
+                        'requested_by_username': 'Solicitado por', 'approval_requested_at': 'Fecha solicitud',
+                        'approval_status': 'Estado', 'rejection_reason': 'Motivo rechazo'
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                pending_only = pend_df[pend_df['approval_status'].astype(str).str.upper() == 'PENDIENTE']
+                if pending_only.empty:
+                    st.info("Las solicitudes visibles ya fueron rechazadas. No hay pendientes por aprobar.")
+                else:
+                    pick_req = st.selectbox(
+                        "Solicitud pendiente",
+                        pending_only['id'].astype(int).tolist(),
+                        format_func=lambda rid: f"{pending_only[pending_only['id'].astype(int)==int(rid)].iloc[0]['username']} · {pending_only[pending_only['id'].astype(int)==int(rid)].iloc[0]['empresa']}",
+                        key=f"{_adm_ns}_approval_pick",
+                    )
+                    review_comments = st.text_area("Motivo/comentario de revisión", key=f"{_adm_ns}_approval_comments", height=80)
+                    ca, cr = st.columns(2)
+                    cu = current_user() or {}
+                    with ca:
+                        if st.button("Aprobar usuario", type="primary", use_container_width=True, key=f"{_adm_ns}_approve_user"):
+                            execute(
+                                "UPDATE users SET approval_status='APROBADO', is_active=1, reviewed_by=?, reviewed_by_username=?, reviewed_at=datetime('now'), rejection_reason=NULL, updated_at=datetime('now') WHERE id=?",
+                                (int(cu.get('id') or 0) or None, str(cu.get('username') or ''), int(pick_req)),
+                            )
+                            audit_log('APROBAR_USUARIO', 'users', f'Solicitud usuario #{pick_req} aprobada')
+                            st.success('Usuario aprobado y activado.')
+                            st.rerun()
+                    with cr:
+                        if st.button("Rechazar usuario", use_container_width=True, key=f"{_adm_ns}_reject_user"):
+                            execute(
+                                "UPDATE users SET approval_status='RECHAZADO', is_active=0, reviewed_by=?, reviewed_by_username=?, reviewed_at=datetime('now'), rejection_reason=?, updated_at=datetime('now') WHERE id=?",
+                                (int(cu.get('id') or 0) or None, str(cu.get('username') or ''), str(review_comments or '').strip(), int(pick_req)),
+                            )
+                            audit_log('RECHAZAR_USUARIO', 'users', f'Solicitud usuario #{pick_req} rechazada')
+                            st.warning('Usuario rechazado. No podrá iniciar sesión.')
+                            st.rerun()
+
+    if tab_sessions is not None:
+        with tab_sessions:
+            st.markdown("### Sesiones activas y límites")
+            try:
+                active_ck = str(current_tenant_key() or tenant_key or '').strip()
+                sess_summary = get_active_sessions_summary(active_ck, minutes=SESSION_LIMIT_WINDOW_MINUTES)
+                limits = get_company_session_limits(active_ck) if active_ck else {}
+                kpi_grid([
+                    {"label": "Usuarios conectados", "value": int(sess_summary.get("users", 0)), "subtitle": f"Últimos {SESSION_LIMIT_WINDOW_MINUTES} minutos", "icon": "👥", "tone": "info", "status": "Online"},
+                    {"label": "Límite empresa", "value": int(limits.get('max_total_users', 0) or 0), "subtitle": "0 = sin límite", "icon": "🔐", "tone": "success", "status": "Cupo"},
+                ], columns=2)
+                sess_df = sess_summary.get("rows")
+                if sess_df is not None and not sess_df.empty:
+                    st.dataframe(sess_df.rename(columns={"username":"rut_usuario","last_seen_at":"ultima_actividad","sesiones":"sesiones"}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No hay sesiones activas recientes para la empresa visible.")
+                if DB_BACKEND == 'sqlite':
+                    st.warning("Backend actual: SQLite. Recomendado solo para pruebas locales; para control multiusuario real usa PostgreSQL/Supabase.")
+                else:
+                    st.success("Backend actual: PostgreSQL. Apto para operación multiusuario real.")
+            except Exception as e:
+                st.error(f"No fue posible cargar las sesiones activas: {e}")
 
 # ----------------------------
 # Route
@@ -8302,19 +8825,19 @@ def page_asignar_trabajadores():
 
 
 def page_documentos_empresa():
-    return _ops_docs.page_documentos_empresa(fetch_df=tenant_fetch_df, get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
+    return _ops_docs.page_documentos_empresa(fetch_df=tenant_fetch_df, allowed_mandante_ids=current_user_mandante_scope_ids(), get_empresa_required_doc_types=get_empresa_required_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_documentos_empresa_faena():
-    return _ops_docs.page_documentos_empresa_faena(fetch_df=tenant_fetch_df, ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES, render_legal_doc_inline=render_legal_doc_inline)
+    return _ops_docs.page_documentos_empresa_faena(fetch_df=tenant_fetch_df, allowed_mandante_ids=current_user_mandante_scope_ids(), ui_tip=ui_tip, periodo_label=periodo_label, periodo_ym=periodo_ym, get_empresa_monthly_doc_types=get_empresa_monthly_doc_types, doc_tipo_join=doc_tipo_join, doc_tipo_label=doc_tipo_label, render_upload_help=render_upload_help, prepare_upload_payload=prepare_upload_payload, safe_name=safe_name, save_file_online=save_file_online, sha256_bytes=sha256_bytes, execute=tenant_execute, datetime=datetime, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, delete_uploaded_document_record=delete_uploaded_document_record, MESES_ES=MESES_ES, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_documentos_trabajador():
-    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, fetch_df=tenant_fetch_df, fetch_df_uncached=tenant_fetch_df_uncached, execute=tenant_execute, execute_rowcount=tenant_execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
+    return _ops_personal.page_documentos_trabajador(DB_BACKEND=DB_BACKEND, allowed_mandante_ids=current_user_mandante_scope_ids(), fetch_df=tenant_fetch_df, fetch_df_uncached=tenant_fetch_df_uncached, execute=tenant_execute, execute_rowcount=tenant_execute_rowcount, auto_backup_db=auto_backup_db, fetch_assigned_workers=fetch_assigned_workers, prepare_upload_payload=prepare_upload_payload, render_upload_help=render_upload_help, save_file_online=save_file_online, sha256_bytes=sha256_bytes, load_file_anywhere=load_file_anywhere, worker_required_docs_for_record=worker_required_docs_for_record, doc_tipo_label=doc_tipo_label, doc_tipo_join=doc_tipo_join, safe_name=safe_name, canonical_cargo_label=canonical_cargo_label, cargo_docs_catalog_rows=cargo_docs_catalog_rows, pendientes_obligatorios=pendientes_obligatorios, delete_uploaded_document_record=delete_uploaded_document_record, render_legal_doc_inline=render_legal_doc_inline)
 
 
 def page_export_zip():
-    return _ops_exports.page_export_zip(st=st, ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date, current_tenant_key=current_tenant_key, current_segav_client_key=current_segav_client_key, visible_clientes_df=visible_clientes_df)
+    return _ops_exports.page_export_zip(st=st, allowed_mandante_ids=current_user_mandante_scope_ids(), ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date, current_tenant_key=current_tenant_key, current_segav_client_key=current_segav_client_key, visible_clientes_df=visible_clientes_df)
 
 
 def page_sgsst():
@@ -8368,6 +8891,7 @@ def _ensure_page_runtime_health_once(_db_backend: str, _dsn_fingerprint: str, te
     ensure_segav_erp_tables()
     ensure_users_table()
     ensure_user_client_access_table()
+    ensure_access_governance_tables()
     ensure_user_client_module_perms_table_once(_db_backend, _dsn_fingerprint)
     ensure_legal_workflow_tables_once(_db_backend, _dsn_fingerprint)
     ensure_multiempresa_compliance_schema_once(_db_backend, _dsn_fingerprint, tenant_key, execute, conn)

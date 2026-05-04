@@ -90,13 +90,18 @@ def deep_health():
 @app.post("/api/v1/auth/login")
 def login(payload: LoginPayload, request: Request):
     df = fetch_df(
-        "SELECT id, username, salt_b64, pass_hash_b64, role, perms_json, is_active, password_must_change, failed_login_attempts, locked_until "
+        "SELECT id, username, salt_b64, pass_hash_b64, role, perms_json, is_active, password_must_change, failed_login_attempts, locked_until, COALESCE(approval_status,'APROBADO') AS approval_status "
         "FROM users WHERE username=? LIMIT 1",
         (str(payload.username or "").strip(),),
     )
     if df is None or df.empty:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     row = df.iloc[0]
+    status = str(row.get("approval_status") or "APROBADO").upper()
+    if status == "PENDIENTE":
+        raise HTTPException(status_code=403, detail="Usuario pendiente de aprobación por superadmin")
+    if status == "RECHAZADO":
+        raise HTTPException(status_code=403, detail="Solicitud de usuario rechazada")
     if int(row.get("is_active") or 0) != 1:
         raise HTTPException(status_code=403, detail="Usuario inactivo")
     locked, locked_until = is_account_locked(row.to_dict())
