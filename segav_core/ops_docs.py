@@ -155,7 +155,7 @@ def page_documentos_empresa(
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_delete")
                 st.rerun()
@@ -395,7 +395,7 @@ def page_documentos_empresa_faena(
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_faena_delete")
                 st.rerun()

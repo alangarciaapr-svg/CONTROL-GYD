@@ -384,7 +384,7 @@ def page_contratos_faena(
                 execute("DELETE FROM contratos_faena WHERE id=?", (int(contrato_id),))
                 cleanup_issues = cleanup_deleted_file_refs(refs)
                 if cleanup_issues:
-                    st.warning("Contrato eliminado, pero hubo problemas al limpiar el archivo asociado: " + " | ".join(cleanup_issues))
+                    st.error("Contrato eliminado, pero hubo problemas al limpiar el archivo asociado: " + " | ".join(cleanup_issues))
                 else:
                     st.success("Contrato eliminado.")
                 auto_backup_db("contrato_delete")
@@ -696,7 +696,7 @@ def page_faenas(
                 execute("DELETE FROM faenas WHERE id=?", (int(fid),))
                 cleanup_issues = cleanup_deleted_file_refs(refs)
                 if cleanup_issues:
-                    st.warning("Faena eliminada, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
+                    st.error("Faena eliminada, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
                 else:
                     st.success("Faena eliminada.")
                 auto_backup_db("faena_delete")

@@ -280,7 +280,7 @@ def page_trabajadores(
                     execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
                     cleanup_issues = cleanup_deleted_file_refs(refs)
                     if cleanup_issues:
-                        st.warning("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
+                        st.error("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
                     else:
                         st.success("Trabajador eliminado.")
                     auto_backup_db("trabajador_delete")
@@ -1094,7 +1094,7 @@ def page_documentos_trabajador(
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_trabajador_delete")
                 st.rerun()

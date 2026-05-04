@@ -39,6 +39,7 @@ from segav_core.ui_tenant import allowed_client_keys_for_user as allowed_client_
 from segav_core.module_perms import ensure_user_client_module_perms_table, effective_company_perms
 from segav_core.db_migrations import apply_runtime_migrations
 from segav_core.kpi_ui import kpi_card, kpi_grid, tone_for_percentage
+from segav_core.notifications import install_action_feedback, render_action_feedback, queue_action_feedback_from_tag
 
 # ----------------------------
 # Config
@@ -50,6 +51,8 @@ if os.path.exists(LOCAL_BRAND_LOGO_PATH):
     st.set_page_config(page_title="SEGAV ERP", page_icon=LOCAL_BRAND_LOGO_PATH, layout="wide")
 else:
     st.set_page_config(page_title="SEGAV ERP", layout="wide")
+
+install_action_feedback()
 
 APP_NAME = "SEGAV ERP"
 DB_PATH = "app.db"
@@ -3015,7 +3018,11 @@ def go(page_name: str, faena_id: int | None = None):
 
 
 def auto_backup_db(tag: str = "auto"):
-    """Genera un backup automático de la base de datos SQLite en el historial."""
+    """Genera un backup automático y deja confirmación visual de acciones CRUD."""
+    try:
+        queue_action_feedback_from_tag(tag)
+    except Exception as _exc:
+        _record_soft_error("action_feedback", _exc)
     if DB_BACKEND != "sqlite":
         return
     try:
@@ -6124,6 +6131,7 @@ if current_user() is None:
     auth_gate_ui()
     st.stop()
 
+render_action_feedback()
 
 # ----------------------------
 # Banner de vencimientos (post-login)
@@ -6543,7 +6551,7 @@ def _page_trabajadores_impl():
                         )
                         c.commit()
                     st.session_state["_trabajador_create_reset_pending"] = True
-                    st.session_state["_trabajador_create_flash"] = "Trabajador guardado."
+                    st.session_state["_trabajador_create_flash"] = "Trabajador creado correctamente."
                     auto_backup_db("trabajador")
                     st.rerun()
                 except Exception as e:
@@ -6644,7 +6652,7 @@ def _page_trabajadores_impl():
                     execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
                     cleanup_issues = cleanup_deleted_file_refs(refs)
                     if cleanup_issues:
-                        st.warning("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
+                        st.error("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
                     else:
                         st.success("Trabajador eliminado.")
                     auto_backup_db("trabajador_delete")
@@ -7142,7 +7150,7 @@ def _page_documentos_empresa_impl():
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_delete")
                 st.rerun()
@@ -7320,7 +7328,7 @@ def _page_documentos_empresa_faena_impl():
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_empresa_faena_delete")
                 st.rerun()
@@ -7595,7 +7603,7 @@ def _page_documentos_trabajador_impl():
                 if result["shared_refs"]:
                     st.info("El registro fue eliminado de la base de datos. El archivo físico se conservó porque está referenciado en otro registro.")
                 elif result["cleanup_issues"]:
-                    st.warning("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
+                    st.error("El registro fue eliminado de la base de datos, pero hubo un problema al limpiar el archivo: " + " | ".join(result["cleanup_issues"]))
                 st.success(f"Documento eliminado: {result['file_name']}")
                 auto_backup_db("doc_trabajador_delete")
                 st.rerun()
@@ -8851,7 +8859,7 @@ def page_admin_usuarios():
                                 (int(cu.get('id') or 0) or None, str(cu.get('username') or ''), str(review_comments or '').strip(), int(pick_req)),
                             )
                             audit_log('RECHAZAR_USUARIO', 'users', f'Solicitud usuario #{pick_req} rechazada')
-                            st.warning('Usuario rechazado. No podrá iniciar sesión.')
+                            st.error('Usuario rechazado. No podrá iniciar sesión.', icon='🟥')
                             st.rerun()
 
     if tab_sessions is not None:

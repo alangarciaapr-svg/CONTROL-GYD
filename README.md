@@ -173,3 +173,12 @@ Novedades v8.7.00:
 - Cabeceras de Supabase Storage reforzadas para keys JWT antiguas y keys nuevas `sb_secret_`, usando `apikey` y `Authorization` cuando corresponde.
 - Aplica a documentos de empresa, documentos empresa por faena, documentos trabajador, contratos/anexos y exportaciones que usen la misma función central de lectura.
 - Si un documento fue cargado únicamente en disco local de un despliegue anterior y ese disco ya no existe, el ERP ahora lo informa con mejor diagnóstico; en ese caso el archivo físico debe volver a cargarse.
+
+## v9.6.38 - Confirmaciones visuales globales de acciones
+
+- Se agrega `segav_core/notifications.py` como capa central de confirmación visual para SEGAV ERP.
+- Las acciones exitosas muestran mensajes verdes con ícono de confirmación.
+- Las acciones destructivas, como eliminar, quitar, rechazar o desactivar, se muestran en rojo aunque técnicamente se hayan ejecutado correctamente.
+- Se incorpora cola de confirmaciones posterior a `st.rerun()`, para que acciones como crear trabajador, guardar documentos o actualizar registros sigan mostrando el mensaje después de recargar la pantalla.
+- `auto_backup_db(tag)` ahora deja una confirmación de usuario asociada a cada acción operativa, sin afectar el respaldo SQLite ni el funcionamiento en PostgreSQL/Supabase.
+- Se mantienen las advertencias y errores existentes, pero con iconografía uniforme.
