@@ -363,6 +363,30 @@ def _df_with_columns(df, defaults: dict[str, object]):
     return work
 
 
+def _df_unique_columns(df):
+    """Devuelve un DataFrame con nombres de columnas únicos para componentes Streamlit.
+
+    Evita que vistas administrativas fallen cuando un SELECT o un rename dejan
+    aliases repetidos. Si hay duplicados, conserva la primera columna y agrega
+    sufijos técnicos a las siguientes, sin alterar datos ni base.
+    """
+    if df is None:
+        return pd.DataFrame()
+    try:
+        work = df.copy()
+    except Exception:
+        work = pd.DataFrame(df)
+    seen = {}
+    cols = []
+    for col in work.columns:
+        base = str(col)
+        n = seen.get(base, 0)
+        cols.append(base if n == 0 else f"{base}_{n + 1}")
+        seen[base] = n + 1
+    work.columns = cols
+    return work
+
+
 def _safe_numeric_int(value, default: int = 0) -> int:
     try:
         if pd.isna(value):
@@ -8251,7 +8275,6 @@ def page_admin_usuarios():
                        u.role,
                        u.is_active,
                        COALESCE(u.approval_status,'APROBADO') AS approval_status,
-                       COALESCE(u.approval_status,'APROBADO') AS approval_status,
                        COALESCE(cf.cliente_nombre, u.fixed_cliente_key, '') AS empresa_fija,
                        u.created_at,
                        u.updated_at
@@ -8284,7 +8307,8 @@ def page_admin_usuarios():
             uid = None
             row = {}
         else:
-            st.dataframe(df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","approval_status":"aprobacion","created_at":"creado","updated_at":"actualizado"}), use_container_width=True, hide_index=True)
+            df_view = df.rename(columns={"username":"rut_usuario","role":"rol","is_active":"activo","approval_status":"aprobacion","created_at":"creado","updated_at":"actualizado"})
+            st.dataframe(_df_unique_columns(df_view), use_container_width=True, hide_index=True)
 
             st.divider()
             uid = st.selectbox(

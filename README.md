@@ -1,7 +1,14 @@
-# SEGAV ERP (v9.6.33)
+# SEGAV ERP (v9.6.34)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
+
+
+## Entrega v9.6.34 — corrección Administración de Usuarios
+- Corregida la vista de Administración de Usuarios que podía fallar por columnas duplicadas al mostrar `aprobacion`.
+- Se eliminó el alias SQL repetido `approval_status` en la consulta acotada por empresa.
+- Se agregó resguardo visual para que las tablas de Streamlit no fallen si alguna vista futura recibe columnas repetidas.
+- Validación ejecutada: `pytest -q` → 38 pruebas aprobadas.
 
 ## Entrega v9.6.33 — control comercial de usuarios
 - Aprobación obligatoria por SUPERADMIN para usuarios creados por administradores de empresa.
