@@ -82,11 +82,18 @@ def scope_sql_to_tenant(sql: str, params=(), tenant_key: str | None = None, tena
         cols_txt = m_ins.group(2)
         cols = [c.strip() for c in cols_txt.split(',') if c.strip()]
         if not any(c.lower() == 'cliente_key' for c in cols):
-            new_cols = 'cliente_key, ' + cols_txt.strip()
-            start, end = m_ins.span(2)
-            q2 = q[:start] + new_cols + q[end:]
-            val_start = m_ins.end(3)
-            q2 = q2[:val_start] + '?, ' + q2[val_start:]
+            # Build the scoped INSERT from the original SQL slices.
+            # Previous logic inserted the VALUES placeholder using offsets from
+            # the original SQL after the column list had already been expanded,
+            # which could corrupt the final column name, e.g. estado -> es?, tado.
+            q2 = (
+                q[:m_ins.start(2)]
+                + 'cliente_key, '
+                + cols_txt.strip()
+                + q[m_ins.end(2):m_ins.end(3)]
+                + '?, '
+                + q[m_ins.end(3):]
+            )
             return q2, (tenant_key, *params_t)
         return q, params_t
 

@@ -1,7 +1,13 @@
-# SEGAV ERP (v9.6.34)
+# SEGAV ERP (v9.6.37)
 
 Base corregida restaurando el panel SuperAdmin / Empresas y manteniendo los fixes de compatibilidad y arranque.
 
+
+## Entrega v9.6.37 — corrección creación de faenas
+- Corregida la inyección automática de `cliente_key` en consultas `INSERT` multiempresa.
+- El error podía partir la columna `estado` como `es?, tado` / `es1, tado`, generando: `column "es1" of relation "faenas" does not exist`.
+- Se agregó prueba específica para creación de faenas con columnas `fecha_inicio`, `fecha_termino` y `estado`.
+- Validación ejecutada: `pytest -q` → 39 pruebas aprobadas.
 
 
 ## Entrega v9.6.34 — corrección Administración de Usuarios
@@ -94,7 +100,7 @@ Variables soportadas:
 
 ## Verificación hecha en esta entrega
 - Compilación Python correcta con `py_compile` para `streamlit_app.py`, `api_rest.py` y módulos modificados de `segav_core`.
-- Tests automatizados ejecutados: `38 passed`.
+- Tests automatizados ejecutados: `39 passed`.
 - Se agregaron archivos de arranque, ejemplo de secretos, verificación de entorno y paquete limpio para GitHub/despliegue.
 
 ## Nota honesta
