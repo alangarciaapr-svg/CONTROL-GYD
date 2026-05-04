@@ -159,3 +159,11 @@ Novedades v8.7.00:
 - Documentos Trabajador aplica el mismo filtro por mandante/faena y evita el error `page_documentos_trabajador() got an unexpected keyword argument 'allowed_mandante_ids'`.
 - Export ZIP aplica el mismo alcance por mandante en el selector de faenas y en la generación de ZIP.
 - Se mantiene el acceso completo para superadmin y usuarios sin restricción específica.
+
+## v9.6.36 - Fix visualización de archivos cargados Storage/disco
+
+- `load_file_anywhere` ahora intenta varias rutas compatibles antes de mostrar que el archivo no está disponible: ruta Storage actual, ruta multiempresa `clientes/<empresa>/...`, ruta legacy previa a multiempresa y disco local.
+- Se permite compatibilidad segura con archivos antiguos sin prefijo `clientes/`, manteniendo validación estricta cuando la ruta sí pertenece al esquema nuevo multiempresa.
+- Cabeceras de Supabase Storage reforzadas para keys JWT antiguas y keys nuevas `sb_secret_`, usando `apikey` y `Authorization` cuando corresponde.
+- Aplica a documentos de empresa, documentos empresa por faena, documentos trabajador, contratos/anexos y exportaciones que usen la misma función central de lectura.
+- Si un documento fue cargado únicamente en disco local de un despliegue anterior y ese disco ya no existe, el ERP ahora lo informa con mejor diagnóstico; en ese caso el archivo físico debe volver a cargarse.

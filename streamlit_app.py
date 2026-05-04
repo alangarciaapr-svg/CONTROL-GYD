@@ -571,18 +571,12 @@ def _storage_headers(content_type: str | None = None, upsert: bool = False, for_
     else:
         if not storage_enabled():
             raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
-        raw_service = (STORAGE_SERVICE_KEY or "").strip()
-        raw_anon = (STORAGE_ANON_KEY or "").strip()
-        key = raw_service or raw_anon
-    h = {
-        "Accept": "application/json",
-    }
-    if _is_jwt(key):
+        key = (STORAGE_SERVICE_KEY or "").strip() or (STORAGE_ANON_KEY or "").strip()
+    h = {"Accept": "application/json", "apikey": key}
+    # Supabase Storage acepta las keys JWT antiguas y las keys nuevas tipo sb_secret_.
+    # Algunas instalaciones requieren Authorization además de apikey para objetos privados/autenticados.
+    if _is_jwt(key) or key.startswith("sb_secret_"):
         h["Authorization"] = f"Bearer {key}"
-        h["apikey"] = key
-    else:
-        # Las secret/publishable keys modernas van en apikey y no como Bearer JWT.
-        h["apikey"] = key
     if content_type and not for_multipart:
         h["Content-Type"] = content_type
     if upsert:
@@ -911,20 +905,74 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
 
     return local_path, bucket, object_path
 
+def _storage_path_is_tenant_safe(object_path: str | None, *, allow_legacy: bool = True) -> bool:
+    op = str(object_path or '').strip().lstrip('/')
+    if not op:
+        return False
+    u = current_user() or {}
+    if str(u.get('role') or '').upper() == 'SUPERADMIN':
+        return True
+    # Archivos nuevos: clientes/<empresa>/... se validan estrictamente contra el tenant activo.
+    if op.startswith('clientes/'):
+        return tenant_object_path_allowed_core(op, current_tenant_key(), is_superadmin=False)
+    # Compatibilidad: archivos antiguos cargados antes de multiempresa no tienen prefijo clientes/.
+    # La fila ya fue filtrada por tenant/mandante, por eso no se abre otro tenant moderno.
+    return bool(allow_legacy)
+
+
+def _storage_path_candidates_from_record(file_path: str | None, object_path: str | None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value):
+        v = str(value or '').strip().replace('\\', '/')
+        v = v.lstrip('/')
+        if v and v not in candidates:
+            candidates.append(v)
+
+    add(object_path)
+
+    fp = str(file_path or '').strip().replace('\\', '/')
+    rels: list[str] = []
+    if fp:
+        root = str(UPLOAD_ROOT or '').strip().replace('\\', '/').rstrip('/')
+        if root and (fp == root or fp.startswith(root + '/')):
+            rels.append(fp[len(root):].lstrip('/'))
+        marker = '/uploads/'
+        if marker in fp:
+            rels.append(fp.split(marker, 1)[1].lstrip('/'))
+        if fp.startswith('uploads/'):
+            rels.append(fp[len('uploads/'):].lstrip('/'))
+
+    tkey = current_tenant_key()
+    for rel in rels:
+        rel = rel.strip('/')
+        if not rel:
+            continue
+        if tkey and not rel.startswith('clientes/'):
+            add('/'.join(['clientes', storage_safe_segment(tkey), rel]))
+        add(rel)
+
+    return candidates
+
+
 def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
-    if object_path:
-        u = current_user() or {}
-        if not tenant_object_path_allowed_core(str(object_path), current_tenant_key(), is_superadmin=str(u.get('role') or '').upper() == 'SUPERADMIN'):
-            raise PermissionError('Archivo fuera del tenant activo.')
-    if object_path and storage_enabled():
-        try:
-            return storage_download(object_path)
-        except Exception:
-            # Fallback local para no romper la app si Storage falla temporalmente.
-            pass
+    last_error: Exception | None = None
+    if storage_enabled():
+        for candidate in _storage_path_candidates_from_record(file_path, object_path):
+            if not _storage_path_is_tenant_safe(candidate, allow_legacy=True):
+                last_error = PermissionError('Archivo fuera del tenant activo.')
+                continue
+            try:
+                return storage_download(candidate)
+            except Exception as exc:
+                last_error = exc
+                # Intenta ruta tenant nueva, ruta legacy y luego disco local.
+                continue
     if file_path and os.path.exists(str(file_path)):
         with open(str(file_path), "rb") as fp:
             return fp.read()
+    if last_error is not None:
+        raise FileNotFoundError(f"Archivo no disponible (Storage/disco). Último intento: {last_error}")
     raise FileNotFoundError("Archivo no disponible (ni Storage ni disco local).")
 
 

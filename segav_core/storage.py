@@ -125,12 +125,11 @@ def _storage_headers(content_type: str | None = None, upsert: bool = False, for_
         if not storage_enabled():
             raise RuntimeError("Storage no configurado. Configura SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y SUPABASE_STORAGE_BUCKET en Secrets.")
         key = (STORAGE_SERVICE_KEY or "").strip() or (STORAGE_ANON_KEY or "").strip()
-    h = {"Accept": "application/json"}
-    if _is_jwt(key):
+    h = {"Accept": "application/json", "apikey": key}
+    # Supabase Storage acepta las keys JWT antiguas y las keys nuevas tipo sb_secret_.
+    # Algunas instalaciones requieren Authorization además de apikey para objetos privados/autenticados.
+    if _is_jwt(key) or key.startswith("sb_secret_"):
         h["Authorization"] = f"Bearer {key}"
-        h["apikey"] = key
-    else:
-        h["apikey"] = key
     if content_type and not for_multipart:
         h["Content-Type"] = content_type
     if upsert:
@@ -419,15 +418,44 @@ def save_file_online(folder_parts, file_name: str, file_bytes: bytes, content_ty
     return local_path, bucket, object_path
 
 
+def _storage_path_candidates_from_record(file_path: str | None, object_path: str | None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value):
+        v = str(value or '').strip().replace('\\', '/')
+        v = v.lstrip('/')
+        if v and v not in candidates:
+            candidates.append(v)
+
+    add(object_path)
+
+    fp = str(file_path or '').strip().replace('\\', '/')
+    if fp:
+        root = str(UPLOAD_ROOT or '').strip().replace('\\', '/').rstrip('/')
+        if root and (fp == root or fp.startswith(root + '/')):
+            add(fp[len(root):].lstrip('/'))
+        marker = '/uploads/'
+        if marker in fp:
+            add(fp.split(marker, 1)[1].lstrip('/'))
+        if fp.startswith('uploads/'):
+            add(fp[len('uploads/'):].lstrip('/'))
+    return candidates
+
+
 def load_file_anywhere(file_path: str | None, bucket: str | None, object_path: str | None) -> bytes:
-    if object_path and storage_enabled():
-        try:
-            return storage_download(object_path)
-        except Exception:
-            pass
+    last_error: Exception | None = None
+    if storage_enabled():
+        for candidate in _storage_path_candidates_from_record(file_path, object_path):
+            try:
+                return storage_download(candidate)
+            except Exception as exc:
+                last_error = exc
+                continue
     if file_path and os.path.exists(str(file_path)):
         with open(str(file_path), "rb") as fp:
             return fp.read()
+    if last_error is not None:
+        raise FileNotFoundError(f"Archivo no disponible (Storage/disco). Último intento: {last_error}")
     raise FileNotFoundError("Archivo no disponible (ni Storage ni disco local).")
 
 
