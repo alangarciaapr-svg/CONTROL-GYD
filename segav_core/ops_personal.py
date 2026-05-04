@@ -801,6 +801,7 @@ def page_documentos_trabajador(
     delete_uploaded_document_record,
     render_legal_doc_inline=None,
     allowed_mandante_ids=None,
+    **_ignored,
 ):
     ui_header(
         "Documentos Trabajador",
@@ -808,8 +809,12 @@ def page_documentos_trabajador(
     )
 
     # Lista de faenas para selector local (en este mismo apartado)
+    _scope_restricted = allowed_mandante_ids is not None
     _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
-    if _allowed_mands:
+    if _scope_restricted and not _allowed_mands:
+        st.info("Tu usuario lector no tiene mandantes asignados. No hay faenas ni trabajadores disponibles para Documentos Trabajador.")
+        return
+    if _scope_restricted:
         _ph = ','.join(['?'] * len(_allowed_mands))
         faenas = fetch_df(
             f'''
@@ -888,7 +893,7 @@ def page_documentos_trabajador(
                     else:
                         st.success(f"{k} — OK")
     else:
-        if _allowed_mands:
+        if _scope_restricted:
             _ph = ','.join(['?'] * len(_allowed_mands))
             trab = fetch_df_uncached(
                 f'''

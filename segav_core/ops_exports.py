@@ -78,8 +78,12 @@ def page_export_zip(
         pass
     st.caption(f"Empresa activa para esta exportación: {tenant_name} ({tenant_key})")
 
+    _scope_restricted = allowed_mandante_ids is not None
     _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
-    if _allowed_mands:
+    if _scope_restricted and not _allowed_mands:
+        st.info("Tu usuario lector no tiene mandantes asignados. No hay faenas disponibles para exportar.")
+        return
+    if _scope_restricted:
         _ph = ','.join(['?'] * len(_allowed_mands))
         faenas = fetch_df(f'''
             SELECT f.id, m.nombre AS mandante, f.nombre, f.estado
@@ -160,7 +164,7 @@ def page_export_zip(
         st.divider()
         st.markdown("#### (Opcional) Filtrar por tipo de documento")
 
-        if _allowed_mands:
+        if _scope_restricted:
             _ph = ','.join(['?'] * len(_allowed_mands))
             emp_global_types = fetch_df(f"SELECT DISTINCT doc_tipo FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY doc_tipo", tuple(_allowed_mands))
         else:

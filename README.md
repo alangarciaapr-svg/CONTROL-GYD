@@ -151,3 +151,11 @@ Novedades v8.7.00:
 - Readiness de producción con chequeos de secreto, backend preferido, utilitarios Postgres y datos mínimos.
 - Respaldos con manifiesto SHA256 y fallback JSON si `pg_dump`/`pg_restore` no están disponibles.
 - CI/CD reforzado con migraciones dry-run, resumen de readiness y checksum del artefacto.
+
+## v9.6.35 - Fix alcance lector por mandante
+
+- Corrige el alcance documental del rol LECTOR por mandante: `None` queda reservado para usuarios sin restricción; `[]` significa lector sin mandantes asignados y no muestra faenas/documentos.
+- Documentos Empresa (Faena) ahora lista solo faenas cuyo `mandante_id` esté autorizado para el lector.
+- Documentos Trabajador aplica el mismo filtro por mandante/faena y evita el error `page_documentos_trabajador() got an unexpected keyword argument 'allowed_mandante_ids'`.
+- Export ZIP aplica el mismo alcance por mandante en el selector de faenas y en la generación de ZIP.
+- Se mantiene el acceso completo para superadmin y usuarios sin restricción específica.

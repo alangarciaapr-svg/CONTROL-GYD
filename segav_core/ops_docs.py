@@ -27,8 +27,12 @@ def page_documentos_empresa(
     ui_header("Documentos Empresa", "Carga documentos corporativos (valen para todas las faenas) y se incluyen en el ZIP de exportación.")
     st.caption("Puedes subir múltiples archivos por tipo. Los tipos requeridos base son liquidaciones de sueldo, F30, F30-1 y certificado de accidentabilidad; además puedes crear tus propios tipos con OTRO.")
 
+    _scope_restricted = allowed_mandante_ids is not None
     _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
-    if _allowed_mands:
+    if _scope_restricted and not _allowed_mands:
+        st.info("Tu usuario lector no tiene mandantes asignados para visualizar documentos empresa.")
+        return
+    if _scope_restricted:
         _ph = ','.join(['?'] * len(_allowed_mands))
         df = fetch_df(f"SELECT id, mandante_id, doc_tipo, nombre_archivo, file_path, bucket, object_path, created_at FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY id DESC", tuple(_allowed_mands))
     else:
@@ -63,7 +67,7 @@ def page_documentos_empresa(
             mand_map = {0: 'Global para toda la empresa'}
             mand_map.update({int(r['id']): str(r['nombre']) for _, r in mandantes_doc_df.iterrows()})
             mand_opts = list(mand_map.keys())
-            if _allowed_mands:
+            if _scope_restricted:
                 mand_opts = [0] + [mid for mid in mand_opts if mid in _allowed_mands]
             mandante_doc_id = st.selectbox(
                 'Mandante asociado al documento',
@@ -203,8 +207,12 @@ def page_documentos_empresa_faena(
         "Carga documentos de empresa POR FAENA, POR MANDANTE y POR MES. Cada período mensual puede tener varios archivos por tipo.",
     )
 
+    _scope_restricted = allowed_mandante_ids is not None
     _allowed_mands = [int(x) for x in (allowed_mandante_ids or [])]
-    if _allowed_mands:
+    if _scope_restricted and not _allowed_mands:
+        st.info("Tu usuario lector no tiene mandantes asignados. No hay faenas disponibles para Documentos Empresa (Faena).")
+        return
+    if _scope_restricted:
         _ph = ','.join(['?'] * len(_allowed_mands))
         faenas = fetch_df(
             f"""

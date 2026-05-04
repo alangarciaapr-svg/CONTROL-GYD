@@ -3134,7 +3134,7 @@ def _export_collect_files(faena_id: int,
             faena_mandante_id = int(_fm_df.iloc[0].get('mandante_id') or 0)
     except Exception:
         faena_mandante_id = None
-    if allowed_mands and faena_mandante_id not in allowed_mands:
+    if allowed_mands is not None and (not allowed_mands or faena_mandante_id not in allowed_mands):
         return []
 
     # Contrato de faena
@@ -3218,8 +3218,8 @@ def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
     if faena is None or faena.empty:
         raise ValueError("La faena no existe o no pertenece a la empresa activa.")
     allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
-    if allowed_mands and int(faena.iloc[0].get('mandante_id') or 0) not in allowed_mands:
-        raise ValueError("Tu usuario lector no tiene acceso al mandante de esta faena.")
+    if allowed_mands is not None and (not allowed_mands or int(faena.iloc[0].get('mandante_id') or 0) not in allowed_mands):
+        raise ValueError("Tu usuario no tiene acceso al mandante de esta faena.")
     faena_nombre = re.sub(r"[^a-zA-Z0-9_-]", "_", str(faena.iloc[0].get("nombre") or "faena"))[:30]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_name = f"export_{faena_nombre}_{ts}.zip"
@@ -3254,12 +3254,18 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
         allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
-        if allowed_mands:
-            ph = ','.join(['?'] * len(allowed_mands))
-            ef_docs = tenant_fetch_df(
-                f"SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? AND mandante_id IN ({ph}) ORDER BY faena_id, doc_tipo, id",
-                (int(year), int(month), *allowed_mands),
-            )
+        if allowed_mands is not None:
+            if allowed_mands:
+                ph = ','.join(['?'] * len(allowed_mands))
+                ef_docs = tenant_fetch_df(
+                    f"SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? AND mandante_id IN ({ph}) ORDER BY faena_id, doc_tipo, id",
+                    (int(year), int(month), *allowed_mands),
+                )
+            else:
+                ef_docs = tenant_fetch_df(
+                    "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE 1=0",
+                    (),
+                )
         else:
             ef_docs = tenant_fetch_df(
                 "SELECT id, faena_id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM faena_empresa_documentos WHERE COALESCE(periodo_anio,0)=? AND COALESCE(periodo_mes,0)=? ORDER BY faena_id, doc_tipo, id",
@@ -3276,9 +3282,12 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
                     continue
 
         if include_global_empresa_docs:
-            if allowed_mands:
-                ph = ','.join(['?'] * len(allowed_mands))
-                emp_docs = tenant_fetch_df(f"SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({ph}) ORDER BY doc_tipo, id", tuple(allowed_mands))
+            if allowed_mands is not None:
+                if allowed_mands:
+                    ph = ','.join(['?'] * len(allowed_mands))
+                    emp_docs = tenant_fetch_df(f"SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({ph}) ORDER BY doc_tipo, id", tuple(allowed_mands))
+                else:
+                    emp_docs = tenant_fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE 1=0")
             else:
                 emp_docs = tenant_fetch_df("SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id")
             if emp_docs is not None and not emp_docs.empty:
@@ -5090,7 +5099,16 @@ def validate_session_quota_for_login(user_row: dict, cliente_key: str, role_empr
 
 
 def current_user_mandante_scope_ids() -> list[int] | None:
-    """Devuelve mandantes autorizados para el usuario actual. None = sin restricción específica."""
+    """
+    Devuelve el alcance de mandantes del usuario actual.
+
+    Reglas importantes:
+    - None  = usuario sin restricción específica por mandante (superadmin/admin/operador sin filtro).
+    - []    = usuario restringido, pero sin mandantes asignados: no debe ver faenas/documentos.
+    - [ids] = usuario restringido a esos mandantes.
+
+    Esta diferencia evita que un LECTOR sin mandantes configurados vea todas las faenas por accidente.
+    """
     if is_superadmin():
         return None
     u = current_user() or {}
@@ -5107,8 +5125,15 @@ def current_user_mandante_scope_ids() -> list[int] | None:
             return None
         role_emp = str(row.iloc[0].get('role_empresa') or u.get('role') or '').upper()
         allowed = _json_int_list(row.iloc[0].get('allowed_mandantes_json'))
-        if role_emp == 'LECTOR' and allowed:
+
+        # Si existe una lista asignada, se respeta aunque el rol sea admin/operador.
+        if allowed:
             return allowed
+
+        # El lector siempre queda bajo control por mandante. Si no tiene mandantes, no ve nada.
+        if role_emp == 'LECTOR':
+            return []
+
         return None
     except Exception as _exc:
         _record_soft_error("mandante_scope.current", _exc)
