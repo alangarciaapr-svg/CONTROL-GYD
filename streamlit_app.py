@@ -40,6 +40,16 @@ from segav_core.module_perms import ensure_user_client_module_perms_table, effec
 from segav_core.db_migrations import apply_runtime_migrations
 from segav_core.kpi_ui import kpi_card, kpi_grid, tone_for_percentage
 from segav_core.notifications import install_action_feedback, render_action_feedback, queue_action_feedback_from_tag
+from segav_core.logger import get_logger, log_action, log_security, log_error
+from segav_core.app_context import AppContext
+from segav_core.search import render_search_sidebar
+from segav_core.notifications_persistent import (
+    ensure_notifications_table, send_notification, get_unread_count,
+    render_notification_badge, render_notification_panel, mark_all_read,
+    CAT_USER_PENDING, CAT_DOC_UPLOADED, CAT_APPROVAL_REQ, CAT_SYSTEM,
+)
+
+_log = get_logger("streamlit_app")
 
 # ----------------------------
 # Config
@@ -447,6 +457,17 @@ def _bootstrap_once(db_backend: str, dsn_fingerprint: str):
         _canonicalize_existing_rut_storage()
     except Exception as _exc:
         _record_soft_error("bootstrap.canonicalize_existing_rut", _exc)
+    # Phase 1: Login attempts table
+    try:
+        _ensure_login_attempts_table()
+    except Exception as _exc:
+        _record_soft_error("bootstrap.login_attempts", _exc)
+    # Phase 9: Notifications table
+    try:
+        ensure_notifications_table(execute, DB_BACKEND)
+    except Exception as _exc:
+        _record_soft_error("bootstrap.notifications", _exc)
+    _log.info("Bootstrap completado exitosamente")
     return True
 
 
@@ -1481,17 +1502,105 @@ def ui_tip(text: str):
 
 
 def ui_paginate(df, page_size: int = 50, key: str = "pg"):
-    """Muestra un DataFrame paginado con controles de navegación."""
+    """Muestra un DataFrame paginado con controles de navegación.
+
+    Phase 8: interfaz mejorada con indicadores visuales y botones de navegación.
+    """
     total = len(df)
     if total <= page_size:
+        st.caption(f"Mostrando {total} registro{'s' if total != 1 else ''}")
         return df
     n_pages = (total - 1) // page_size + 1
-    page = st.number_input(
-        f"Página (1–{n_pages}) · {total} registros",
-        min_value=1, max_value=n_pages, value=1, step=1, key=f"_pg_{key}"
-    )
+    _pg_key = f"_pg_{key}"
+    current_page = st.session_state.get(_pg_key, 1)
+    if current_page > n_pages:
+        current_page = 1
+
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ Anterior", key=f"_pgprev_{key}", disabled=current_page <= 1, use_container_width=True):
+            st.session_state[_pg_key] = current_page - 1
+            st.rerun()
+    with col_info:
+        page = st.number_input(
+            f"Página (1–{n_pages}) · {total} registros",
+            min_value=1, max_value=n_pages, value=current_page, step=1, key=_pg_key
+        )
+    with col_next:
+        if st.button("Siguiente ▶", key=f"_pgnext_{key}", disabled=current_page >= n_pages, use_container_width=True):
+            st.session_state[_pg_key] = current_page + 1
+            st.rerun()
+
     start = (page - 1) * page_size
-    return df.iloc[start: start + page_size]
+    end = min(start + page_size, total)
+    st.caption(f"Registros {start+1}–{end} de {total}")
+    return df.iloc[start: end]
+
+
+def ui_paginate_sql(
+    fetch_fn,
+    count_sql: str,
+    data_sql: str,
+    params=(),
+    page_size: int = 50,
+    key: str = "pgsql",
+):
+    """Paginación a nivel SQL con LIMIT/OFFSET (Phase 8).
+
+    Parameters
+    ----------
+    fetch_fn : callable for DB queries (fetch_df or similar)
+    count_sql : SQL that returns a single COUNT(*) value
+    data_sql : SQL for the data (should NOT include LIMIT/OFFSET — added automatically)
+    params : parameters for both queries
+    page_size : records per page
+    key : unique key for the widget
+
+    Returns
+    -------
+    pd.DataFrame with the current page's data, or empty DataFrame.
+    """
+    try:
+        total = int(fetch_value(count_sql, params, default=0, fresh=True) or 0)
+    except Exception:
+        total = 0
+
+    if total == 0:
+        st.caption("Sin registros.")
+        return pd.DataFrame()
+
+    n_pages = (total - 1) // page_size + 1
+    _pg_key = f"_pgsql_{key}"
+    current_page = st.session_state.get(_pg_key, 1)
+    if current_page > n_pages:
+        current_page = 1
+
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ Anterior", key=f"_pgsqlprev_{key}", disabled=current_page <= 1, use_container_width=True):
+            st.session_state[_pg_key] = current_page - 1
+            st.rerun()
+    with col_info:
+        page = st.number_input(
+            f"Página (1–{n_pages}) · {total} registros",
+            min_value=1, max_value=n_pages, value=current_page, step=1, key=_pg_key,
+        )
+    with col_next:
+        if st.button("Siguiente ▶", key=f"_pgsqlnext_{key}", disabled=current_page >= n_pages, use_container_width=True):
+            st.session_state[_pg_key] = current_page + 1
+            st.rerun()
+
+    offset = (page - 1) * page_size
+    paginated_sql = f"{data_sql} LIMIT {int(page_size)} OFFSET {int(offset)}"
+    try:
+        df = fetch_fn(paginated_sql, params)
+    except Exception:
+        df = pd.DataFrame()
+
+    start = offset
+    end = min(start + page_size, total)
+    st.caption(f"Registros {start+1}–{end} de {total}")
+    return df if df is not None else pd.DataFrame()
 
 
 def ui_confirm_delete(label: str, key: str) -> bool:
@@ -1647,8 +1756,13 @@ def validate_rut_dv(rut: str) -> bool:
     return validate_rut_dv_core(rut)
 
 
-def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: str = ""):
-    """Registra una acción en el log de auditoría."""
+def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: str = "", *, old_value: str = "", new_value: str = ""):
+    """Registra una acción en el log de auditoría (DB + logger estructurado).
+
+    Phase 6: ahora incluye old_value/new_value para trazabilidad de cambios,
+    y envía al logger estructurado para persistencia en archivo.
+    Retención aumentada a 10.000 registros.
+    """
     try:
         u = current_user() or {}
         username = str(u.get("username") or "sistema")
@@ -1657,15 +1771,23 @@ def audit_log(accion: str, entidad: str = "", detalle: str = "", cliente_key: st
         ck = str(cliente_key or (current_segav_client_key() if u else "")).strip()
         role_empresa = company_role_for_user_core(fetch_df, user_id, ck, role_global) if ck else role_global
         now = datetime.now().isoformat(timespec="seconds")
+        # Incluir old/new value en detalle si se proporcionan
+        full_detail = str(detalle)[:500]
+        if old_value or new_value:
+            change_info = f" [antes={str(old_value)[:200]}|después={str(new_value)[:200]}]"
+            full_detail = (full_detail + change_info)[:800]
         execute(
             "INSERT INTO segav_audit_log(cliente_key,username,user_id,role_global,role_empresa,accion,entidad,detalle,created_at)"
             " VALUES(?,?,?,?,?,?,?,?,?)",
-            (ck, username, user_id, role_global, role_empresa, str(accion)[:100], str(entidad)[:100], str(detalle)[:500], now),
+            (ck, username, user_id, role_global, role_empresa, str(accion)[:100], str(entidad)[:100], full_detail, now),
         )
+        # Retención: 10.000 registros (antes 2.000)
         execute(
             "DELETE FROM segav_audit_log WHERE id NOT IN"
-            " (SELECT id FROM segav_audit_log ORDER BY id DESC LIMIT 2000)"
+            " (SELECT id FROM segav_audit_log ORDER BY id DESC LIMIT 10000)"
         )
+        # Structured logging para persistencia en archivo
+        log_action(str(accion), entity=str(entidad), detail=full_detail[:200], user=username, cliente_key=ck)
     except Exception as _exc:
         _record_soft_error("audit_log", _exc)
 
@@ -2028,6 +2150,11 @@ def delete_uploaded_document_record(table_name: str, row_id: int):
     file_name = row.get("nombre_archivo", "documento")
     refs = _count_file_refs(fp, bkt, op, exclude_table=table_name, exclude_id=int(row_id))
     execute(f"DELETE FROM {table_name} WHERE id=?", (int(row_id),))
+    # Phase 6: Audit trail for document deletion
+    try:
+        audit_log("ELIMINAR", table_name, f"Documento eliminado: {file_name} (id={row_id})")
+    except Exception:
+        pass
     cleanup_issues = []
     if refs == 0:
         cleanup_issues = cleanup_deleted_file_refs([{"file_path": fp, "bucket": bkt, "object_path": op}])
@@ -2206,6 +2333,11 @@ def execute(q: str, params=()):
     """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches automáticamente."""
     clear_app_caches()
     params = _normalize_rut_params_for_sql(q, params)
+    # Phase 3: Log DML operations (INSERT/UPDATE/DELETE) at DEBUG level
+    _q_stripped = (q or '').strip().upper()[:10]
+    if _q_stripped.startswith(('INSERT', 'UPDATE', 'DELETE')):
+        _tbl = _sql_table_name(q, 'insert' if _q_stripped.startswith('INSERT') else 'update')
+        _log.debug("DML: %s on %s", _q_stripped.split()[0], _tbl or '?')
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
         with conn() as c:
@@ -5198,6 +5330,132 @@ def current_user_mandante_scope_ids() -> list[int] | None:
 def _sql_in_placeholders(values: list[int]) -> str:
     return ','.join(['?'] * len(values))
 
+# ---------------------------------------------------------------------------
+# Phase 1: Brute-force login protection
+# ---------------------------------------------------------------------------
+_BRUTE_FORCE_MAX_ATTEMPTS = 5
+_BRUTE_FORCE_LOCKOUT_BASE_SECONDS = 60  # 1 min base, exponential
+
+
+def _ensure_login_attempts_table():
+    """Create login_attempts table if not exists (session-cached)."""
+    _key = "_login_attempts_table_ok"
+    if st.session_state.get(_key):
+        return
+    try:
+        if DB_BACKEND == "postgres":
+            execute("""
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    attempt_at TIMESTAMP NOT NULL DEFAULT now(),
+                    success BOOLEAN NOT NULL DEFAULT FALSE
+                );
+            """)
+        else:
+            execute("""
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    success INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+        st.session_state[_key] = True
+    except Exception as _exc:
+        _record_soft_error("login_attempts.create_table", _exc)
+
+
+def _record_failed_login_attempt(username: str):
+    """Record a failed login attempt."""
+    try:
+        _ensure_login_attempts_table()
+        execute(
+            "INSERT INTO login_attempts(username, success) VALUES(?, ?)",
+            (str(username).strip(), 0),
+        )
+    except Exception as _exc:
+        _record_soft_error("login_attempts.record", _exc)
+
+
+def _clear_failed_login_attempts(username: str):
+    """Clear failed attempts after successful login."""
+    try:
+        _ensure_login_attempts_table()
+        execute(
+            "DELETE FROM login_attempts WHERE username=? AND success=0",
+            (str(username).strip(),),
+        )
+    except Exception as _exc:
+        _record_soft_error("login_attempts.clear", _exc)
+
+
+def _check_brute_force_lock(username: str) -> tuple[bool, int]:
+    """Check if user is locked out due to too many failed attempts.
+
+    Returns (is_blocked, wait_seconds).
+    Uses exponential backoff: after 5 fails, lock 60s; after 6, 120s; etc.
+    """
+    try:
+        _ensure_login_attempts_table()
+        uname = str(username).strip()
+
+        if DB_BACKEND == "postgres":
+            window_sql = "attempt_at >= (now() - INTERVAL '30 minutes')"
+        else:
+            window_sql = "attempt_at >= datetime('now', '-30 minutes')"
+
+        count = int(fetch_value(
+            f"SELECT COUNT(*) FROM login_attempts WHERE username=? AND success=0 AND {window_sql}",
+            (uname,), default=0, fresh=True,
+        ) or 0)
+
+        if count < _BRUTE_FORCE_MAX_ATTEMPTS:
+            return False, 0
+
+        # Get time of last attempt
+        if DB_BACKEND == "postgres":
+            last_at_str = fetch_value(
+                f"SELECT MAX(attempt_at) FROM login_attempts WHERE username=? AND success=0 AND {window_sql}",
+                (uname,), fresh=True,
+            )
+        else:
+            last_at_str = fetch_value(
+                f"SELECT MAX(attempt_at) FROM login_attempts WHERE username=? AND success=0 AND {window_sql}",
+                (uname,), fresh=True,
+            )
+
+        if not last_at_str:
+            return False, 0
+
+        from datetime import timezone
+        try:
+            if isinstance(last_at_str, str):
+                last_at = datetime.fromisoformat(last_at_str.replace('Z', '+00:00'))
+            else:
+                last_at = last_at_str
+            if last_at.tzinfo is None:
+                last_at = last_at.replace(tzinfo=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+        except Exception:
+            return False, 0
+
+        extra_attempts = count - _BRUTE_FORCE_MAX_ATTEMPTS
+        lockout_seconds = _BRUTE_FORCE_LOCKOUT_BASE_SECONDS * (2 ** min(extra_attempts, 4))  # max ~16 min
+        elapsed = (now_utc - last_at).total_seconds()
+
+        if elapsed < lockout_seconds:
+            return True, int(lockout_seconds - elapsed)
+        return False, 0
+
+    except Exception as _exc:
+        _record_soft_error("brute_force.check", _exc)
+        return False, 0
+
+# ---------------------------------------------------------------------------
+# End brute-force protection
+# ---------------------------------------------------------------------------
+
 def auth_set_session(user_row: dict):
     st.session_state["auth_user"] = {
         "id": int(user_row["id"]),
@@ -5791,15 +6049,33 @@ def auth_gate_ui():
     ensure_superadmin_exists()
     if users_count() == 0:
         try:
-            _u = os.environ.get("DEFAULT_ADMIN_USER", "a.garcia")
-            _p = os.environ.get("DEFAULT_ADMIN_PASS", "225188")
+            _u = os.environ.get("DEFAULT_ADMIN_USER", "admin")
+            _p = os.environ.get("DEFAULT_ADMIN_PASS", "")
+            _generated_pass = False
+            if not _p:
+                _p = secrets.token_urlsafe(12)
+                _generated_pass = True
             sb64, hb64 = hash_password(_p)
             execute(
-                "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active) VALUES(?,?,?,?,?,1)",
-                (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS)),
+                "INSERT INTO users(username,salt_b64,pass_hash_b64,role,perms_json,is_active,password_must_change) VALUES(?,?,?,?,?,1,?)",
+                (_u, sb64, hb64, "SUPERADMIN", json.dumps(SUPERADMIN_PERMS), 1 if _generated_pass else 0),
             )
+            if _generated_pass:
+                st.session_state["_first_run_password"] = _p
+                st.session_state["_first_run_user"] = _u
+                log_security("first_run_password_generated", user=_u)
         except Exception as _exc:
             _record_soft_error("execute.insert", _exc)
+
+    # Mostrar contraseña generada solo una vez
+    if st.session_state.get("_first_run_password"):
+        st.warning(
+            f"⚠️ **Primera ejecución:** se creó el usuario `{st.session_state.get('_first_run_user', 'admin')}` "
+            f"con contraseña temporal: **`{st.session_state['_first_run_password']}`**\n\n"
+            f"Cópiala ahora — no se mostrará de nuevo. Se te pedirá cambiarla al iniciar sesión."
+        )
+        st.session_state.pop("_first_run_password", None)
+        st.session_state.pop("_first_run_user", None)
 
     err_msg = st.session_state.get("_lg_err", "")
 
@@ -6032,8 +6308,16 @@ html,body{
                 st.session_state["_lg_err"] = "Usuario y contraseña son obligatorios."
                 st.rerun()
             else:
+                # --- Phase 1: Brute-force protection ---
+                _bf_blocked, _bf_wait = _check_brute_force_lock(u)
+                if _bf_blocked:
+                    st.session_state["_lg_err"] = f"Demasiados intentos fallidos. Espera {_bf_wait} segundos antes de reintentar."
+                    log_security("brute_force_blocked", user=u, wait_seconds=_bf_wait)
+                    st.rerun()
+                # --- End brute-force check ---
                 row = fetch_active_user_by_rut(u, fresh=True)
                 if not row:
+                    _record_failed_login_attempt(u)
                     row_any = fetch_active_user_by_rut(u, active_only=False, fresh=True)
                     if row_any:
                         status = str(row_any.get('approval_status') or 'APROBADO').upper()
@@ -6056,9 +6340,12 @@ html,body{
                         st.session_state["_lg_err"] = "Tu solicitud de usuario fue rechazada."
                         st.rerun()
                     if not verify_password(passw, row["salt_b64"], row["pass_hash_b64"]):
+                        _record_failed_login_attempt(u)
+                        log_security("login_failed", user=u, detail="wrong_password")
                         st.session_state["_lg_err"] = "Contraseña incorrecta."
                         st.rerun()
                     else:
+                        _clear_failed_login_attempts(u)
                         st.session_state.pop("_lg_err", None)
                         row = canonicalize_user_rut_if_needed(row)
                         try:
@@ -6084,6 +6371,7 @@ html,body{
                             _record_soft_error('login.resolve_tenant', _exc)
                         try:
                             audit_log("LOGIN", "users", f"Login exitoso: {u}")
+                            log_action("LOGIN", entity="users", user=u)
                         except Exception as _exc:
                             _record_soft_error("audit", _exc)
                         st.rerun()
@@ -6196,6 +6484,7 @@ PAGES = [
     "Documentos Trabajador",
     "Export (ZIP)",
     "Aprobaciones / Auditoría legal",
+    "Auditoría de acciones",
     "Backup / Restore",
     "Arquitectura / Escalabilidad",
     "Mi Perfil",
@@ -6297,6 +6586,26 @@ with st.sidebar:
     except Exception as _exc:
         _record_soft_error("select", _exc)
 
+    # --- Phase 9: Notifications badge ---
+    try:
+        ensure_notifications_table(execute, DB_BACKEND)
+        _notif_uid = int((current_user() or {}).get("id") or 0)
+        _notif_count = get_unread_count(fetch_value, _notif_uid, is_superadmin())
+        if _notif_count > 0:
+            render_notification_badge(st, _notif_count)
+        with st.expander(f"🔔 Notificaciones ({_notif_count})", expanded=False):
+            render_notification_panel(st, fetch_df_uncached, execute, _notif_uid, is_superadmin(), go_fn=go)
+    except Exception as _exc_notif:
+        _record_soft_error("sidebar.notifications", _exc_notif)
+
+    # --- Phase 7: Global search ---
+    try:
+        _search_tenant = current_tenant_key() if 'current_tenant_key' in dir() else ""
+        _search_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in dir() else None
+        render_search_sidebar(st, fetch_df_uncached, _search_tenant, allowed_mandante_ids=_search_mands, go_fn=go)
+    except Exception as _exc_search:
+        _record_soft_error("sidebar.search", _exc_search)
+
     st.markdown('<div class="segav-sidebar-center" style="font-weight:700; margin:0.35rem 0 0.1rem 0;">Secciones</div>', unsafe_allow_html=True)
 
     PAGE_LABELS = {
@@ -6317,6 +6626,7 @@ with st.sidebar:
         "Mi Perfil": "👤 Mi perfil",
         "SuperAdmin / Empresas": "🌐 SuperAdmin / Empresas",
         "Admin Usuarios": "🔐 Usuarios",
+        "Auditoría de acciones": "📋 Auditoría",
     }
 
     def _sidebar_nav_button(page_name: str, key_suffix: str):
@@ -6337,8 +6647,8 @@ with st.sidebar:
         for _page in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Export (ZIP)", "Backup / Restore"]:
             _sidebar_nav_button(_page, f"docs_{_page}")
 
-    with st.expander("📈 Gestión y control", expanded=st.session_state.get("nav_page") in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Arquitectura / Escalabilidad", "Mi Perfil"]):
-        for _page in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Arquitectura / Escalabilidad", "Mi Perfil"]:
+    with st.expander("📈 Gestión y control", expanded=st.session_state.get("nav_page") in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]):
+        for _page in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]:
             _sidebar_nav_button(_page, f"ctrl_{_page}")
 
     if is_superadmin() or has_perm("manage_users"):
@@ -6372,30 +6682,9 @@ except Exception as exc:
 # ----------------------------
 # Pages
 # ----------------------------
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_dashboard`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_dashboard`.
-# Se conserva la última definición activa basada en módulos segav_core.
 
 
 
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_compliance_alerts`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_mandantes`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_contratos_faena`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_faenas`.
-# Se conserva la última definición activa basada en módulos segav_core.
 
 
 def _page_trabajadores_impl():
@@ -6651,6 +6940,11 @@ def _page_trabajadores_impl():
                     execute("DELETE FROM trabajador_documentos WHERE trabajador_id=?", (int(tid),))
                     execute("DELETE FROM trabajadores WHERE id=?", (int(tid),))
                     cleanup_issues = cleanup_deleted_file_refs(refs)
+                    # Phase 6: Audit trail
+                    try:
+                        audit_log("ELIMINAR", "trabajadores", f"Trabajador eliminado id={tid}")
+                    except Exception:
+                        pass
                     if cleanup_issues:
                         st.error("Trabajador eliminado, pero hubo problemas al limpiar archivos asociados: " + " | ".join(cleanup_issues))
                     else:
@@ -6733,6 +7027,7 @@ def _page_asignar_trabajadores_impl():
         faena_id = st.selectbox(
             "Faena",
             faenas["id"].tolist(),
+            key="asignar_trabajadores_faena_select_legacy",
             format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']}",
         )
     with col2:
@@ -6761,10 +7056,10 @@ def _page_asignar_trabajadores_impl():
         if disponibles.empty:
             st.success("Todos los trabajadores ya están asignados.")
         else:
-            with st.form("form_asignar"):
-                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
-                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
-                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
+            with st.form("form_asignar_trabajadores_existentes_legacy"):
+                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab, key="asignar_trabajadores_existentes_multi_legacy")
+                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today(), key="asignar_trabajadores_fecha_ingreso_legacy")
+                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)", key="asignar_trabajadores_cargo_faena_legacy")
                 ok = st.form_submit_button("Asignar seleccionados", type="primary")
 
             if ok:
@@ -6880,7 +7175,7 @@ def _page_asignar_trabajadores_impl():
                     fecha_ingreso = st.date_input("Fecha ingreso para esta faena", value=date.today(), key="fi_trab_por_faena")
                     cargo_faena_all = st.text_input("Cargo en faena (opcional, aplica a todos)", key="cargo_faena_all")
 
-                    if st.button("Importar y asignar a esta faena", type="primary"):
+                    if st.button("Importar y asignar a esta faena", type="primary", key="btn_importar_asignar_faena_legacy"):
                         existing = fetch_df("SELECT rut, id FROM trabajadores")
                         rut_to_id = {str(r["rut"]): int(r["id"]) for _, r in existing.iterrows()} if not existing.empty else {}
 
@@ -7070,7 +7365,7 @@ def _page_documentos_empresa_impl():
 
         colx1, colx2 = st.columns([1, 2])
         with colx1:
-            tipo = st.selectbox("Tipo", get_empresa_required_doc_types() + ["OTRO"], format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
+            tipo = st.selectbox("Tipo", get_empresa_required_doc_types() + ["OTRO"], key="doc_empresa_tipo_base", format_func=lambda x: "OTRO" if x == "OTRO" else doc_tipo_label(x))
         with colx2:
             tipo_otro = st.text_input("Si eliges OTRO, escribe el nombre", placeholder="Ej: Política SST, Organigrama, Procedimiento crítico...")
 
@@ -7635,6 +7930,7 @@ def _page_export_zip_impl():
         "Faena",
         opts,
         index=idx,
+        key="export_faena_select",
         format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']} ({faenas[faenas['id']==x].iloc[0]['estado']})",
     )
     st.session_state["selected_faena_id"] = int(faena_id)
@@ -7962,39 +8258,13 @@ def _page_export_zip_impl():
                 st.warning(f"No se pudo abrir el ZIP mensual guardado: {e}")
 
 # Consolidación definitiva: se mantiene una sola implementación real por pantalla
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_sgsst`.
-# Se conserva la última definición activa basada en módulos segav_core.
 
 
 
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_trabajadores`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_asignar_trabajadores`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_documentos_empresa`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_documentos_empresa_faena`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_documentos_trabajador`.
-# Se conserva la última definición activa basada en módulos segav_core.
 
 
 def _get_bytes(file_path, bucket, object_path):
     return _get_bytes_impl(file_path, bucket, object_path)
-
-# Legado saneado: definición antigua eliminada para evitar duplicidad de `page_export_zip`.
-# Se conserva la última definición activa basada en módulos segav_core.
-
-
 def page_aprobaciones_legal():
     ui_header("Aprobaciones / Auditoría legal", "Solicita y revisa aprobación de documentos críticos por empresa, con trazabilidad.")
     require_perm("view_legal_audit")
@@ -8172,6 +8442,7 @@ def page_backup_restore():
             sel = st.selectbox(
                 "Elegir auto-backup para descargar",
                 view["id"].tolist(),
+                key="backup_restore_autobackup_select",
                 format_func=lambda x: f"{int(x)} - {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['tag']})",
             )
             row = view[view["id"] == sel].iloc[0]
@@ -8781,6 +9052,19 @@ def page_admin_usuarios():
                     audit_log("CREAR_USUARIO", "users", f"Usuario creado: {u} rol={role} empresa={assign_company_key or '(sin asignar)'} fijo={'SI' if user_fixed_company_key else 'NO'}")
                 except Exception as _exc:
                     _record_soft_error("backup.audit", _exc)
+                # Phase 9: Notification for superadmin when user pending approval
+                if scoped_mode:
+                    try:
+                        send_notification(
+                            execute,
+                            cliente_key=assign_company_key or "",
+                            category=CAT_USER_PENDING,
+                            title=f"Nuevo usuario pendiente: {u}",
+                            body=f"Rol: {role}, Empresa: {assign_company_key or 'sin asignar'}",
+                            link_page="Admin Usuarios",
+                        )
+                    except Exception:
+                        pass
                 if scoped_mode:
                     st.success("Solicitud de usuario enviada al superadmin. La cuenta queda pendiente hasta aprobación.")
                 elif user_fixed_company_key:
@@ -9013,10 +9297,12 @@ def _ensure_page_runtime_health(page_name: str):
 
 def _render_page_safely(page_name: str, page_callable):
     _ensure_page_runtime_health(page_name)
+    _log.info("Renderizando página: %s", page_name)
     try:
         return page_callable()
     except Exception as exc:
         _record_soft_error(f"page.{page_name}", exc)
+        log_error(f"page.{page_name}", exc)
         # Admin Usuarios tiene muchos widgets y formularios. Re-renderizar esta
         # página en el mismo ciclo, después de un render parcial, puede duplicar
         # claves de Streamlit. Aquí se muestra el error exacto y se evita el
@@ -9036,11 +9322,130 @@ def _render_page_safely(page_name: str, page_callable):
             return page_callable()
         except Exception as exc2:
             _record_soft_error(f"page.{page_name}.retry", exc2)
+            log_error(f"page.{page_name}.retry", exc2)
             st.error(f"Ocurrió un problema al abrir la sección '{page_name}'.")
             with st.expander('Detalle técnico', expanded=False):
                 st.code(str(exc2))
             st.info('La app aplicó autocorrección de caché/esquema. Si este apartado sigue fallando, vuelve a cargar la página.')
             return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: AppContext builder (infraestructura para futuras extracciones)
+# ---------------------------------------------------------------------------
+def _build_app_context() -> AppContext:
+    """Construye el AppContext centralizado con todas las dependencias.
+
+    Los módulos nuevos pueden recibir ctx en vez de 20+ kwargs.
+    Los módulos existentes siguen funcionando con kwargs (backward compat).
+    """
+    return AppContext(
+        db_backend=DB_BACKEND,
+        pg_dsn_fingerprint=PG_DSN_FINGERPRINT,
+        conn=conn,
+        execute=execute,
+        execute_rowcount=execute_rowcount,
+        executemany=executemany,
+        fetch_df=fetch_df,
+        fetch_df_uncached=fetch_df_uncached,
+        fetch_value=fetch_value,
+        fetch_row=fetch_row,
+        clear_app_caches=clear_app_caches,
+        auto_backup_db=auto_backup_db,
+        tenant_fetch_df=tenant_fetch_df,
+        tenant_fetch_df_uncached=tenant_fetch_df_uncached,
+        tenant_fetch_value=tenant_fetch_value,
+        tenant_execute=tenant_execute,
+        tenant_execute_rowcount=tenant_execute_rowcount,
+        tenant_executemany=tenant_executemany,
+        current_user=current_user,
+        current_tenant_key=current_tenant_key,
+        current_segav_client_key=current_segav_client_key,
+        is_superadmin=is_superadmin,
+        has_perm=has_perm,
+        is_company_admin_for_active_tenant=is_company_admin_for_active_tenant,
+        current_user_mandante_scope_ids=current_user_mandante_scope_ids,
+        ui_header=ui_header,
+        ui_tip=ui_tip,
+        go=go,
+        load_file_anywhere=load_file_anywhere,
+        save_file_online=save_file_online,
+        prepare_upload_payload=prepare_upload_payload,
+        render_upload_help=render_upload_help,
+        sha256_bytes=sha256_bytes,
+        delete_uploaded_document_record=delete_uploaded_document_record,
+        clean_rut=clean_rut,
+        format_rut_chileno=format_rut_chileno,
+        safe_name=safe_name,
+        parse_date_maybe=parse_date_maybe,
+        human_file_size=human_file_size,
+        doc_tipo_label=doc_tipo_label,
+        doc_tipo_join=doc_tipo_join,
+        worker_required_docs=worker_required_docs,
+        worker_required_docs_for_record=worker_required_docs_for_record,
+        get_empresa_required_doc_types=get_empresa_required_doc_types,
+        get_empresa_monthly_doc_types=get_empresa_monthly_doc_types,
+        render_legal_doc_inline=render_legal_doc_inline,
+        pendientes_obligatorios=pendientes_obligatorios,
+        segav_clientes_df=segav_clientes_df,
+        visible_clientes_df=visible_clientes_df,
+        segav_cargo_labels=segav_cargo_labels,
+        audit_log=audit_log,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Audit Trail viewer page
+# ---------------------------------------------------------------------------
+def page_audit_trail():
+    """Página de visualización del log de auditoría (Phase 6)."""
+    ui_header("Auditoría de acciones", "Historial de acciones realizadas en el sistema.")
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        _aud_user = st.text_input("Filtrar por usuario", key="aud_filter_user", placeholder="RUT o nombre…")
+    with col_f2:
+        _aud_action = st.selectbox("Filtrar por acción", ["Todas", "LOGIN", "CREAR", "EDITAR", "ELIMINAR", "APROBAR", "RECHAZAR", "EXPORTAR", "CARGAR_DOC"], key="aud_filter_action")
+    with col_f3:
+        _aud_days = st.number_input("Últimos N días", min_value=1, max_value=365, value=30, key="aud_filter_days")
+
+    where_parts = ["1=1"]
+    params_aud: list = []
+    ck = current_tenant_key()
+    if ck and not is_superadmin():
+        where_parts.append("COALESCE(cliente_key,'')=?")
+        params_aud.append(ck)
+    if _aud_user:
+        where_parts.append("LOWER(username) LIKE LOWER(?)")
+        params_aud.append(f"%{_aud_user}%")
+    if _aud_action and _aud_action != "Todas":
+        where_parts.append("UPPER(accion)=?")
+        params_aud.append(_aud_action.upper())
+
+    if DB_BACKEND == "postgres":
+        where_parts.append(f"created_at >= (now() - INTERVAL '{int(_aud_days)} days')")
+    else:
+        where_parts.append(f"created_at >= datetime('now', '-{int(_aud_days)} days')")
+
+    where_sql = " AND ".join(where_parts)
+    sql = f"SELECT id, created_at, username, role_global, accion, entidad, detalle FROM segav_audit_log WHERE {where_sql} ORDER BY id DESC LIMIT 500"
+
+    try:
+        df = fetch_df_uncached(sql, tuple(params_aud))
+        if df is not None and not df.empty:
+            st.dataframe(
+                df.rename(columns={
+                    "created_at": "Fecha", "username": "Usuario", "role_global": "Rol",
+                    "accion": "Acción", "entidad": "Entidad", "detalle": "Detalle",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(f"Mostrando {len(df)} registros (máx. 500)")
+        else:
+            st.info("No hay registros de auditoría para los filtros seleccionados.")
+    except Exception as _aud_exc:
+        st.warning("No se pudo cargar el log de auditoría.")
+        _record_soft_error("audit_trail.page", _aud_exc)
 
 
 PAGE_PERM_ROUTE = {
@@ -9057,6 +9462,7 @@ PAGE_PERM_ROUTE = {
     "Documentos Trabajador": "view_docs_trabajador",
     "Export (ZIP)": "view_export",
     "Aprobaciones / Auditoría legal": "view_legal_audit",
+    "Auditoría de acciones": "view_legal_audit",
     "Backup / Restore": "view_backup",
     "Arquitectura / Escalabilidad": "manage_users",
     "Admin Usuarios": "manage_users",
@@ -9079,6 +9485,7 @@ _PAGE_RENDERERS = {
     "Documentos Trabajador": page_documentos_trabajador,
     "Export (ZIP)": page_export_zip,
     "Aprobaciones / Auditoría legal": page_aprobaciones_legal,
+    "Auditoría de acciones": page_audit_trail,
     "Backup / Restore": page_backup_restore,
     "Arquitectura / Escalabilidad": page_architecture_scalability,
     "Mi Perfil": page_mi_perfil,

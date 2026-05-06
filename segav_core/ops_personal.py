@@ -513,6 +513,7 @@ def page_asignar_trabajadores(
         faena_id = st.selectbox(
             "Faena",
             faenas["id"].tolist(),
+            key="asignar_trabajadores_faena_select",
             format_func=lambda x: f"{x} - {faenas[faenas['id']==x].iloc[0]['mandante']} / {faenas[faenas['id']==x].iloc[0]['nombre']}",
         )
     with col2:
@@ -541,10 +542,10 @@ def page_asignar_trabajadores(
         if disponibles.empty:
             st.success("Todos los trabajadores ya están asignados.")
         else:
-            with st.form("form_asignar"):
-                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab)
-                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today())
-                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)")
+            with st.form("form_asignar_trabajadores_existentes"):
+                seleccion = st.multiselect("Selecciona trabajadores", disponibles["id"].tolist(), format_func=_fmt_trab, key="asignar_trabajadores_existentes_multi")
+                fecha_ingreso = st.date_input("Fecha ingreso", value=date.today(), key="asignar_trabajadores_fecha_ingreso")
+                cargo_faena = st.text_input("Cargo en faena (opcional, aplica a todos)", key="asignar_trabajadores_cargo_faena")
                 ok = st.form_submit_button("Asignar seleccionados", type="primary")
 
             if ok:
@@ -612,7 +613,7 @@ def page_asignar_trabajadores(
                     fecha_ingreso = st.date_input("Fecha ingreso para esta faena", value=date.today(), key="fi_trab_por_faena")
                     cargo_faena_all = st.text_input("Cargo en faena (opcional, aplica a todos)", key="cargo_faena_all")
 
-                    if st.button("Importar y asignar a esta faena", type="primary"):
+                    if st.button("Importar y asignar a esta faena", type="primary", key="btn_importar_asignar_faena"):
                         existing = fetch_df("SELECT rut, id FROM trabajadores")
                         rut_to_id = {str(r["rut"]): int(r["id"]) for _, r in existing.iterrows()} if not existing.empty else {}
 

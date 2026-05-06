@@ -206,6 +206,78 @@ def _portfolio_rows(*, fetch_df: Callable, fetch_value: Callable, clientes_df: p
     return pd.DataFrame(rows).sort_values(["Score", "Faenas críticas", "Faenas pendientes"], ascending=[False, True, True]).reset_index(drop=True) if rows else pd.DataFrame()
 
 
+def _build_temporal_trends(fetch_df, fetch_value, client_key: str, months: int = 6, db_backend: str = "sqlite") -> list[dict]:
+    """Build temporal trend data for the last N months (Phase 10).
+
+    Returns a list of dicts with keys: mes, docs_count, trabajadores, faenas_activas, acciones_audit.
+    """
+    from datetime import date
+    result = []
+    today = date.today()
+
+    for i in range(months - 1, -1, -1):
+        # Calculate first and last day of month
+        m = today.month - i
+        y = today.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        mes_label = f"{y}-{m:02d}"
+        next_m = m + 1
+        next_y = y
+        if next_m > 12:
+            next_m = 1
+            next_y += 1
+        start_date = f"{y}-{m:02d}-01"
+        end_date = f"{next_y}-{next_m:02d}-01"
+
+        row = {"mes": mes_label, "docs_count": 0, "trabajadores": 0, "faenas_activas": 0, "acciones_audit": 0}
+
+        try:
+            # Documents uploaded in this month
+            row["docs_count"] = int(_safe_value(
+                fetch_value,
+                "SELECT COUNT(*) FROM trabajador_documentos WHERE COALESCE(cliente_key,'')=? AND created_at >= ? AND created_at < ?",
+                (client_key, start_date, end_date), default=0,
+            ) or 0)
+        except Exception:
+            pass
+
+        try:
+            # Workers created up to this month (cumulative)
+            row["trabajadores"] = int(_safe_value(
+                fetch_value,
+                "SELECT COUNT(*) FROM trabajadores WHERE COALESCE(cliente_key,'')=? AND created_at < ?",
+                (client_key, end_date), default=0,
+            ) or 0)
+        except Exception:
+            pass
+
+        try:
+            # Active faenas at end of this month
+            row["faenas_activas"] = int(_safe_value(
+                fetch_value,
+                "SELECT COUNT(*) FROM faenas WHERE COALESCE(cliente_key,'')=? AND estado='ACTIVA' AND created_at < ?",
+                (client_key, end_date), default=0,
+            ) or 0)
+        except Exception:
+            pass
+
+        try:
+            # Audit actions in this month
+            row["acciones_audit"] = int(_safe_value(
+                fetch_value,
+                "SELECT COUNT(*) FROM segav_audit_log WHERE COALESCE(cliente_key,'')=? AND created_at >= ? AND created_at < ?",
+                (client_key, start_date, end_date), default=0,
+            ) or 0)
+        except Exception:
+            pass
+
+        result.append(row)
+
+    return result
+
+
 def page_dashboard(
     *,
     st,
@@ -297,7 +369,7 @@ def page_dashboard(
         {"label": "Docs críticos vencidos", "value": legal_vencidos, "subtitle": "Bloquean operaciones sensibles", "icon": "⚖️", "tone": tone_for_count(legal_vencidos, danger_at=1), "status": "Legal" if legal_vencidos else "OK"},
     ], columns=4)
 
-    tabs = st.tabs(["🏢 Resumen ejecutivo", "🚦 Operación y cumplimiento", "💼 Comercial / multiempresa", "⚡ Acciones"])
+    tabs = st.tabs(["🏢 Resumen ejecutivo", "🚦 Operación y cumplimiento", "💼 Comercial / multiempresa", "📊 Tendencias", "⚡ Acciones"])
 
     with tabs[0]:
         left, right = st.columns([1.2, 1])
@@ -420,6 +492,35 @@ def page_dashboard(
             st.info("La vista comparativa multiempresa aparece cuando el usuario tiene perfil administrativo y existen varias empresas activas.")
 
     with tabs[3]:
+        st.markdown("### Tendencias temporales")
+        st.caption("Evolución de documentos, trabajadores y faenas en los últimos 6 meses.")
+        try:
+            _trend_months = 6
+            _trend_data = _build_temporal_trends(fetch_df, fetch_value, current_key, _trend_months, DB_BACKEND)
+            if _trend_data and len(_trend_data) > 1:
+                _trend_df = pd.DataFrame(_trend_data)
+                # Docs uploaded per month
+                if "docs_count" in _trend_df.columns:
+                    st.markdown("#### 📎 Documentos cargados por mes")
+                    st.bar_chart(_trend_df.set_index("mes")[["docs_count"]], use_container_width=True)
+                # Workers count
+                if "trabajadores" in _trend_df.columns:
+                    st.markdown("#### 👷 Trabajadores activos por mes")
+                    st.line_chart(_trend_df.set_index("mes")[["trabajadores"]], use_container_width=True)
+                # Faenas activas
+                if "faenas_activas" in _trend_df.columns:
+                    st.markdown("#### 🛠️ Faenas activas por mes")
+                    st.area_chart(_trend_df.set_index("mes")[["faenas_activas"]], use_container_width=True)
+                # Audit actions
+                if "acciones_audit" in _trend_df.columns:
+                    st.markdown("#### 📋 Acciones registradas por mes")
+                    st.bar_chart(_trend_df.set_index("mes")[["acciones_audit"]], use_container_width=True)
+            else:
+                st.info("No hay datos temporales suficientes aún. Los gráficos aparecerán cuando haya actividad registrada en la base de datos.")
+        except Exception as _trend_exc:
+            st.info("Tendencias temporales no disponibles todavía.")
+
+    with tabs[4]:
         st.markdown("### Acciones sugeridas")
         a1, a2, a3 = st.columns(3)
         with a1:
