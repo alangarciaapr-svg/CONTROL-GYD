@@ -497,8 +497,10 @@ def page_asignar_trabajadores(
     executemany,
     go,
     trabajador_insert_or_update,
+    current_tenant_key=None,
 ):
     ui_header("Asignar Trabajadores", "Carga e incorpora trabajadores por faena. Si un trabajador se repite en otra faena, mantiene su documentación ya cargada.")
+    _ck = str(current_tenant_key() if callable(current_tenant_key) else (current_tenant_key or "")).strip()
     faenas = fetch_df('''
         SELECT f.id, m.nombre AS mandante, f.nombre
         FROM faenas f JOIN mandantes m ON m.id=f.mandante_id
@@ -559,7 +561,7 @@ def page_asignar_trabajadores(
                         cur = cursor_execute(
                             c,
                             ASSIGNACION_INSERT_SQL,
-                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                            (_ck, int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
                         )
                         try:
                             rc = int(cur.rowcount or 0)
@@ -689,7 +691,7 @@ def page_asignar_trabajadores(
                                     cur_asg = cursor_execute(
                                         c,
                                         ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                        (_ck, int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
                                     try:
                                         assigned += int(cur_asg.rowcount or 0)

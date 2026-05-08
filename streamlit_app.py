@@ -7098,7 +7098,7 @@ def _page_asignar_trabajadores_impl():
                         cur = cursor_execute(
                             c,
                             ASSIGNACION_INSERT_SQL,
-                            (int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                            (str(current_segav_client_key() or ''), int(faena_id), int(tid), cargo_faena.strip(), str(fecha_ingreso), None, "ACTIVA"),
                         )
                         try:
                             rc = int(cur.rowcount or 0)
@@ -7276,7 +7276,7 @@ def _page_asignar_trabajadores_impl():
                                     cur_asg = cursor_execute(
                                         c,
                                         ASSIGNACION_INSERT_SQL,
-                                        (int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
+                                        (str(current_segav_client_key() or ''), int(faena_id), int(tid), cargo_faena_all.strip(), str(fecha_ingreso), None, "ACTIVA"),
                                     )
                                     try:
                                         assigned += int(cur_asg.rowcount or 0)
@@ -9235,7 +9235,7 @@ def page_trabajadores():
 
 
 def page_asignar_trabajadores():
-    return _ops_personal.page_asignar_trabajadores(fetch_df=tenant_fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=tenant_executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update)
+    return _ops_personal.page_asignar_trabajadores(fetch_df=tenant_fetch_df, conn=conn, cursor_execute=cursor_execute, ASSIGNACION_INSERT_SQL=ASSIGNACION_INSERT_SQL, clear_app_caches=clear_app_caches, auto_backup_db=auto_backup_db, build_trabajadores_template_xlsx=build_trabajadores_template_xlsx, clean_rut=clean_rut, split_nombre_completo=split_nombre_completo, norm_col=norm_col, executemany=tenant_executemany, go=go, trabajador_insert_or_update=_trabajador_insert_or_update, current_tenant_key=current_tenant_key)
 
 
 def page_documentos_empresa():
