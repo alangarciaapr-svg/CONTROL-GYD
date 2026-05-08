@@ -2329,11 +2329,18 @@ def cursor_execute(cur, q: str, params=()):
     return cur.execute(q, params)
 
 
+def _is_dml_query(q: str) -> bool:
+    """Return True if the query is DML (INSERT/UPDATE/DELETE) that modifies user data.
+    DDL (CREATE/ALTER/DROP) should NOT invalidate read caches."""
+    txt = (q or '').strip().upper()[:12]
+    return txt.startswith(('INSERT', 'UPDATE', 'DELETE'))
+
+
 def execute(q: str, params=()):
-    """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches automáticamente."""
-    clear_app_caches()
+    """Ejecuta una sentencia DML/DDL y hace commit. Limpia caches solo para DML."""
+    if _is_dml_query(q):
+        clear_app_caches()
     params = _normalize_rut_params_for_sql(q, params)
-    # Phase 3: Log DML operations (INSERT/UPDATE/DELETE) at DEBUG level
     _q_stripped = (q or '').strip().upper()[:10]
     if _q_stripped.startswith(('INSERT', 'UPDATE', 'DELETE')):
         _tbl = _sql_table_name(q, 'insert' if _q_stripped.startswith('INSERT') else 'update')
@@ -2351,7 +2358,8 @@ def execute(q: str, params=()):
 
 def execute_rowcount(q: str, params=()):
     """Ejecuta DML y devuelve el número de filas afectadas."""
-    clear_app_caches()
+    if _is_dml_query(q):
+        clear_app_caches()
     params = _normalize_rut_params_for_sql(q, params)
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
@@ -2373,7 +2381,8 @@ def execute_rowcount(q: str, params=()):
 
 def executemany(q: str, seq_params):
     """Ejecuta DML en lote."""
-    clear_app_caches()
+    if _is_dml_query(q):
+        clear_app_caches()
     seq_params = [_normalize_rut_params_for_sql(q, p) for p in (seq_params or [])]
     if DB_BACKEND == "postgres":
         q2 = _qmark_to_pct(q).replace("datetime('now')", "now()")
@@ -4614,6 +4623,9 @@ def perms_from_row(role: str, perms_json: str | None):
     return perms
 
 def ensure_users_table():
+    _guard_key = "_ensure_users_table_ok"
+    if st.session_state.get(_guard_key):
+        return
     if DB_BACKEND == "postgres":
         execute(
             """
@@ -4639,6 +4651,7 @@ def ensure_users_table():
                 reviewed_by_username TEXT,
                 reviewed_at TIMESTAMPTZ,
                 rejection_reason TEXT,
+                password_must_change INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
@@ -4659,6 +4672,7 @@ def ensure_users_table():
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_by_username TEXT")
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
             execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS rejection_reason TEXT")
+            execute("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS password_must_change INTEGER DEFAULT 0")
         except Exception as _exc:
             _record_soft_error("users.fixed_cliente_key.pg", _exc)
         execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -4688,6 +4702,7 @@ def ensure_users_table():
             reviewed_by_username TEXT,
             reviewed_at TEXT,
             rejection_reason TEXT,
+            password_must_change INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -4699,11 +4714,13 @@ def ensure_users_table():
                 'fixed_cliente_key': 'TEXT', 'full_name': 'TEXT', 'email': 'TEXT', 'phone': 'TEXT', 'cargo': 'TEXT',
                 'approval_status': "TEXT DEFAULT 'APROBADO'", 'requested_by': 'INTEGER', 'requested_by_username': 'TEXT',
                 'requested_cliente_key': 'TEXT', 'approval_requested_at': 'TEXT', 'reviewed_by': 'INTEGER',
-                'reviewed_by_username': 'TEXT', 'reviewed_at': 'TEXT', 'rejection_reason': 'TEXT'
+                'reviewed_by_username': 'TEXT', 'reviewed_at': 'TEXT', 'rejection_reason': 'TEXT',
+                'password_must_change': 'INTEGER DEFAULT 0'
             })
     except Exception as _exc:
         _record_soft_error("users.fixed_cliente_key.sqlite", _exc)
     execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+    st.session_state[_guard_key] = True
 
 def ensure_storage_columns_postgres():
     if DB_BACKEND != "postgres":
@@ -4939,6 +4956,9 @@ def _cleanup_user_references_before_delete(user_id: int):
 
 
 def ensure_user_sessions_table():
+    _guard_key = "_ensure_user_sessions_ok"
+    if st.session_state.get(_guard_key):
+        return
     if DB_BACKEND == "postgres":
         execute("""
         CREATE TABLE IF NOT EXISTS user_sessions (
@@ -4984,6 +5004,7 @@ def ensure_user_sessions_table():
         execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_tenant ON user_sessions(cliente_key, is_active, last_seen_at)")
     except Exception as _exc:
         _record_soft_error("user_sessions.indexes", _exc)
+    st.session_state[_guard_key] = True
 
 
 def _current_session_id() -> str:
@@ -5104,6 +5125,9 @@ def _json_int_list(value) -> list[int]:
 
 def ensure_access_governance_tables():
     """Tablas/columnas para aprobación de usuarios, límites de sesiones y mandantes por lector."""
+    _guard_key = "_ensure_access_governance_ok"
+    if st.session_state.get(_guard_key):
+        return
     ensure_user_sessions_table()
     try:
         execute(
@@ -5162,6 +5186,7 @@ def ensure_access_governance_tables():
         execute("UPDATE users SET approval_status='APROBADO' WHERE approval_status IS NULL OR TRIM(approval_status)='' ")
     except Exception as _exc:
         _record_soft_error("access_governance.backfill", _exc)
+    st.session_state[_guard_key] = True
 
 
 def get_company_session_limits(cliente_key: str) -> dict:
@@ -9303,31 +9328,21 @@ def _render_page_safely(page_name: str, page_callable):
     except Exception as exc:
         _record_soft_error(f"page.{page_name}", exc)
         log_error(f"page.{page_name}", exc)
-        # Admin Usuarios tiene muchos widgets y formularios. Re-renderizar esta
-        # página en el mismo ciclo, después de un render parcial, puede duplicar
-        # claves de Streamlit. Aquí se muestra el error exacto y se evita el
-        # segundo render automático.
-        if page_name == "Admin Usuarios":
-            st.error("Ocurrió un problema en Administración de Usuarios.")
-            with st.expander('Detalle técnico', expanded=False):
-                st.code(str(exc))
-            st.info('Se evitó el reintento automático para no duplicar formularios. Recarga la sección si vuelve a ocurrir.')
-            return None
+        # NUNCA reintentar en el mismo ciclo de Streamlit.
+        # Re-renderizar crea widgets duplicados (selectbox, form, etc.)
+        # que causan "multiple elements with the same key".
+        # El esquema se auto-corrige en bootstrap; el usuario solo
+        # necesita recargar la página.
+        st.error(f"Ocurrió un problema al abrir la sección '{page_name}'.")
+        with st.expander('Detalle técnico', expanded=False):
+            st.code(str(exc))
+        st.info('Recarga la página para reintentar. Si el problema persiste, contacta al administrador.')
+        # Limpiar caches para que el próximo ciclo arranque limpio
         try:
             clear_app_caches()
         except Exception:
             pass
-        try:
-            _ensure_page_runtime_health(f"{page_name}.retry")
-            return page_callable()
-        except Exception as exc2:
-            _record_soft_error(f"page.{page_name}.retry", exc2)
-            log_error(f"page.{page_name}.retry", exc2)
-            st.error(f"Ocurrió un problema al abrir la sección '{page_name}'.")
-            with st.expander('Detalle técnico', expanded=False):
-                st.code(str(exc2))
-            st.info('La app aplicó autocorrección de caché/esquema. Si este apartado sigue fallando, vuelve a cargar la página.')
-            return None
+        return None
 
 
 # ---------------------------------------------------------------------------
