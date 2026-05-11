@@ -61,10 +61,10 @@ def page_sgsst(
     ensure_sgsst_seed_data()
     _u = current_user() or {}
     _is_superadmin = str(_u.get("role") or "").upper() == "SUPERADMIN"
-    # Stable key prefix — unique per tenant, stable across reruns
-    _ck_prefix = str(current_segav_client_key() or "x")[:10].replace(" ", "_")
+    _sgsst_render_nonce = int(st.session_state.get("_sgsst_render_nonce", 0)) + 1
+    st.session_state["_sgsst_render_nonce"] = _sgsst_render_nonce
     def K(name: str) -> str:
-        return f"sgsst_{_ck_prefix}_{name}"
+        return f"sgsst_{_sgsst_render_nonce}_{name}"
 
 
     company_df = fetch_df("SELECT * FROM sgsst_empresa ORDER BY id LIMIT 1")
@@ -92,48 +92,23 @@ def page_sgsst(
     d3.metric("Incidentes abiertos", stats["incidentes_abiertos"])
     d4.metric("Capacitaciones/ODI vencidas", stats["cap_vencidas"])
 
-    # ── Compliance score ────────────────────────────────────────────────
-    _total_modules = 8
-    _modules_ok = 0
-    if stats["matriz_pendiente"] == 0 and int(fetch_value("SELECT COUNT(*) FROM sgsst_matriz_legal", default=0) or 0) > 0:
-        _modules_ok += 1
-    if stats["programa_abierto"] == 0 and int(fetch_value("SELECT COUNT(*) FROM sgsst_programa_anual", default=0) or 0) > 0:
-        _modules_ok += 1
-    if stats["miper_criticos"] == 0:
-        _modules_ok += 1
-    if stats["ds594_abierto"] == 0 and int(fetch_value("SELECT COUNT(*) FROM sgsst_inspecciones", default=0) or 0) > 0:
-        _modules_ok += 1
-    if stats["incidentes_abiertos"] == 0:
-        _modules_ok += 1
-    if stats["cap_vencidas"] == 0 and int(fetch_value("SELECT COUNT(*) FROM sgsst_capacitaciones", default=0) or 0) > 0:
-        _modules_ok += 1
-    if company.get("razon_social"):
-        _modules_ok += 1
-    if int(fetch_value("SELECT COUNT(*) FROM sgsst_cphs", default=0) or 0) > 0:
-        _modules_ok += 1
-    _compliance_pct = int((_modules_ok / _total_modules) * 100) if _total_modules > 0 else 0
-    _compliance_color = "🟢" if _compliance_pct >= 75 else ("🟡" if _compliance_pct >= 40 else "🔴")
-    st.markdown(f"#### {_compliance_color} Cumplimiento SGSST: {_modules_ok}/{_total_modules} módulos ({_compliance_pct}%)")
-    st.progress(_compliance_pct / 100)
-    st.caption("Módulos: Ficha Empresa · Matriz Legal · Programa Anual · MIPER · DS 594 · Incidentes · Capacitaciones · CPHS")
-
     tabs = st.tabs([
         "🏢 Resumen",
-        "⚙️ Config ERP",
+        "⚙️ Configuración ERP",
         "🏭 Ficha empresa",
         "🧩 Catálogos",
         "⚖️ Matriz legal",
         "📅 Programa anual",
         "⚠️ MIPER",
-        "🧯 Inspecciones",
-        "📋 Checklist 594",
-        "🩹 Incidentes",
-        "🎓 Capacitaciones",
-        "🦺 EPP",
+        "🧯 Inspecciones DS 594",
+        "📋 Checklist DS 594",
+        "🩹 Accidentes e Incidentes",
+        "🎓 Capacitaciones y ODI",
+        "🦺 EPP por Trabajador",
         "🧾 Auditoría",
         "👷 CPHS",
-        "📝 DIAT/DIEP",
-        "🔬 Vigilancia",
+        "📝 DIAT / DIEP",
+        "🔬 Vigilancia Ocupacional",
         "🏗️ Subcontratistas",
         "📕 RIOHS",
     ])
@@ -440,15 +415,6 @@ def page_sgsst(
                     ensure_sgsst_seed_data()
                     st.success("Base legal verificada/cargada.")
                     st.rerun()
-                st.divider()
-                st.markdown("#### 🗑️ Eliminar requisito")
-                _del_mid = st.selectbox("Requisito a eliminar", matriz_ids, format_func=lambda x: f"#{int(x)} · {df_matriz[df_matriz['id']==x].iloc[0]['tema']}", key=K("sgsst_del_matriz_id"))
-                st.warning("Esta acción es irreversible.")
-                if st.button("Eliminar requisito", key=K("sgsst_del_matriz")):
-                    execute("DELETE FROM sgsst_matriz_legal WHERE id=?", (int(_del_mid),))
-                    sgsst_log("Matriz legal", "Eliminar", f"#{_del_mid}")
-                    st.success("Requisito eliminado.")
-                    st.rerun()
 
     with tabs[5]:
         st.markdown("### Programa anual preventivo")
@@ -543,27 +509,6 @@ def page_sgsst(
                 st.success("Riesgo incorporado a la MIPER.")
                 st.rerun()
 
-        # ── Editar / Eliminar riesgo MIPER ────────────────────────────────
-        if df_miper is not None and not df_miper.empty:
-            with st.expander("✏️ Editar / 🗑️ Eliminar riesgo"):
-                _miper_ids = df_miper["id"].tolist()
-                _sel_mid = st.selectbox("Riesgo", _miper_ids, format_func=lambda x: f"#{int(x)} · {str(df_miper[df_miper['id']==x].iloc[0].get('peligro',''))[:50]}", key=K("miper_edit_id"))
-                _curr_est = str(df_miper[df_miper['id'] == _sel_mid].iloc[0].get('estado', 'PENDIENTE'))
-                _new_est = st.selectbox("Nuevo estado", SGSST_ESTADOS, index=SGSST_ESTADOS.index(_curr_est) if _curr_est in SGSST_ESTADOS else 0, key=K("miper_edit_est"))
-                _me1, _me2 = st.columns(2)
-                with _me1:
-                    if st.button("Actualizar estado", key=K("miper_edit_save")):
-                        execute("UPDATE sgsst_miper SET estado=?, updated_at=? WHERE id=?", (_new_est, datetime.now().isoformat(timespec='seconds'), int(_sel_mid)))
-                        sgsst_log("MIPER", "Editar", f"#{_sel_mid} → {_new_est}")
-                        st.success("Estado actualizado.")
-                        st.rerun()
-                with _me2:
-                    if st.button("🗑️ Eliminar riesgo", key=K("miper_del")):
-                        execute("DELETE FROM sgsst_miper WHERE id=?", (int(_sel_mid),))
-                        sgsst_log("MIPER", "Eliminar", f"#{_sel_mid}")
-                        st.success("Riesgo eliminado.")
-                        st.rerun()
-
     with tabs[7]:
         st.markdown("### Inspecciones DS 594")
         faenas_df = fetch_df("SELECT id, nombre FROM faenas ORDER BY nombre")
@@ -618,57 +563,30 @@ def page_sgsst(
             st.divider()
             results = {}
             obs_dict = {}
-            _total_items = 0
-            _cumple_count = 0
-            for _cat_idx, (cat, items) in enumerate(_checklist_items.items()):
-                with st.expander(f"**{cat}** ({len(items)} ítems)", expanded=True):
-                    for idx_item, item in enumerate(items):
-                        _total_items += 1
-                        # Use purely numeric index-based key — no truncated names
-                        _base_key = f"ck594_cat{_cat_idx}_it{idx_item}"
-                        c1, c2, c3 = st.columns([3, 1, 2])
-                        with c1:
-                            st.caption(item)
-                        with c2:
-                            cumple = st.checkbox("Cumple", value=True, key=K(_base_key))
-                            results[(cat, item)] = cumple
-                            if cumple:
-                                _cumple_count += 1
-                        with c3:
-                            obs = st.text_input("Obs.", key=K(f"{_base_key}_obs"), placeholder="Observación", label_visibility="collapsed")
-                            if obs:
-                                obs_dict[(cat, item)] = obs
-
-            # Show compliance score before save button
-            if _total_items > 0:
-                _pct = int((_cumple_count / _total_items) * 100)
-                _color = "🟢" if _pct >= 80 else ("🟡" if _pct >= 50 else "🔴")
-                st.markdown(f"#### {_color} Cumplimiento: {_cumple_count}/{_total_items} ({_pct}%)")
-                st.progress(_pct / 100)
+            for cat, items in _checklist_items.items():
+                st.markdown(f"**{cat}**")
+                for idx_item, item in enumerate(items):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.caption(item)
+                    with c2:
+                        key_ck = K(f"ck594_{cat[:8]}_{idx_item}")
+                        results[(cat, item)] = st.checkbox("Cumple", value=True, key=key_ck)
 
             if st.button("💾 Guardar checklist completo", type="primary", use_container_width=True, key=K("ck594_save")):
                 now = datetime.now().isoformat(timespec='seconds')
                 saved = 0
                 for (cat, item), cumple in results.items():
                     try:
-                        obs_text = obs_dict.get((cat, item), "")
                         execute(
-                            "INSERT INTO sgsst_checklist_ds594(faena_id, fecha_inspeccion, inspector, categoria, item, cumple, observacion, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                            (int(ck_faena), ck_fecha.isoformat(), ck_inspector.strip(), cat, item, 1 if cumple else 0, obs_text, now),
+                            "INSERT INTO sgsst_checklist_ds594(faena_id, fecha_inspeccion, inspector, categoria, item, cumple, created_at) VALUES(?,?,?,?,?,?,?)",
+                            (int(ck_faena), ck_fecha.isoformat(), ck_inspector.strip(), cat, item, 1 if cumple else 0, now),
                         )
                         saved += 1
                     except Exception:
-                        try:
-                            # Fallback if 'observacion' column doesn't exist yet
-                            execute(
-                                "INSERT INTO sgsst_checklist_ds594(faena_id, fecha_inspeccion, inspector, categoria, item, cumple, created_at) VALUES(?,?,?,?,?,?,?)",
-                                (int(ck_faena), ck_fecha.isoformat(), ck_inspector.strip(), cat, item, 1 if cumple else 0, now),
-                            )
-                            saved += 1
-                        except Exception:
-                            pass
-                sgsst_log("Checklist DS 594", "Guardar", f"Faena {ck_faena} · {saved} ítems · {_cumple_count}/{_total_items} cumple")
-                st.success(f"Checklist guardado: {saved} ítems registrados. Cumplimiento: {_cumple_count}/{_total_items}")
+                        pass
+                sgsst_log("Checklist DS 594", "Guardar", f"Faena {ck_faena} · {saved} ítems")
+                st.success(f"Checklist guardado: {saved} ítems registrados.")
                 st.rerun()
 
             st.divider()
@@ -731,27 +649,6 @@ def page_sgsst(
                 sgsst_log("Accidentes e incidentes", "Registrar", f"{inc_tipo} · {inc_fecha.isoformat()}")
                 st.success("Evento registrado.")
                 st.rerun()
-
-        # ── Editar / Eliminar incidentes ──────────────────────────────────
-        if df_inc is not None and not df_inc.empty:
-            with st.expander("✏️ Editar / 🗑️ Eliminar incidente"):
-                _inc_ids = df_inc["id"].tolist()
-                _sel_iid = st.selectbox("Incidente", _inc_ids, format_func=lambda x: f"#{int(x)} · {df_inc[df_inc['id']==x].iloc[0].get('tipo','')} - {df_inc[df_inc['id']==x].iloc[0].get('fecha','')}", key=K("inc_edit_id"))
-                _curr_iest = str(df_inc[df_inc['id'] == _sel_iid].iloc[0].get('estado', 'PENDIENTE'))
-                _new_iest = st.selectbox("Nuevo estado", SGSST_ESTADOS, index=SGSST_ESTADOS.index(_curr_iest) if _curr_iest in SGSST_ESTADOS else 0, key=K("inc_edit_est"))
-                _ie1, _ie2 = st.columns(2)
-                with _ie1:
-                    if st.button("Actualizar estado", key=K("inc_edit_save")):
-                        execute("UPDATE sgsst_incidentes SET estado=?, updated_at=? WHERE id=?", (_new_iest, datetime.now().isoformat(timespec='seconds'), int(_sel_iid)))
-                        sgsst_log("Incidentes", "Editar", f"#{_sel_iid} → {_new_iest}")
-                        st.success("Actualizado.")
-                        st.rerun()
-                with _ie2:
-                    if st.button("🗑️ Eliminar incidente", key=K("inc_del")):
-                        execute("DELETE FROM sgsst_incidentes WHERE id=?", (int(_sel_iid),))
-                        sgsst_log("Incidentes", "Eliminar", f"#{_sel_iid}")
-                        st.success("Eliminado.")
-                        st.rerun()
 
     with tabs[10]:
         st.markdown("### Capacitaciones y ODI")
