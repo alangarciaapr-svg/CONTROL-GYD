@@ -1,0 +1,58 @@
+name: SEGAV CI/CD
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+concurrency:
+  group: segav-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Quick setup check
+        run: python check_setup.py
+      - name: Compile critical modules
+        run: python -m py_compile streamlit_app.py core_db.py api_rest.py $(find segav_core -name '*.py' -type f | tr '\n' ' ')
+      - name: Run runtime migrations dry-run
+        run: python scripts/migrate.py
+      - name: Run tests
+        run: pytest -q
+      - name: Smoke check API + migrations
+        run: python scripts/smoke_check.py
+      - name: Production readiness summary
+        run: python scripts/check_prod_readiness.py
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release zip
+        run: |
+          mkdir -p dist
+          zip -r dist/SEGAV_ERP_release.zip . -x '*.git*' 'dist/*' '__pycache__/*' '*.pyc' '.pytest_cache/*'
+          sha256sum dist/SEGAV_ERP_release.zip > dist/SEGAV_ERP_release.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segav-erp-release
+          path: |
+            dist/SEGAV_ERP_release.zip
+            dist/SEGAV_ERP_release.zip.sha256
