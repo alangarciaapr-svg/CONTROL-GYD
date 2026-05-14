@@ -65,7 +65,7 @@ def page_export_zip(
     visible_clientes_df,
     allowed_mandante_ids=None,
 ):
-    ui_header("Export (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
+    ui_header("Exportar (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
     tenant_key = str(current_tenant_key() or current_segav_client_key() or '').strip()
     tenant_name = tenant_key
     try:
@@ -113,7 +113,7 @@ def page_export_zip(
     )
     st.session_state["selected_faena_id"] = int(faena_id)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Export por mes", "📄 Reporte Cumplimiento"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["✅ Pendientes", "📦 Generar ZIP", "🗂️ Historial", "📅 Exportar por mes", "📄 Reporte Cumplimiento"])
 
     legal_blockers, legal_warnings = _legal_export_blockers(fetch_df, int(faena_id))
 
@@ -314,7 +314,10 @@ def page_export_zip(
                 st.caption("Exportación bloqueada por documentos críticos vencidos.")
             elif st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
                 try:
-                    zip_bytes, name = export_zip_for_faena(
+                    # Si hay selección específica, no filtrar por tipo (el usuario ya eligió)
+                    _dtf = (emp_faena_sel or None) if emp_faena_doc_sel_ids is None else None
+                    _dtt = (trab_sel or None) if selected_trab_doc_map is None else None
+                    result = export_zip_for_faena(
                         int(faena_id),
                         include_global_empresa_docs=inc_emp_global,
                         include_contrato=inc_contrato,
@@ -322,17 +325,20 @@ def page_export_zip(
                         include_empresa_faena=inc_emp_faena,
                         include_trabajadores=inc_trab,
                         doc_types_empresa_global=(emp_global_sel or None),
-                        doc_types_empresa_faena=(emp_faena_sel or None),
-                        doc_types_trabajador=(trab_sel or None),
+                        doc_types_empresa_faena=_dtf,
+                        doc_types_trabajador=_dtt,
                         selected_empresa_faena_doc_ids=emp_faena_doc_sel_ids,
                         selected_trabajador_ids=selected_trab_ids,
                         selected_trabajador_doc_ids=selected_trab_doc_map,
                     )
+                    zip_bytes, name, _inc, _skip, _skip_names = result
                     path = persist_export(int(faena_id), zip_bytes, name)
-                    st.success(f"ZIP generado y guardado: {os.path.basename(path)}")
+                    st.success(f"✅ ZIP generado: {os.path.basename(path)} — {_inc} documentos incluidos")
+                    if _skip > 0:
+                        st.warning(f"⚠️ {_skip} documento(s) no pudieron incluirse (archivo no encontrado en storage): {', '.join(_skip_names[:10])}")
                     auto_backup_db("export_zip")
                     st.download_button(
-                        "Descargar ZIP (recién generado)",
+                        "📥 Descargar ZIP",
                         data=zip_bytes,
                         file_name=os.path.basename(path),
                         mime="application/zip",
