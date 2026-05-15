@@ -149,193 +149,230 @@ def page_export_zip(
             st.dataframe(legal_warnings.head(10), use_container_width=True, hide_index=True)
 
     with tab2:
-        st.markdown("### 📦 Selecciona qué incluir en el ZIP")
+        st.markdown("### 📦 Selecciona los documentos para el ZIP")
+        st.caption("Expande cada sección, revisa los documentos disponibles y desmarca los que no quieras incluir.")
 
-        cA, cB, cC = st.columns(3)
-        with cA:
-            inc_contrato = st.checkbox("Contrato de faena", value=True, key="exp_inc_contrato")
-            inc_anexos = st.checkbox("Anexos de faena", value=True, key="exp_inc_anexos")
-        with cB:
-            inc_emp_faena = st.checkbox("Docs empresa (por faena)", value=True, key="exp_inc_emp_faena")
-            inc_emp_global = st.checkbox("Docs empresa (global)", value=True, key="exp_inc_emp_global")
-        with cC:
-            inc_trab = st.checkbox("Docs trabajadores", value=True, key="exp_inc_trab")
+        # ── Collect all documents by category ──────────────────────────────
+        _total_selected = 0
 
-        st.divider()
-        st.markdown("#### (Opcional) Filtrar por tipo de documento")
+        # 1. Contrato de faena
+        contrato_row = fetch_df(
+            "SELECT id, nombre, file_path, bucket, object_path FROM contratos_faena WHERE id=(SELECT contrato_faena_id FROM faenas WHERE id=?)",
+            (int(faena_id),),
+        )
+        _has_contrato = contrato_row is not None and not contrato_row.empty and (contrato_row.iloc[0].get("file_path") or contrato_row.iloc[0].get("object_path"))
+        inc_contrato = False
+        if _has_contrato:
+            with st.expander("📑 Contrato de faena (1 archivo)", expanded=False):
+                _cname = os.path.basename(str(contrato_row.iloc[0].get("file_path") or contrato_row.iloc[0].get("object_path") or "contrato"))
+                inc_contrato = st.checkbox(f"Incluir: {_cname}", value=True, key="exp2_contrato")
+                if inc_contrato:
+                    _total_selected += 1
 
+        # 2. Anexos de faena
+        anexos_df = fetch_df("SELECT id, nombre, file_path, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        _has_anexos = anexos_df is not None and not anexos_df.empty
+        inc_anexos = False
+        sel_anexo_ids = []
+        if _has_anexos:
+            _n_anexos = len(anexos_df)
+            with st.expander(f"📎 Anexos de faena ({_n_anexos} archivo{'s' if _n_anexos != 1 else ''})", expanded=False):
+                anexo_labels = {}
+                for _, r in anexos_df.iterrows():
+                    aid = int(r["id"])
+                    aname = os.path.basename(str(r.get("nombre") or r.get("file_path") or r.get("object_path") or f"anexo_{aid}"))
+                    anexo_labels[aid] = aname
+                a_ids = list(anexo_labels.keys())
+                sel_anexo_ids = st.multiselect(
+                    "Anexos a incluir",
+                    a_ids,
+                    default=a_ids,
+                    format_func=lambda x, lb=anexo_labels: lb.get(int(x), str(x)),
+                    key="exp2_anexos_sel",
+                )
+                inc_anexos = len(sel_anexo_ids) > 0
+                _total_selected += len(sel_anexo_ids)
+
+        # 3. Documentos empresa global
         if _scope_restricted:
             _ph = ','.join(['?'] * len(_allowed_mands))
-            emp_global_types = fetch_df(f"SELECT DISTINCT doc_tipo FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY doc_tipo", tuple(_allowed_mands))
+            emp_global_df = fetch_df(
+                f"SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id IN ({_ph}) ORDER BY doc_tipo, nombre_archivo, id",
+                tuple(_allowed_mands),
+            )
         else:
-            emp_global_types = fetch_df("SELECT DISTINCT doc_tipo FROM empresa_documentos ORDER BY doc_tipo")
-        emp_global_list = emp_global_types["doc_tipo"].dropna().astype(str).tolist() if not emp_global_types.empty else []
+            emp_global_df = fetch_df("SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM empresa_documentos ORDER BY doc_tipo, nombre_archivo, id")
+        _has_emp_global = emp_global_df is not None and not emp_global_df.empty
+        sel_emp_global_ids = []
+        if _has_emp_global:
+            _n_eg = len(emp_global_df)
+            with st.expander(f"🏢 Documentos empresa global ({_n_eg} archivo{'s' if _n_eg != 1 else ''})", expanded=False):
+                eg_labels = {}
+                for _, r in emp_global_df.iterrows():
+                    did = int(r["id"])
+                    nombre = os.path.basename(str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or f"doc_{did}"))
+                    eg_labels[did] = f"{r.get('doc_tipo', '-')} · {nombre}"
+                eg_ids = list(eg_labels.keys())
+                sel_emp_global_ids = st.multiselect(
+                    "Documentos empresa global a incluir",
+                    eg_ids,
+                    default=eg_ids,
+                    format_func=lambda x, lb=eg_labels: lb.get(int(x), str(x)),
+                    key="exp2_emp_global_sel",
+                )
+                _total_selected += len(sel_emp_global_ids)
 
-        emp_faena_types = fetch_df("SELECT DISTINCT doc_tipo FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo", (int(faena_id),))
-        emp_faena_list = emp_faena_types["doc_tipo"].dropna().astype(str).tolist() if not emp_faena_types.empty else []
+        # 4. Documentos empresa por faena
+        emp_faena_df = fetch_df(
+            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, nombre_archivo, id",
+            (int(faena_id),),
+        )
+        _has_emp_faena = emp_faena_df is not None and not emp_faena_df.empty
+        emp_faena_doc_sel_ids = None
+        if _has_emp_faena:
+            _n_ef = len(emp_faena_df)
+            with st.expander(f"🏭 Documentos empresa por faena ({_n_ef} archivo{'s' if _n_ef != 1 else ''})", expanded=False):
+                ef_labels = {}
+                for _, r in emp_faena_df.iterrows():
+                    did = int(r["id"])
+                    nombre = os.path.basename(str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or f"doc_{did}"))
+                    ef_labels[did] = f"{r.get('doc_tipo', '-')} · {nombre}"
+                ef_ids = list(ef_labels.keys())
+                emp_faena_doc_sel_ids = st.multiselect(
+                    "Documentos empresa (faena) a incluir",
+                    ef_ids,
+                    default=ef_ids,
+                    format_func=lambda x, lb=ef_labels: lb.get(int(x), str(x)),
+                    key="exp2_emp_faena_sel",
+                )
+                _total_selected += len(emp_faena_doc_sel_ids)
 
-        trab_types = fetch_df('''
-            SELECT DISTINCT td.doc_tipo AS doc_tipo
-            FROM trabajador_documentos td
-            JOIN asignaciones a ON a.trabajador_id = td.trabajador_id
+        # 5. Documentos trabajadores
+        asign_df = fetch_df('''
+            SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
+            FROM asignaciones a
+            JOIN trabajadores t ON t.id=a.trabajador_id
             WHERE a.faena_id=?
               AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-            ORDER BY td.doc_tipo
+            ORDER BY t.apellidos, t.nombres
         ''', (int(faena_id),))
-        trab_list = trab_types["doc_tipo"].dropna().astype(str).tolist() if not trab_types.empty else []
-
-        colf1, colf2, colf3 = st.columns(3)
-        with colf1:
-            emp_global_sel = []
-            if inc_emp_global and emp_global_list:
-                emp_global_sel = st.multiselect("Tipos Empresa Global", emp_global_list, default=emp_global_list, key="exp_types_emp_global")
-            elif inc_emp_global and not emp_global_list:
-                st.caption("Sin docs empresa global cargados.")
-        with colf2:
-            emp_faena_sel = []
-            if inc_emp_faena and emp_faena_list:
-                emp_faena_sel = st.multiselect("Tipos Empresa por Faena", emp_faena_list, default=emp_faena_list, key="exp_types_emp_faena")
-            elif inc_emp_faena and not emp_faena_list:
-                st.caption("Sin docs empresa por faena cargados.")
-        with colf3:
-            trab_sel = []
-            if inc_trab and trab_list:
-                trab_sel = st.multiselect("Tipos Trabajador", trab_list, default=trab_list, key="exp_types_trab")
-            elif inc_trab and not trab_list:
-                st.caption("Sin docs trabajador cargados para esta faena.")
-
-        st.divider()
-        st.markdown("#### 🎯 Selección específica de documentos (opcional)")
-        st.caption("Si no activas una selección específica, el ZIP incluirá todos los documentos que cumplan los filtros anteriores.")
-
-        emp_faena_doc_sel_ids = None
+        _has_workers = asign_df is not None and not asign_df.empty
         selected_trab_ids = None
         selected_trab_doc_map = None
+        if _has_workers:
+            _n_workers = len(asign_df)
+            # Count total worker docs
+            _worker_doc_count = 0
+            _worker_doc_cache = {}
+            for _, wr in asign_df.iterrows():
+                _wid = int(wr["trabajador_id"])
+                _wdocs = fetch_df(
+                    "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
+                    (_wid,),
+                )
+                _worker_doc_cache[_wid] = _wdocs
+                if _wdocs is not None and not _wdocs.empty:
+                    _worker_doc_count += len(_wdocs)
 
-        if inc_emp_faena:
-            emp_docs = fetch_df(
-                "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM faena_empresa_documentos WHERE faena_id=? ORDER BY doc_tipo, nombre_archivo, id",
-                (int(faena_id),),
-            )
-            use_specific_emp_docs = st.checkbox(
-                "Elegir documentos específicos de empresa para esta faena",
-                value=False,
-                key="exp_use_specific_emp_docs",
-            )
-            if use_specific_emp_docs:
-                if emp_docs.empty:
-                    st.caption("No hay documentos empresa por faena cargados.")
-                    emp_faena_doc_sel_ids = []
-                else:
-                    emp_doc_labels = {}
-                    for _, row in emp_docs.iterrows():
-                        did = int(row["id"])
-                        nombre = str(row.get("nombre_archivo") or row.get("file_path") or row.get("object_path") or f"documento_{did}")
-                        nombre = os.path.basename(nombre)
-                        venc = ""
-                        emp_doc_labels[did] = f"{did} · {row.get('doc_tipo', '-')} · {nombre}{venc}"
-                    emp_ids = list(emp_doc_labels.keys())
-                    emp_faena_doc_sel_ids = st.multiselect(
-                        "Documentos empresa por faena a exportar",
-                        emp_ids,
-                        default=emp_ids,
-                        format_func=lambda x, labels=emp_doc_labels: labels.get(int(x), str(x)),
-                        key="exp_emp_faena_doc_ids",
+            with st.expander(f"👷 Documentos de trabajadores ({_n_workers} trabajadores · {_worker_doc_count} archivos)", expanded=True):
+                # Worker selection
+                worker_labels = {}
+                for _, wr in asign_df.iterrows():
+                    _wid = int(wr["trabajador_id"])
+                    _wdocs = _worker_doc_cache.get(_wid)
+                    _wdoc_n = len(_wdocs) if _wdocs is not None and not _wdocs.empty else 0
+                    worker_labels[_wid] = f"{wr['apellidos']}, {wr['nombres']} · {wr['rut']} ({_wdoc_n} docs)"
+                worker_ids = list(worker_labels.keys())
+                selected_trab_ids = st.multiselect(
+                    "Trabajadores a incluir",
+                    worker_ids,
+                    default=worker_ids,
+                    format_func=lambda x, lb=worker_labels: lb.get(int(x), str(x)),
+                    key="exp2_trab_sel",
+                )
+
+                # Per-worker document selection
+                selected_trab_doc_map = {}
+                for tid in selected_trab_ids:
+                    docs_worker = _worker_doc_cache.get(int(tid))
+                    wlabel = worker_labels.get(int(tid), str(tid))
+                    if docs_worker is None or docs_worker.empty:
+                        st.caption(f"⚠️ {wlabel}: sin documentos cargados")
+                        selected_trab_doc_map[int(tid)] = []
+                        continue
+                    doc_labels = {}
+                    for _, dr in docs_worker.iterrows():
+                        did = int(dr["id"])
+                        nombre = os.path.basename(str(dr.get("nombre_archivo") or dr.get("file_path") or dr.get("object_path") or f"doc_{did}"))
+                        doc_labels[did] = f"{dr.get('doc_tipo', '-')} · {nombre}"
+                    doc_ids = list(doc_labels.keys())
+                    selected_trab_doc_map[int(tid)] = st.multiselect(
+                        f"📄 {wlabel}",
+                        doc_ids,
+                        default=doc_ids,
+                        format_func=lambda x, lb=doc_labels: lb.get(int(x), str(x)),
+                        key=f"exp2_tdocs_{int(faena_id)}_{int(tid)}",
                     )
-                    if not emp_faena_doc_sel_ids:
-                        st.warning("No hay documentos empresa por faena seleccionados; esa carpeta quedará vacía en el ZIP.")
+                    _total_selected += len(selected_trab_doc_map[int(tid)])
 
-        if inc_trab:
-            asign_docs = fetch_df('''
-                SELECT t.id AS trabajador_id, t.rut, t.nombres, t.apellidos
-                FROM asignaciones a
-                JOIN trabajadores t ON t.id=a.trabajador_id
-                WHERE a.faena_id=?
-                  AND COALESCE(NULLIF(TRIM(a.estado), ''), 'ACTIVA')='ACTIVA'
-                ORDER BY t.apellidos, t.nombres
-            ''', (int(faena_id),))
-            use_specific_workers = st.checkbox(
-                "Elegir trabajadores específicos y sus documentos",
-                value=False,
-                key="exp_use_specific_workers",
-            )
-            if use_specific_workers:
-                if asign_docs.empty:
-                    st.caption("No hay trabajadores asignados a esta faena.")
-                    selected_trab_ids = []
-                    selected_trab_doc_map = {}
-                else:
-                    worker_labels = {}
-                    for _, row in asign_docs.iterrows():
-                        tid = int(row["trabajador_id"])
-                        worker_labels[tid] = f"{row['apellidos']}, {row['nombres']} · {row['rut']}"
-                    worker_ids = list(worker_labels.keys())
-                    selected_trab_ids = st.multiselect(
-                        "Trabajadores a incluir en el ZIP",
-                        worker_ids,
-                        default=worker_ids,
-                        format_func=lambda x, labels=worker_labels: labels.get(int(x), str(x)),
-                        key="exp_selected_trab_ids",
-                    )
-                    selected_trab_doc_map = {}
-                    for tid in selected_trab_ids:
-                        docs_worker = fetch_df(
-                            "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
-                            (int(tid),),
-                        )
-                        with st.expander(f"Documentos de {worker_labels.get(int(tid), tid)}", expanded=False):
-                            if docs_worker.empty:
-                                st.caption("Este trabajador no tiene documentos cargados.")
-                                selected_trab_doc_map[int(tid)] = []
-                            else:
-                                doc_labels = {}
-                                for _, row in docs_worker.iterrows():
-                                    did = int(row["id"])
-                                    nombre = str(row.get("nombre_archivo") or row.get("file_path") or row.get("object_path") or f"documento_{did}")
-                                    nombre = os.path.basename(nombre)
-                                    venc = ""
-                                    doc_labels[did] = f"{did} · {row.get('doc_tipo', '-')} · {nombre}{venc}"
-                                doc_ids = list(doc_labels.keys())
-                                selected_trab_doc_map[int(tid)] = st.multiselect(
-                                    "Documentos a exportar",
-                                    doc_ids,
-                                    default=doc_ids,
-                                    format_func=lambda x, labels=doc_labels: labels.get(int(x), str(x)),
-                                    key=f"exp_trab_doc_ids_{int(faena_id)}_{int(tid)}",
-                                )
-                                if not selected_trab_doc_map[int(tid)]:
-                                    st.warning("No hay documentos seleccionados para este trabajador; no se exportarán archivos de este trabajador.")
-
+        # ── Summary + Generate ─────────────────────────────────────────────
         st.divider()
-        colx1, colx2 = st.columns([1, 1])
-        with colx1:
-            if legal_blockers is not None and not legal_blockers.empty:
-                st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True, disabled=True)
+
+        # Show what's NOT available
+        _missing = []
+        if not _has_contrato:
+            _missing.append("contrato")
+        if not _has_anexos:
+            _missing.append("anexos")
+        if not _has_emp_global:
+            _missing.append("docs empresa global")
+        if not _has_emp_faena:
+            _missing.append("docs empresa por faena")
+        if not _has_workers:
+            _missing.append("trabajadores asignados")
+        if _missing:
+            st.caption(f"No disponibles para esta faena: {', '.join(_missing)}")
+
+        st.markdown(f"**Total documentos seleccionados: {_total_selected}**")
+
+        if _total_selected == 0:
+            st.info("Selecciona al menos un documento para generar el ZIP.")
+
+        col_gen, col_info = st.columns([2, 1])
+        with col_gen:
+            _blocked = legal_blockers is not None and not legal_blockers.empty
+            _disabled = _blocked or _total_selected == 0
+            if _blocked:
+                st.button("🚫 Generar ZIP", type="primary", use_container_width=True, disabled=True)
                 st.caption("Exportación bloqueada por documentos críticos vencidos.")
-            elif st.button("Generar ZIP y guardar en historial", type="primary", use_container_width=True):
+            elif st.button("📦 Generar ZIP y guardar en historial", type="primary", use_container_width=True, disabled=_disabled):
                 try:
-                    # Si hay selección específica, no filtrar por tipo (el usuario ya eligió)
-                    _dtf = (emp_faena_sel or None) if emp_faena_doc_sel_ids is None else None
-                    _dtt = (trab_sel or None) if selected_trab_doc_map is None else None
+                    # Build selection flags from user choices
+                    _inc_emp_global = len(sel_emp_global_ids) > 0
+                    _inc_emp_faena = emp_faena_doc_sel_ids is not None and len(emp_faena_doc_sel_ids) > 0
+                    _inc_trab = selected_trab_ids is not None and len(selected_trab_ids) > 0
+
                     result = export_zip_for_faena(
                         int(faena_id),
-                        include_global_empresa_docs=inc_emp_global,
+                        include_global_empresa_docs=_inc_emp_global,
                         include_contrato=inc_contrato,
                         include_anexos=inc_anexos,
-                        include_empresa_faena=inc_emp_faena,
-                        include_trabajadores=inc_trab,
-                        doc_types_empresa_global=(emp_global_sel or None),
-                        doc_types_empresa_faena=_dtf,
-                        doc_types_trabajador=_dtt,
+                        include_empresa_faena=_inc_emp_faena,
+                        include_trabajadores=_inc_trab,
+                        doc_types_empresa_global=None,
+                        doc_types_empresa_faena=None,
+                        doc_types_trabajador=None,
                         selected_empresa_faena_doc_ids=emp_faena_doc_sel_ids,
                         selected_trabajador_ids=selected_trab_ids,
                         selected_trabajador_doc_ids=selected_trab_doc_map,
+                        selected_empresa_global_doc_ids=sel_emp_global_ids if sel_emp_global_ids else None,
+                        selected_anexo_ids=sel_anexo_ids if sel_anexo_ids else None,
                     )
                     zip_bytes, name, _inc, _skip, _skip_names = result
                     path = persist_export(int(faena_id), zip_bytes, name)
-                    st.success(f"✅ ZIP generado: {os.path.basename(path)} — {_inc} documentos incluidos")
+                    st.success(f"✅ ZIP generado: **{_inc} documentos** incluidos")
                     if _skip > 0:
-                        st.warning(f"⚠️ {_skip} documento(s) no pudieron incluirse (archivo no encontrado en storage): {', '.join(_skip_names[:10])}")
+                        st.warning(f"⚠️ {_skip} documento(s) no pudieron incluirse (archivo no encontrado): {', '.join(_skip_names[:10])}")
                     auto_backup_db("export_zip")
                     st.download_button(
                         "📥 Descargar ZIP",
@@ -346,8 +383,8 @@ def page_export_zip(
                     )
                 except Exception as e:
                     st.error(f"No se pudo generar ZIP: {e}")
-        with colx2:
-            st.caption("Para conservar historial entre reboots, usa Backup / Restore.")
+        with col_info:
+            st.caption("El ZIP se guarda en Supabase Storage para que persista entre reinicios.")
 
     with tab3:
         hist = fetch_df(

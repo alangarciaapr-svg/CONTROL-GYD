@@ -3319,7 +3319,9 @@ def _export_collect_files(faena_id: int,
                           doc_types_trabajador=None,
                           selected_empresa_faena_doc_ids=None,
                           selected_trabajador_ids=None,
-                          selected_trabajador_doc_ids=None) -> list:
+                          selected_trabajador_doc_ids=None,
+                          selected_empresa_global_doc_ids=None,
+                          selected_anexo_ids=None) -> list:
     """Recopila todos los archivos para un ZIP de exportación de faena dentro del tenant activo."""
     entries = []  # list of (arcpath, file_path, bucket, object_path)
     allowed_mands = current_user_mandante_scope_ids() if 'current_user_mandante_scope_ids' in globals() else None
@@ -3344,9 +3346,11 @@ def _export_collect_files(faena_id: int,
 
     # Anexos
     if include_anexos:
-        anexos = tenant_fetch_df("SELECT nombre, file_path, bucket, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
+        anexos = tenant_fetch_df("SELECT id, nombre, file_path, bucket, object_path FROM faena_anexos WHERE faena_id=? ORDER BY id", (int(faena_id),))
         if anexos is not None and not anexos.empty:
             for _, r in anexos.iterrows():
+                if selected_anexo_ids is not None and int(r.get("id", 0)) not in selected_anexo_ids:
+                    continue
                 if r.get("file_path") or r.get("object_path"):
                     fname = str(r.get("file_path") or r.get("object_path") or 'anexo')
                     entries.append((f"Anexos/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
@@ -3354,14 +3358,17 @@ def _export_collect_files(faena_id: int,
     # Documentos empresa global
     if include_global_empresa_docs:
         if faena_mandante_id:
-            q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id=? ORDER BY doc_tipo, id"
+            q_emp = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos WHERE COALESCE(mandante_id,0)=0 OR mandante_id=? ORDER BY doc_tipo, id"
             emp_docs = tenant_fetch_df(q_emp, (int(faena_mandante_id),))
         else:
-            q_emp = "SELECT doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
+            q_emp = "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM empresa_documentos ORDER BY doc_tipo, id"
             emp_docs = tenant_fetch_df(q_emp)
         if emp_docs is not None and not emp_docs.empty:
+            _use_type_filter_eg = selected_empresa_global_doc_ids is None
             for _, r in emp_docs.iterrows():
-                if doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
+                if selected_empresa_global_doc_ids is not None and int(r["id"]) not in selected_empresa_global_doc_ids:
+                    continue
+                if _use_type_filter_eg and doc_types_empresa_global and r.get("doc_tipo") not in doc_types_empresa_global:
                     continue
                 fname = str(r.get("nombre_archivo") or r.get("file_path") or r.get("object_path") or "doc")
                 entries.append((f"Empresa_Global/{os.path.basename(fname)}", r.get("file_path"), r.get("bucket"), r.get("object_path")))
