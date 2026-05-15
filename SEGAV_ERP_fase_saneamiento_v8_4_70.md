@@ -1,15 +1,16 @@
-# SEGAV ERP — Fase de saneamiento v8.4.70
+import pandas as pd
+from segav_core.module_perms import effective_company_perms
 
-## Qué se corrigió
-- Se eliminaron definiciones duplicadas antiguas de páginas dentro de `streamlit_app.py` y se conservaron solo las últimas definiciones activas que delegan a `segav_core`.
-- Se eliminó el sombreado del nombre `bootstrap_app` para que el arranque sea más claro de mantener.
-- Se retiró un import no usado.
-- Se agregó diagnóstico liviano para algunos fallos no críticos (`soft_errors` en `st.session_state`) en vez de silenciarlos por completo.
+def test_effective_company_perms_admin_can_approve():
+    def fetch_df(q, params):
+        return pd.DataFrame()
+    perms = effective_company_perms(fetch_df, 2, 'empresa1', 'OPERADOR', {'approve_legal_docs': False, 'view_legal_audit': False, 'view_dashboard': True}, ['approve_legal_docs','view_legal_audit','view_dashboard'], 'ADMIN')
+    assert perms['approve_legal_docs'] is True
+    assert perms['view_legal_audit'] is True
 
-## Resultado esperado
-- Menor fragilidad al modificar páginas, porque ya no conviven implementaciones antiguas y wrappers activos con el mismo nombre.
-- Menor riesgo de corregir una función vieja sin afectar la usada realmente por la app.
-- Mantenimiento más claro del arranque y del sidebar.
-
-## Nota
-No se eliminaron módulos visibles ni se modificó la navegación funcional de negocio. La limpieza fue estructural y conservadora.
+def test_effective_company_perms_overrides_apply():
+    def fetch_df(q, params):
+        return pd.DataFrame([{'perms_json': '{"view_dashboard": false, "approve_legal_docs": true}'}])
+    perms = effective_company_perms(fetch_df, 2, 'empresa1', 'OPERADOR', {'approve_legal_docs': False, 'view_legal_audit': False, 'view_dashboard': True}, ['approve_legal_docs','view_legal_audit','view_dashboard'], 'LECTOR')
+    assert perms['approve_legal_docs'] is True
+    assert perms['view_dashboard'] is False

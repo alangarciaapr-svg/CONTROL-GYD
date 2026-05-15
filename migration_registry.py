@@ -1031,6 +1031,10 @@ def page_documentos_trabajador(
             st.info("(sin documentos)")
         else:
             show = docs[["doc_tipo","nombre_archivo","created_at"]].copy() if all(c in docs.columns for c in ["doc_tipo","nombre_archivo","created_at"]) else docs.copy()
+            show["disponibilidad"] = docs.apply(
+                lambda r: "✅ Storage" if (r.get("bucket") and r.get("object_path")) else "💾 Local",
+                axis=1,
+            )
             st.dataframe(show, use_container_width=True, hide_index=True)
 
             st.divider()
