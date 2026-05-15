@@ -621,7 +621,7 @@ def page_sgsst(
             _total_items = 0
             _cumple_count = 0
             for _cat_idx, (cat, items) in enumerate(_checklist_items.items()):
-                with st.expander(f"**{cat}** ({len(items)} ítems)", expanded=True):
+                with st.expander(f"**{cat}** ({len(items)} ítems)", expanded=False):
                     for idx_item, item in enumerate(items):
                         _total_items += 1
                         # Use purely numeric index-based key — no truncated names

@@ -410,7 +410,7 @@ def page_documentos_empresa_faena(
 
     with tab3:
         historial = fetch_df(
-            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
+            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
             (int(faena_id),),
         )
         if historial.empty:
@@ -418,4 +418,7 @@ def page_documentos_empresa_faena(
         else:
             historial = historial.copy()
             historial["periodo"] = historial.apply(lambda r: periodo_label(r.get("periodo_anio"), r.get("periodo_mes")), axis=1)
-            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "created_at"]], use_container_width=True, hide_index=True)
+            historial["disponibilidad"] = historial.apply(
+                lambda r: "✅ Storage" if (r.get("bucket") and r.get("object_path")) else "💾 Local", axis=1,
+            )
+            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "disponibilidad", "created_at"]], use_container_width=True, hide_index=True)

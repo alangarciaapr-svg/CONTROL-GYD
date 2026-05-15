@@ -6550,7 +6550,6 @@ PAGES = [
     "Contratos de Faena",
     "Faenas",
     "Trabajadores",
-    "Documentos Empresa",
     "Documentos Empresa (Faena)",
     "Asignar Trabajadores",
     "Documentos Trabajador",
@@ -6715,8 +6714,8 @@ with st.sidebar:
         for _page in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]:
             _sidebar_nav_button(_page, f"ops_{_page}")
 
-    with st.expander("🗂️ Documentación", expanded=st.session_state.get("nav_page") in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]):
-        for _page in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]:
+    with st.expander("🗂️ Documentación", expanded=st.session_state.get("nav_page") in ["Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]):
+        for _page in ["Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]:
             _sidebar_nav_button(_page, f"docs_{_page}")
 
     with st.expander("📈 Gestión y control", expanded=st.session_state.get("nav_page") in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]):
@@ -7702,7 +7701,7 @@ def _page_documentos_empresa_faena_impl():
 
     with tab3:
         historial = fetch_df(
-            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
+            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
             (int(faena_id),),
         )
         if historial.empty:
@@ -7710,7 +7709,10 @@ def _page_documentos_empresa_faena_impl():
         else:
             historial = historial.copy()
             historial["periodo"] = historial.apply(lambda r: periodo_label(r.get("periodo_anio"), r.get("periodo_mes")), axis=1)
-            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "created_at"]], use_container_width=True, hide_index=True)
+            historial["disponibilidad"] = historial.apply(
+                lambda r: "✅ Storage" if (r.get("bucket") and r.get("object_path")) else "💾 Local", axis=1,
+            )
+            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "disponibilidad", "created_at"]], use_container_width=True, hide_index=True)
 
 
 def _page_documentos_trabajador_impl():
@@ -7772,7 +7774,7 @@ def _page_documentos_trabajador_impl():
             return
 
         # Pendientes por faena (resumen accionable)
-        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
+        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=False):
             pend = pendientes_obligatorios(int(faena_pick))
             if not pend:
                 st.info("(sin asignaciones)")

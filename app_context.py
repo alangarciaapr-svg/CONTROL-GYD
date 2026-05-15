@@ -279,7 +279,7 @@ def page_export_zip(
                 if _wdocs is not None and not _wdocs.empty:
                     _worker_doc_count += len(_wdocs)
 
-            with st.expander(f"👷 Documentos de trabajadores ({_n_workers} trabajadores · {_worker_doc_count} archivos)", expanded=True):
+            with st.expander(f"👷 Documentos de trabajadores ({_n_workers} trabajadores · {_worker_doc_count} archivos)", expanded=False):
                 st.markdown("##### 👷 Trabajadores en esta faena")
                 # Worker selection
                 worker_labels = {}
@@ -553,7 +553,8 @@ def page_export_zip(
                 axis=1,
             )
             view["tamaño"] = view["size_bytes"].apply(human_file_size)
-            st.dataframe(view[["id", "year_month", "archivo", "tamaño", "created_at"]], use_container_width=True, hide_index=True)
+            view["ubicación"] = view.apply(lambda r: "✅ Storage" if (r.get("bucket") and r.get("object_path")) else "💾 Local", axis=1)
+            st.dataframe(view[["id", "year_month", "archivo", "tamaño", "ubicación", "created_at"]], use_container_width=True, hide_index=True)
             st.caption(f"Exportaciones mensuales visibles solo para: {tenant_name}")
 
             mid = st.selectbox(

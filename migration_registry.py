@@ -881,7 +881,7 @@ def page_documentos_trabajador(
             return
 
         # Pendientes por faena (resumen accionable)
-        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
+        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=False):
             pend = pendientes_obligatorios(int(faena_pick))
             if not pend:
                 st.info("(sin asignaciones)")
