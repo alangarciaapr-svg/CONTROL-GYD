@@ -3434,18 +3434,33 @@ def export_zip_for_faena(faena_id: int, **kwargs) -> tuple:
 
 
 def persist_export(faena_id: int, zip_bytes: bytes, zip_name: str) -> str:
-    """Guarda un ZIP de export en disco y registra en export_historial para la empresa activa."""
+    """Guarda un ZIP de export en disco + Supabase Storage y registra en export_historial."""
     tenant_key = str(current_tenant_key() or '').strip()
-    export_dir = os.path.join(UPLOAD_ROOT, "_exports", storage_safe_segment(tenant_key or 'tenant'), str(faena_id))
+    tenant_slug = storage_safe_segment(tenant_key or 'tenant')
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports", tenant_slug, str(faena_id))
     os.makedirs(export_dir, exist_ok=True)
     fpath = os.path.join(export_dir, zip_name)
     with open(fpath, "wb") as f:
         f.write(zip_bytes)
     sha = hashlib.sha256(zip_bytes).hexdigest()
     now = datetime.now().isoformat(timespec="seconds")
+
+    # Upload to Supabase Storage if available
+    bucket = None
+    obj_path = None
+    if storage_admin_enabled():
+        try:
+            obj_path = f"clientes/{tenant_slug}/_exports/{faena_id}/{zip_name}"
+            storage_upload(obj_path, zip_bytes, content_type="application/zip", upsert=True)
+            bucket = STORAGE_BUCKET
+        except Exception as _exc:
+            _record_soft_error("persist_export.storage_upload", _exc)
+            bucket = None
+            obj_path = None
+
     tenant_execute(
-        "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
-        (int(faena_id), fpath, sha, len(zip_bytes), now),
+        "INSERT INTO export_historial(faena_id, file_path, sha256, size_bytes, created_at, bucket, object_path) VALUES(?,?,?,?,?,?,?)",
+        (int(faena_id), fpath, sha, len(zip_bytes), now, bucket, obj_path),
     )
     return fpath
 
@@ -3510,9 +3525,10 @@ def export_zip_for_mes(year: int, month: int, include_global_empresa_docs: bool 
 
 
 def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
-    """Guarda un ZIP de export mensual para la empresa activa y registra en export_historial_mes."""
+    """Guarda un ZIP de export mensual en disco + Supabase Storage y registra en export_historial_mes."""
     tenant_key = str(current_tenant_key() or '').strip()
-    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes", storage_safe_segment(tenant_key or 'tenant'))
+    tenant_slug = storage_safe_segment(tenant_key or 'tenant')
+    export_dir = os.path.join(UPLOAD_ROOT, "_exports_mes", tenant_slug)
     os.makedirs(export_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"export_mes_{ym}_{ts}.zip"
@@ -3521,9 +3537,23 @@ def persist_export_mes(ym: str, zip_bytes: bytes) -> str:
         f.write(zip_bytes)
     sha = hashlib.sha256(zip_bytes).hexdigest()
     now = datetime.now().isoformat(timespec="seconds")
+
+    # Upload to Supabase Storage if available
+    bucket = None
+    obj_path = None
+    if storage_admin_enabled():
+        try:
+            obj_path = f"clientes/{tenant_slug}/_exports_mes/{fname}"
+            storage_upload(obj_path, zip_bytes, content_type="application/zip", upsert=True)
+            bucket = STORAGE_BUCKET
+        except Exception as _exc:
+            _record_soft_error("persist_export_mes.storage_upload", _exc)
+            bucket = None
+            obj_path = None
+
     tenant_execute(
-        "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at) VALUES(?,?,?,?,?)",
-        (ym, fpath, sha, len(zip_bytes), now),
+        "INSERT INTO export_historial_mes(year_month, file_path, sha256, size_bytes, created_at, bucket, object_path) VALUES(?,?,?,?,?,?,?)",
+        (ym, fpath, sha, len(zip_bytes), now, bucket, obj_path),
     )
     return fpath
 
@@ -8214,7 +8244,7 @@ def _page_export_zip_impl():
             try:
                 b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
                 st.download_button(
-                    "Descargar ZIP del historial",
+                    "📥 Descargar ZIP del historial",
                     data=b,
                     file_name=row["archivo"],
                     mime="application/zip",
@@ -8222,7 +8252,15 @@ def _page_export_zip_impl():
                     key="exp_hist_dl",
                 )
             except Exception as e:
-                st.warning(f"No se pudo abrir el ZIP guardado: {e}")
+                _has_storage = bool(row.get("bucket")) and bool(row.get("object_path"))
+                if _has_storage:
+                    st.error(f"No se pudo descargar el ZIP desde Storage: {e}")
+                else:
+                    st.warning(
+                        "Este ZIP fue guardado solo en disco local y se perdió cuando Streamlit reinició. "
+                        "Los ZIPs nuevos se guardarán en Supabase Storage automáticamente."
+                    )
+                    st.caption("Genera el ZIP de nuevo desde la pestaña **Generar ZIP**.")
 
     with tab4:
         st.markdown("### 📅 Export por mes")

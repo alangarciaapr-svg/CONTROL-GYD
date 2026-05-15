@@ -382,7 +382,7 @@ def page_export_zip(
             try:
                 b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
                 st.download_button(
-                    "Descargar ZIP del historial",
+                    "📥 Descargar ZIP del historial",
                     data=b,
                     file_name=row["archivo"],
                     mime="application/zip",
@@ -390,7 +390,16 @@ def page_export_zip(
                     key="exp_hist_dl",
                 )
             except Exception as e:
-                st.warning(f"No se pudo abrir el ZIP guardado: {e}")
+                _has_storage = bool(row.get("bucket")) and bool(row.get("object_path"))
+                if _has_storage:
+                    st.error(f"No se pudo descargar el ZIP desde Storage: {e}")
+                    st.caption("El archivo existe en Supabase Storage pero hubo un error de conexión. Intenta de nuevo en unos segundos.")
+                else:
+                    st.warning(
+                        "Este ZIP fue guardado solo en disco local y se perdió cuando Streamlit reinició. "
+                        "Los ZIPs generados a partir de ahora se guardarán en Supabase Storage para que persistan entre reinicios."
+                    )
+                    st.caption("Ve a la pestaña **Generar ZIP** para volver a exportar esta faena.")
 
     with tab4:
         st.markdown("### 📅 Export por mes")
@@ -453,7 +462,7 @@ def page_export_zip(
             try:
                 b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
                 st.download_button(
-                    "Descargar ZIP mensual del historial",
+                    "📥 Descargar ZIP mensual del historial",
                     data=b,
                     file_name=row["archivo"],
                     mime="application/zip",
@@ -461,7 +470,14 @@ def page_export_zip(
                     key="exp_mes_hist_dl",
                 )
             except Exception as e:
-                st.warning(f"No se pudo abrir el ZIP mensual guardado: {e}")
+                _has_storage = bool(row.get("bucket")) and bool(row.get("object_path"))
+                if _has_storage:
+                    st.error(f"No se pudo descargar el ZIP desde Storage: {e}")
+                else:
+                    st.warning(
+                        "Este ZIP mensual fue guardado solo en disco local y se perdió cuando Streamlit reinició. "
+                        "Los ZIPs nuevos se guardarán en Supabase Storage automáticamente."
+                    )
 
     with tab5:
         st.markdown("### 📄 Reporte de Cumplimiento por Faena")
