@@ -64,6 +64,9 @@ def page_export_zip(
     current_segav_client_key,
     visible_clientes_df,
     allowed_mandante_ids=None,
+    execute=None,
+    is_superadmin=None,
+    audit_log=None,
 ):
     ui_header("Exportar (ZIP)", "Genera carpeta por faena con documentos de trabajadores y deja historial.")
     tenant_key = str(current_tenant_key() or current_segav_client_key() or '').strip()
@@ -261,13 +264,13 @@ def page_export_zip(
         selected_trab_doc_map = None
         if _has_workers:
             _n_workers = len(asign_df)
-            # Count total worker docs
+            # Count total worker docs (use uncached to ensure fresh data)
             _worker_doc_count = 0
             _worker_doc_cache = {}
             for _, wr in asign_df.iterrows():
                 _wid = int(wr["trabajador_id"])
                 _wdocs = fetch_df(
-                    "SELECT id, doc_tipo, nombre_archivo, file_path, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
+                    "SELECT id, doc_tipo, nombre_archivo, file_path, bucket, object_path FROM trabajador_documentos WHERE trabajador_id=? ORDER BY doc_tipo, nombre_archivo, id",
                     (_wid,),
                 )
                 _worker_doc_cache[_wid] = _wdocs
@@ -275,6 +278,7 @@ def page_export_zip(
                     _worker_doc_count += len(_wdocs)
 
             with st.expander(f"👷 Documentos de trabajadores ({_n_workers} trabajadores · {_worker_doc_count} archivos)", expanded=True):
+                st.markdown("##### 👷 Trabajadores en esta faena")
                 # Worker selection
                 worker_labels = {}
                 for _, wr in asign_df.iterrows():
@@ -284,15 +288,19 @@ def page_export_zip(
                     worker_labels[_wid] = f"{wr['apellidos']}, {wr['nombres']} · {wr['rut']} ({_wdoc_n} docs)"
                 worker_ids = list(worker_labels.keys())
                 selected_trab_ids = st.multiselect(
-                    "Trabajadores a incluir",
+                    "Selecciona los trabajadores que deseas incluir en el ZIP",
                     worker_ids,
                     default=worker_ids,
                     format_func=lambda x, lb=worker_labels: lb.get(int(x), str(x)),
                     key="exp2_trab_sel",
+                    label_visibility="collapsed",
                 )
+
+                st.caption(f"{len(selected_trab_ids)} de {_n_workers} trabajadores seleccionados")
 
                 # Per-worker document selection
                 selected_trab_doc_map = {}
+                _total_worker_docs_selected = 0
                 for tid in selected_trab_ids:
                     docs_worker = _worker_doc_cache.get(int(tid))
                     wlabel = worker_labels.get(int(tid), str(tid))
@@ -313,7 +321,10 @@ def page_export_zip(
                         format_func=lambda x, lb=doc_labels: lb.get(int(x), str(x)),
                         key=f"exp2_tdocs_{int(faena_id)}_{int(tid)}",
                     )
+                    _total_worker_docs_selected += len(selected_trab_doc_map[int(tid)])
                     _total_selected += len(selected_trab_doc_map[int(tid)])
+
+                st.caption(f"📊 {_total_worker_docs_selected} documentos de trabajadores seleccionados")
 
         # ── Summary + Generate ─────────────────────────────────────────────
         st.divider()
@@ -387,6 +398,7 @@ def page_export_zip(
             st.caption("El ZIP se guarda en Supabase Storage para que persista entre reinicios.")
 
     with tab3:
+        _is_sa = is_superadmin() if callable(is_superadmin) else False
         hist = fetch_df(
             """
             SELECT eh.id, eh.faena_id, f.nombre AS faena_nombre, eh.file_path, eh.bucket, eh.object_path,
@@ -405,38 +417,90 @@ def page_export_zip(
                 axis=1,
             )
             view["tamaño"] = view["size_bytes"].apply(human_file_size)
-            show_cols = ["id", "faena_id", "faena_nombre", "archivo", "tamaño", "created_at"]
+            _storage_col = view.apply(lambda r: "✅ Storage" if r.get("bucket") else "⚠️ Solo local", axis=1)
+            view["ubicación"] = _storage_col
+            show_cols = ["id", "faena_nombre", "archivo", "tamaño", "ubicación", "created_at"]
             st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
             st.caption(f"Historial acotado a la empresa activa: {tenant_name}")
 
             hid = st.selectbox(
                 "ZIP del historial",
                 view["id"].tolist(),
-                format_func=lambda x: f"{int(x)} - {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['created_at']})",
+                format_func=lambda x: f"{int(x)} — {view[view['id']==x].iloc[0]['archivo']} ({view[view['id']==x].iloc[0]['created_at']})",
                 key="exp_hist_pick",
             )
             row = view[view["id"] == hid].iloc[0]
-            try:
-                b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
-                st.download_button(
-                    "📥 Descargar ZIP del historial",
-                    data=b,
-                    file_name=row["archivo"],
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="exp_hist_dl",
-                )
-            except Exception as e:
-                _has_storage = bool(row.get("bucket")) and bool(row.get("object_path"))
-                if _has_storage:
-                    st.error(f"No se pudo descargar el ZIP desde Storage: {e}")
-                    st.caption("El archivo existe en Supabase Storage pero hubo un error de conexión. Intenta de nuevo en unos segundos.")
-                else:
-                    st.warning(
-                        "Este ZIP fue guardado solo en disco local y se perdió cuando Streamlit reinició. "
-                        "Los ZIPs generados a partir de ahora se guardarán en Supabase Storage para que persistan entre reinicios."
+
+            col_dl, col_del = st.columns([2, 1])
+            with col_dl:
+                try:
+                    b = load_file_anywhere(row.get("file_path"), row.get("bucket"), row.get("object_path"))
+                    st.download_button(
+                        "📥 Descargar ZIP del historial",
+                        data=b,
+                        file_name=row["archivo"],
+                        mime="application/zip",
+                        use_container_width=True,
+                        key="exp_hist_dl",
                     )
-                    st.caption("Ve a la pestaña **Generar ZIP** para volver a exportar esta faena.")
+                except Exception as e:
+                    _has_storage = bool(row.get("bucket")) and bool(row.get("object_path"))
+                    if _has_storage:
+                        st.error(f"No se pudo descargar el ZIP desde Storage: {e}")
+                        st.caption("El archivo existe en Supabase Storage pero hubo un error de conexión. Intenta de nuevo en unos segundos.")
+                    else:
+                        st.warning(
+                            "Este ZIP fue guardado solo en disco local y se perdió cuando Streamlit reinició. "
+                            "Los ZIPs generados a partir de ahora se guardarán en Supabase Storage para que persistan entre reinicios."
+                        )
+                        st.caption("Ve a la pestaña **Generar ZIP** para volver a exportar esta faena.")
+            with col_del:
+                if _is_sa:
+                    if st.button("🗑️ Eliminar registro", key=f"exp_hist_del_{int(hid)}", type="secondary", use_container_width=True):
+                        st.session_state[f"_confirm_del_hist_{int(hid)}"] = True
+                    if st.session_state.get(f"_confirm_del_hist_{int(hid)}"):
+                        st.warning(f"¿Eliminar el registro #{int(hid)} del historial?")
+                        c_yes, c_no = st.columns(2)
+                        with c_yes:
+                            if st.button("Sí, eliminar", key=f"exp_hist_del_yes_{int(hid)}", type="primary", use_container_width=True):
+                                try:
+                                    if callable(execute):
+                                        execute(f"DELETE FROM export_historial WHERE id=?", (int(hid),))
+                                    if callable(audit_log):
+                                        audit_log("ELIMINAR_EXPORT", "export_historial", f"Registro #{int(hid)} eliminado")
+                                    st.success("Registro eliminado del historial.")
+                                    st.session_state.pop(f"_confirm_del_hist_{int(hid)}", None)
+                                    st.rerun()
+                                except Exception as _del_exc:
+                                    st.error(f"Error al eliminar: {_del_exc}")
+                        with c_no:
+                            if st.button("Cancelar", key=f"exp_hist_del_no_{int(hid)}", use_container_width=True):
+                                st.session_state.pop(f"_confirm_del_hist_{int(hid)}", None)
+                                st.rerun()
+
+            # Bulk delete for superadmin
+            if _is_sa and len(view) > 1:
+                st.divider()
+                with st.expander("🗑️ Eliminar registros en lote (superadmin)", expanded=False):
+                    _del_ids = st.multiselect(
+                        "Selecciona registros a eliminar",
+                        view["id"].tolist(),
+                        format_func=lambda x: f"#{int(x)} — {view[view['id']==x].iloc[0]['archivo']}",
+                        key="exp_hist_bulk_del",
+                    )
+                    if _del_ids and st.button(f"🗑️ Eliminar {len(_del_ids)} registro(s)", type="primary", use_container_width=True, key="exp_hist_bulk_del_btn"):
+                        _deleted = 0
+                        for _did in _del_ids:
+                            try:
+                                if callable(execute):
+                                    execute("DELETE FROM export_historial WHERE id=?", (int(_did),))
+                                    _deleted += 1
+                            except Exception:
+                                pass
+                        if callable(audit_log):
+                            audit_log("ELIMINAR_EXPORT_LOTE", "export_historial", f"{_deleted} registros eliminados")
+                        st.success(f"✅ {_deleted} registro(s) eliminados del historial.")
+                        st.rerun()
 
     with tab4:
         st.markdown("### 📅 Export por mes")

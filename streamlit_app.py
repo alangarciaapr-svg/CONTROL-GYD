@@ -9308,7 +9308,7 @@ def page_documentos_trabajador():
 
 
 def page_export_zip():
-    return _ops_exports.page_export_zip(st=st, allowed_mandante_ids=current_user_mandante_scope_ids(), ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date, current_tenant_key=current_tenant_key, current_segav_client_key=current_segav_client_key, visible_clientes_df=visible_clientes_df)
+    return _ops_exports.page_export_zip(st=st, allowed_mandante_ids=current_user_mandante_scope_ids(), ui_header=ui_header, ui_tip=ui_tip, fetch_df=tenant_fetch_df, pendientes_obligatorios=pendientes_obligatorios, pendientes_empresa_faena=pendientes_empresa_faena, doc_tipo_join=doc_tipo_join, export_zip_for_faena=export_zip_for_faena, persist_export=persist_export, auto_backup_db=auto_backup_db, load_file_anywhere=load_file_anywhere, human_file_size=human_file_size, export_zip_for_mes=export_zip_for_mes, persist_export_mes=persist_export_mes, os=os, date=date, current_tenant_key=current_tenant_key, current_segav_client_key=current_segav_client_key, visible_clientes_df=visible_clientes_df, execute=tenant_execute, is_superadmin=is_superadmin, audit_log=audit_log)
 
 
 def page_sgsst():
