@@ -6550,6 +6550,7 @@ PAGES = [
     "Contratos de Faena",
     "Faenas",
     "Trabajadores",
+    "Documentos Empresa",
     "Documentos Empresa (Faena)",
     "Asignar Trabajadores",
     "Documentos Trabajador",
@@ -6705,51 +6706,28 @@ with st.sidebar:
         _active = st.session_state.get("nav_page") == page_name
         _label = PAGE_LABELS.get(page_name, page_name)
         if _active:
-            _label = f"▸ {_label}"
+            _label = f"• {_label}"
         if st.button(_label, key=f"sidebar_nav_{key_suffix}", use_container_width=True, disabled=_disabled):
             st.session_state["nav_page"] = page_name
             st.rerun()
 
-    # ── Accordion sidebar: only one section open at a time ──────────────
-    _NAV_SECTIONS = {
-        "ops": ("🧭 Operación", ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]),
-        "docs": ("🗂️ Documentación", ["Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]),
-        "ctrl": ("📈 Gestión y control", ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]),
-    }
+    with st.expander("🧭 Operación", expanded=st.session_state.get("nav_page") in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]):
+        for _page in ["Mandantes", "Contratos de Faena", "Faenas", "Trabajadores", "Asignar Trabajadores"]:
+            _sidebar_nav_button(_page, f"ops_{_page}")
+
+    with st.expander("🗂️ Documentación", expanded=st.session_state.get("nav_page") in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]):
+        for _page in ["Documentos Empresa", "Documentos Empresa (Faena)", "Documentos Trabajador", "Exportar (ZIP)", "Backup / Restore"]:
+            _sidebar_nav_button(_page, f"docs_{_page}")
+
+    with st.expander("📈 Gestión y control", expanded=st.session_state.get("nav_page") in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]):
+        for _page in ["Dashboard", "Cumplimiento / Alertas", "Mi Empresa / SGSST", "Aprobaciones / Auditoría legal", "Auditoría de acciones", "Arquitectura / Escalabilidad", "Mi Perfil"]:
+            _sidebar_nav_button(_page, f"ctrl_{_page}")
+
     if is_superadmin() or has_perm("manage_users"):
-        _NAV_SECTIONS["admin"] = ("🔐 Administración", ["Admin Usuarios", "SuperAdmin / Empresas"])
-
-    # Auto-detect which section should be open based on current page
-    _current_page = st.session_state.get("nav_page", "Dashboard")
-    _auto_section = None
-    for _sec_key, (_sec_label, _sec_pages) in _NAV_SECTIONS.items():
-        if _current_page in _sec_pages:
-            _auto_section = _sec_key
-            break
-
-    # Use session_state to track which section is open (default: auto from current page)
-    if "_sidebar_open_section" not in st.session_state or st.session_state.get("_sidebar_open_section") is None:
-        st.session_state["_sidebar_open_section"] = _auto_section
-
-    # If user navigated to a page in a different section, auto-switch
-    if _auto_section and st.session_state.get("_sidebar_open_section") != _auto_section:
-        st.session_state["_sidebar_open_section"] = _auto_section
-
-    _open_section = st.session_state.get("_sidebar_open_section")
-
-    for _sec_key, (_sec_label, _sec_pages) in _NAV_SECTIONS.items():
-        _is_open = (_open_section == _sec_key)
-        _header_icon = "▼" if _is_open else "▶"
-        if st.button(f"{_header_icon} {_sec_label}", key=f"sidebar_section_{_sec_key}", use_container_width=True):
-            if _is_open:
-                st.session_state["_sidebar_open_section"] = None  # collapse
-            else:
-                st.session_state["_sidebar_open_section"] = _sec_key  # open this, close others
-            st.rerun()
-        if _is_open:
-            for _page in _sec_pages:
+        with st.expander("🔐 Administración", expanded=st.session_state.get("nav_page") in ["Admin Usuarios", "SuperAdmin / Empresas"]):
+            for _page in ["Admin Usuarios", "SuperAdmin / Empresas"]:
                 if _page in VISIBLE_PAGES:
-                    _sidebar_nav_button(_page, f"{_sec_key}_{_page}")
+                    _sidebar_nav_button(_page, f"admin_{_page}")
 
     if u and st.button("Cerrar sesión", use_container_width=True, key="sidebar_logout_main"):
         auth_logout()
@@ -7724,7 +7702,7 @@ def _page_documentos_empresa_faena_impl():
 
     with tab3:
         historial = fetch_df(
-            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, bucket, object_path, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
+            "SELECT id, periodo_anio, periodo_mes, doc_tipo, nombre_archivo, created_at FROM faena_empresa_documentos WHERE faena_id=? ORDER BY COALESCE(periodo_anio,0) DESC, COALESCE(periodo_mes,0) DESC, id DESC",
             (int(faena_id),),
         )
         if historial.empty:
@@ -7732,9 +7710,7 @@ def _page_documentos_empresa_faena_impl():
         else:
             historial = historial.copy()
             historial["periodo"] = historial.apply(lambda r: periodo_label(r.get("periodo_anio"), r.get("periodo_mes")), axis=1)
-            from segav_core.ui import add_availability_column as _add_avail
-            _add_avail(historial)
-            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "disponibilidad", "created_at"]], use_container_width=True, hide_index=True)
+            st.dataframe(historial[["periodo", "doc_tipo", "nombre_archivo", "created_at"]], use_container_width=True, hide_index=True)
 
 
 def _page_documentos_trabajador_impl():
@@ -7796,7 +7772,7 @@ def _page_documentos_trabajador_impl():
             return
 
         # Pendientes por faena (resumen accionable)
-        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=False):
+        with st.expander("✅ Pendientes de la faena (por trabajador)", expanded=True):
             pend = pendientes_obligatorios(int(faena_pick))
             if not pend:
                 st.info("(sin asignaciones)")
